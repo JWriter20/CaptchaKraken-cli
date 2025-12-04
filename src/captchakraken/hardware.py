@@ -21,8 +21,10 @@ def get_ram_size_gb():
         return 0
 
 def get_vram_size_gb():
-    # Returns VRAM in GB for Nvidia. 
-    # Returns 0 if no GPU found or not Nvidia.
+    # Returns VRAM in GB for Nvidia or AMD (ROCm). 
+    # Returns 0 if no GPU found.
+    
+    # 1. Check Nvidia
     if shutil.which("nvidia-smi"):
         try:
             out = subprocess.check_output(["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"]).strip()
@@ -30,7 +32,22 @@ def get_vram_size_gb():
             lines = out.decode('utf-8').split('\n')
             return int(lines[0]) / 1024
         except Exception:
-            return 0
+            pass
+
+    # 2. Check AMD ROCm
+    if shutil.which("rocm-smi"):
+        try:
+            # Output format example: "GPU[0] : VRAM Total Memory (B): 25752035328"
+            out = subprocess.check_output(["rocm-smi", "--showmeminfo", "vram"]).decode('utf-8')
+            for line in out.splitlines():
+                if "VRAM Total Memory (B)" in line:
+                    parts = line.split(":")
+                    # The last part should be the bytes
+                    bytes_val = int(parts[-1].strip())
+                    return bytes_val / (1024**3)
+        except Exception:
+            pass
+            
     return 0
 
 def is_apple_silicon():
@@ -79,7 +96,7 @@ def check_requirements():
             else:
                  return False, f"VRAM: {vram_gb:.1f}GB < {model_size_gb}GB"
         else:
-            return False, "No capable Nvidia GPU detected (and not Unified Memory)."
+            return False, "No capable Discrete GPU detected (Nvidia/ROCm) and not Unified Memory."
 
     return False, "Unknown state"
 
