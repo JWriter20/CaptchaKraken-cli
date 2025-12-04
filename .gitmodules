@@ -1,0 +1,3 @@
+[submodule "omniparser"]
+	path = omniparser
+	url = https://github.com/microsoft/OmniParser.git

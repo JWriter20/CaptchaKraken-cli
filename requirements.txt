@@ -1,0 +1,17 @@
+pytest>=7.0.0
+pydantic>=2.0.0
+pillow>=10.0.0
+openai>=1.0.0
+torch
+torchvision
+supervision==0.18.0
+ultralytics==8.3.70
+transformers
+easyocr
+numpy
+opencv-python-headless
+accelerate
+timm
+einops
+huggingface_hub
+ollama
