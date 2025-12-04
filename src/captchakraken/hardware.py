@@ -2,6 +2,7 @@ import sys
 import platform
 import subprocess
 import shutil
+import glob
 
 def get_ram_size_gb():
     # Returns RAM in GB
@@ -48,6 +49,22 @@ def get_vram_size_gb():
         except Exception:
             pass
             
+    # 3. Check AMD Sysfs (amdgpu driver)
+    try:
+        # Common path for recent kernels with amdgpu
+        for path in glob.glob('/sys/class/drm/card*/device/mem_info_vram_total'):
+            try:
+                with open(path, 'r') as f:
+                    # Value is in bytes
+                    bytes_val = int(f.read().strip())
+                    gb = bytes_val / (1024**3)
+                    if gb > 0:
+                        return gb
+            except:
+                continue
+    except:
+        pass
+
     return 0
 
 def is_apple_silicon():
