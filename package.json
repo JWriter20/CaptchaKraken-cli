@@ -8,9 +8,8 @@
     "build": "tsc",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "dependencies": {},
   "devDependencies": {
-    "typescript": "^5.0.0",
-    "@types/node": "^20.0.0"
+    "@types/node": "^20.19.25",
+    "typescript": "^5.0.0"
   }
 }

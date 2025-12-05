@@ -1,17 +1,20 @@
-pytest>=7.0.0
+# Core dependencies
 pydantic>=2.0.0
 pillow>=10.0.0
-openai>=1.0.0
-torch
-torchvision
-supervision==0.18.0
-ultralytics==8.3.70
-transformers
-easyocr
-numpy
-opencv-python-headless
-accelerate
-timm
-einops
-huggingface_hub
-ollama
+numpy>=1.24.0
+
+# LLM backends
+ollama>=0.3.0          # Local LLM inference via Ollama
+openai>=1.0.0          # OpenAI API support
+
+# Transformers for attention extraction
+torch>=2.0.0
+transformers>=4.40.0
+accelerate>=0.27.0
+
+# Visualization
+matplotlib>=3.7.0
+scipy>=1.10.0
+
+# Testing
+pytest>=7.0.0

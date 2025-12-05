@@ -4,6 +4,7 @@ venv/
 .venv/
 env/
 dist
+.hf_cache/
 
 # Python
 __pycache__/
@@ -39,3 +40,8 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+# Test artifacts
+test_output_*.png
+test_*.png
+!captchaimages/*.png
+attention_heatmap.png

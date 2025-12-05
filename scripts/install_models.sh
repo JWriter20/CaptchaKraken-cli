@@ -1,7 +1,9 @@
 #!/bin/bash
 
 # scripts/install_models.sh
-# Installs Ollama and sets up Holo2 and Qwen3-VL models based on system RAM.
+# Installs dependencies for CaptchaKraken's two-stage architecture:
+# 1. Action Planner: Uses Ollama or OpenAI for action planning
+# 2. Attention Extractor: Uses small VLMs via transformers for coordinate extraction
 
 set -e
 
@@ -10,123 +12,137 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
-echo "=== CaptchaKraken Model Installer ==="
+echo "=== CaptchaKraken Setup ==="
+echo ""
 
 # Get script directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 
-# Check Hardware Requirements
-if command_exists python3; then
-    echo "[*] Checking hardware requirements..."
-    if ! python3 "$SCRIPT_DIR/check_hw.py"; then
-        echo ""
-        echo "Error: Hardware requirements not met for local models."
-        echo "Please configure the application to use an external API (e.g., OpenAI)."
-        exit 1
-    fi
-else
-    echo "Warning: Python3 not found. Skipping hardware check."
-fi
-
-# 1. Install Ollama if not present
-if ! command_exists ollama; then
-    echo "[*] Ollama not found. Installing..."
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        if command_exists brew; then
-            echo "[*] macOS detected. Installing Ollama via Homebrew..."
-            brew install ollama
-        else
-            echo "Error: Homebrew not found. Please install Homebrew or install Ollama manually."
-            exit 1
-        fi
-    elif [[ "$OSTYPE" == "linux"* ]]; then
-        curl -fsSL https://ollama.com/install.sh | sh
-    else
-        echo "Error: Unsupported OS for automatic installation."
-        echo "Please install Ollama manually from https://ollama.com"
-        exit 1
-    fi
-else
-    echo "[*] Ollama is already installed."
-fi
-
-# 2. Ensure Ollama Server is running
-if ! pgrep -x "ollama" > /dev/null && ! pgrep -f "ollama serve" > /dev/null; then
-    echo "[*] Starting Ollama server..."
-    ollama serve > /dev/null 2>&1 &
-    OLLAMA_PID=$!
-    # Wait for server to start
-    echo "    Waiting for Ollama to initialize..."
-    sleep 5
-else
-    echo "[*] Ollama server is running."
-fi
-
-# 3. Detect RAM
+# 1. Detect OS
 OS="$(uname -s)"
-if [ "$OS" = "Darwin" ]; then
-    RAM_BYTES=$(sysctl -n hw.memsize)
-elif [ "$OS" = "Linux" ]; then
-    RAM_BYTES=$(grep MemTotal /proc/meminfo | awk '{print $2 * 1024}')
-else
-    echo "Warning: Cannot detect RAM. Defaulting to 8GB assumption."
-    RAM_BYTES=8589934592
-fi
 
-RAM_GB=$((RAM_BYTES / 1024 / 1024 / 1024))
-echo "[*] Detected System RAM: ${RAM_GB} GB"
+# 2. Setup Virtual Environment
+echo "[1/4] Setting up Python environment..."
 
-# 4. Select Models
-# Logic:
-# < 16GB:  Holo2 4B, Qwen3-VL 2B/4B
-# 16-32GB: Holo2 8B, Qwen3-VL 8B
-# > 32GB:  Holo2 30B, Qwen3-VL 32B (or largest available)
-
-HOLO_MODEL=""
-QWEN_MODEL=""
-
-if [ "$RAM_GB" -lt 16 ]; then
-    echo "    -> Low RAM detected (<16GB). Selecting lightweight models."
-    HOLO_MODEL="holo2:4b"
-    QWEN_MODEL="qwen3-vl:2b" # 2B is very safe for low RAM
-elif [ "$RAM_GB" -lt 32 ]; then
-    echo "    -> Medium RAM detected (16-32GB). Selecting balanced models."
-    HOLO_MODEL="holo2:8b"
-    QWEN_MODEL="qwen3-vl:8b"
-else
-    echo "    -> High RAM detected (>32GB). Selecting performance models."
-    HOLO_MODEL="holo2:30b"
-    QWEN_MODEL="qwen3-vl:32b" 
-    # Fallback note: if 32b doesn't exist in registry, user might need 8b or manual pull.
-    # We'll stick to the request to be intelligent.
-fi
-
-# 5. Pull Models
-pull_model() {
-    local model=$1
-    echo "[*] Pulling model: $model"
-    if ollama pull "$model"; then
-        echo "    Successfully pulled $model"
-    else
-        echo "    Error: Failed to pull $model. It might not be in the registry yet or network issue."
-        echo "    Trying generic tag..."
-        # Fallback logic could go here, e.g. pulling 'qwen3-vl' without size
-        local generic_model=$(echo $model | cut -d: -f1)
-        if [ "$generic_model" != "$model" ]; then
-             echo "    Attempting fallback to generic tag: $generic_model"
-             ollama pull "$generic_model" || echo "    Fallback failed."
-        fi
+if [[ -z "$VIRTUAL_ENV" ]]; then
+    echo "    No active virtual environment detected."
+    
+    VENV_PATH="$PROJECT_ROOT/venv"
+    
+    if [ ! -d "$VENV_PATH" ]; then
+        echo "    Creating virtual environment at $VENV_PATH..."
+        python3 -m venv "$VENV_PATH"
     fi
-}
+    
+    echo "    Activating virtual environment..."
+    source "$VENV_PATH/bin/activate"
+else
+    echo "    Using active virtual environment: $VIRTUAL_ENV"
+fi
 
-pull_model "$HOLO_MODEL"
-pull_model "$QWEN_MODEL"
+# 3. Install Python dependencies
+echo ""
+echo "[2/4] Installing Python packages..."
+
+if command_exists pip; then
+    pip install --upgrade pip
+    
+    # Detect GPU type and install appropriate PyTorch
+    if command_exists nvidia-smi; then
+        echo "    NVIDIA GPU detected, installing CUDA PyTorch..."
+        pip install torch torchvision
+    elif command_exists rocm-smi || [ -d "/opt/rocm" ]; then
+        echo "    AMD GPU detected, installing ROCm PyTorch..."
+        pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2
+    elif [ "$OS" = "Darwin" ]; then
+        echo "    macOS detected, installing MPS-enabled PyTorch..."
+        pip install torch torchvision
+    else
+        echo "    No GPU detected, installing CPU PyTorch..."
+        pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+    fi
+    
+    # Install core dependencies
+    pip install transformers accelerate pillow pydantic numpy scipy ollama openai
+    echo "    ✓ Python packages installed"
+else
+    echo "    Error: 'pip' not found."
+    exit 1
+fi
+
+# 4. Setup Ollama (optional but recommended)
+echo ""
+echo "[3/4] Checking Ollama setup..."
+
+if command_exists ollama; then
+    echo "    ✓ Ollama is installed"
+    
+    # Check if ollama is running
+    if curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
+        echo "    ✓ Ollama server is running"
+        
+        # Pull recommended models
+        echo "    Pulling recommended models (this may take a while)..."
+        
+        echo "    → Pulling gemma-3 (action planning)..."
+        ollama pull hf.co/unsloth/gemma-3-12b-it-GGUF:Q4_K_M 2>/dev/null || echo "      ⚠ Could not pull gemma-3, you can do this manually"
+    else
+        echo "    ⚠ Ollama is installed but not running."
+        echo "      Start it with: ollama serve"
+    fi
+else
+    echo "    ⚠ Ollama is not installed."
+    echo "      For local inference, install from: https://ollama.ai"
+    echo "      Alternatively, use OpenAI API by setting OPENAI_API_KEY"
+fi
+
+# 5. Verify installation
+echo ""
+echo "[4/4] Verifying installation..."
+
+cd "$PROJECT_ROOT"
+python3 -c "
+import sys
+print(f'Python {sys.version}')
+
+try:
+    import torch
+    device = 'cuda' if torch.cuda.is_available() else ('mps' if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available() else 'cpu')
+    print(f'PyTorch {torch.__version__} ({device})')
+except ImportError:
+    print('PyTorch: NOT INSTALLED')
+    
+try:
+    import transformers
+    print(f'Transformers {transformers.__version__}')
+except ImportError:
+    print('Transformers: NOT INSTALLED')
+
+try:
+    import ollama
+    models = ollama.list()
+    count = len(models.get('models', []))
+    print(f'Ollama: {count} models available')
+except:
+    print('Ollama: NOT AVAILABLE')
+"
 
 echo ""
-echo "=== Installation Complete ==="
-echo "You can now use these models with Ollama:"
-echo "  ollama run $HOLO_MODEL"
-echo "  ollama run $QWEN_MODEL"
+echo "=== Setup Complete ==="
 echo ""
-echo "To use in CaptchaKraken, update your configuration to point to these model names."
-
+echo "Usage:"
+echo "  # Single step"
+echo "  python -m src.captchakraken.cli captcha.png 'Solve this captcha'"
+echo ""
+echo "  # Python API"
+echo "  from src.captchakraken import CaptchaSolver"
+echo "  solver = CaptchaSolver()"
+echo "  action = solver.solve_step('captcha.png', 'Solve this captcha')"
+echo ""
+echo "Configuration:"
+echo "  --planner ollama|openai      Backend for action planning"
+echo "  --attention-model MODEL      HuggingFace model for coordinate extraction"
+echo ""
+echo "For OpenAI: export OPENAI_API_KEY='your-key'"
+echo ""

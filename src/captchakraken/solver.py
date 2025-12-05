@@ -1,345 +1,315 @@
+"""
+CaptchaSolver - Main entry point for solving captchas.
+
+This module orchestrates the two-stage solving process:
+1. ActionPlanner - Determines what action to take (click, drag, wait, etc.)
+2. AttentionExtractor - Finds where to perform the action using attention analysis
+
+Usage:
+    solver = CaptchaSolver()
+    
+    # Single step
+    action = solver.solve_step("captcha.png", "Solve this captcha")
+    
+    # Full loop
+    for action in solver.solve_loop(get_image, context, max_steps=10, end_condition=is_done):
+        execute_action(action)
+"""
+
 import os
-import sys
-import json
-import base64
-from typing import List, Dict, Any, Optional
-import ollama
-from openai import OpenAI
-from src.captchakraken.types import Solution, CaptchaAction
-from src.captchakraken.parser import CaptchaParser
+from typing import List, Optional, Callable, Iterator, Union
+from pathlib import Path
+
+from .types import (
+    CaptchaAction,
+    ClickAction,
+    DragAction,
+    TypeAction,
+    WaitAction,
+    RequestUpdatedImageAction,
+)
+from .planner import ActionPlanner, PlannedAction
+from .attention import AttentionExtractor
+
 
 class CaptchaSolver:
-    def __init__(self, openai_api_key: Optional[str] = None, openai_base_url: Optional[str] = None):
-        self.openai_key = openai_api_key or os.getenv("OPENAI_API_KEY")
-        self.openai_base_url = openai_base_url or os.getenv("OPENAI_BASE_URL")
-        self.parser = None # Lazy load parser
-        self.parsed_models = {}
-
-    def _get_parser(self):
-        if not self.parser:
-            self.parser = CaptchaParser()
-        return self.parser
-
-    def _get_best_model(self, prefix: str) -> str:
-        """Finds the best available model with the given prefix in Ollama."""
-        if prefix in self.parsed_models:
-            return self.parsed_models[prefix]
-            
-        try:
-            models_info = ollama.list()
-            # models_info['models'] is a list of dicts with 'name' or 'model'
-            if 'models' in models_info:
-                 model_list = models_info['models']
-            else:
-                 model_list = []
-            
-            available_models = []
-            for m in model_list:
-                # m might be a dict or object
-                if isinstance(m, dict):
-                    name = m.get('name') or m.get('model')
-                else:
-                    name = getattr(m, 'model', getattr(m, 'name', str(m)))
-                if name:
-                    available_models.append(name)
-            
-            # Find models starting with prefix
-            matches = [m for m in available_models if prefix in m]
-            
-            if not matches:
-                # Fallback to the prefix itself (e.g. might be pulled on demand)
-                print(f"Warning: No installed model found for {prefix}, using exact name.")
-                return prefix
-                
-            # Sort by size/version if possible? For now take the first or longest match
-            # install_models.sh logic suggests we might have qwen3-vl:2b or qwen3-vl:8b
-            # We prefer the one that exists.
-            best = matches[0]
-            self.parsed_models[prefix] = best
-            print(f"Selected local model {best} for {prefix}")
-            return best
-        except Exception:
-            # print(f"DEBUG: Error listing models: {e}", file=sys.stderr)
-            return prefix
-
-    def solve(self, image_path: str, prompt: str, strategy: str = "omniparser") -> List[CaptchaAction]:
-        """
-        Solves the captcha using the specified strategy.
-        Returns a list of CaptchaAction objects.
-        """
-        if strategy == "omniparser":
-            return self._solve_omniparser(image_path, prompt)
-        elif strategy == "holo1.5" or strategy == "holo2":
-            return self._solve_holo(image_path, prompt)
-        elif strategy == "holo_mlx":
-            return self._solve_holo_mlx(image_path, prompt)
-        elif strategy == "holo_vllm":
-            return self._solve_holo_vllm(image_path, prompt)
-        else:
-            raise ValueError(f"Unknown strategy: {strategy}")
-
-    def _solve_omniparser(self, image_path: str, task_prompt: str) -> List[CaptchaAction]:
-        parser = self._get_parser()
-        components, labeled_image_b64 = parser.parse(image_path)
-        
-        # Construct context for LLM
-        component_descriptions = "\n".join([f"ID {c.id}: {c.label} ({c.type})" for c in components])
-        
-        system_prompt = """You are an expert AI agent that solves captchas and UI tasks.
-You will be given a labeled image where UI elements are marked with numeric IDs.
-You will also receive a list of these elements with their descriptions.
-Your goal is to generate a sequence of actions to complete the user's task.
-
-Output MUST be a valid JSON object with a single key "actions" containing a list of action objects.
-Schema for actions:
-- Click: {"action": "click", "target_id": <id>}
-- Drag: {"action": "drag", "source_id": <id>, "target_id": <id>}
-- Type: {"action": "type", "text": "<text>", "target_id": <id>}
-- Wait: {"action": "wait", "duration_ms": <number>}
-- RequestUpdatedImage: {"action": "request_updated_image"}
-
-Example:
-{
-  "actions": [
-    {"action": "click", "target_id": 5},
-    {"action": "type", "text": "hello", "target_id": 5}
-  ]
-}
-"""
-        user_message = f"""Task: {task_prompt}
-
-Detected Elements:
-{component_descriptions}
-
-Please provide the solution actions in JSON format.
-"""
-        
-        # Use OpenAI if key exists, otherwise try local Qwen3 if available
-        if self.openai_key:
-            client = OpenAI(api_key=self.openai_key)
-            response = client.chat.completions.create(
-                model="gpt-4o", 
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": user_message},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{labeled_image_b64}"
-                                }
-                            }
-                        ]
-                    }
-                ],
-                response_format={"type": "json_object"}
-            )
-            content = response.choices[0].message.content
-        else:
-            # Check requirements before using local model
-            from src.captchakraken.hardware import check_requirements
-            ok, msg = check_requirements()
-            if not ok:
-                 raise RuntimeError(f"Local LLM requirements not met ({msg}). Please provide an OpenAI API key.")
-
-            # Try Ollama with Qwen3-VL
-            model_name = self._get_best_model('qwen3-vl')
-            try:
-                response = ollama.chat(
-                    model=model_name,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {
-                            "role": "user",
-                            "content": user_message,
-                            "images": [labeled_image_b64]
-                        }
-                    ],
-                    format='json'
-                )
-                content = response['message']['content']
-            except Exception as e:
-                # If local model fails, and no openai key, we are stuck.
-                # For testing purposes, we might want to return dummy actions if allowed, 
-                # but better to fail so user knows setup is incomplete.
-                raise RuntimeError(f"No LLM available. OpenAI key missing and Ollama failed: {e}")
-
-        try:
-            data = json.loads(content)
-            return Solution(**data).actions
-        except Exception as e:
-            print(f"Failed to parse LLM response: {content}")
-            raise e
-
-    def _solve_holo_mlx(self, image_path: str, task_prompt: str) -> List[CaptchaAction]:
-        # Check requirements before using local model
-        from src.captchakraken.hardware import check_requirements
-        ok, msg = check_requirements()
-        if not ok:
-             raise RuntimeError(f"Local LLM requirements not met ({msg}).")
-
-        try:
-            from mlx_vlm import load, generate
-            from mlx_vlm.utils import load_image
-        except ImportError:
-            raise ImportError("mlx-vlm not installed. Please install with `pip install mlx-vlm`")
-        
-        # Holo2 model path
-        model_path = "Hcompany/Holo2-8B"
-        
-        print(f"Loading {model_path} with mlx-vlm...")
-        # trust_remote_code=True might be needed for Qwen-based models
-        model, processor = load(model_path, trust_remote_code=True)
-        
-        system_prompt = """You are a UI automation agent.
-Your task is to solve the captcha/UI task.
-Output the solution as a JSON object with "actions".
-For clicks, provide "coordinates": [x, y] where x and y are normalized (0-1000) or pixel values.
-For drags, provide "source_coordinates": [x, y] and "target_coordinates": [x, y].
-"""
-        user_message = f"Task: {task_prompt}"
-        
-        formatted_prompt = processor.apply_chat_template(
-            [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message} # Image is handled separately in mlx-vlm generate usually?
-                # Actually, mlx-vlm generate takes 'images' arg.
-                # But the chat template might need to include the image token.
-                # For Qwen2-VL (Holo2 base), usually it's automatic or we need <image> token.
-            ], 
-            tokenize=False, 
-            add_generation_prompt=True
-        )
-
-        print(f"Generating solution for {image_path}...")
-        output = generate(
-            model, 
-            processor, 
-            image=image_path, # mlx-vlm generate handles image loading path or PIL
-            prompt=formatted_prompt,
-            verbose=True,
-            max_tokens=512
+    """
+    Two-stage captcha solver using LLM planning + attention-based coordinate extraction.
+    
+    Stage 1 (ActionPlanner): Ask an LLM (via Ollama or OpenAI API) what action is needed
+    Stage 2 (AttentionExtractor): Extract attention weights from a local VLM to find coordinates
+    
+    Args:
+        planner_backend: Backend for action planning ("ollama" or "openai")
+        planner_model: Model for planning (default: "hf.co/unsloth/gemma-3-12b-it-GGUF:Q4_K_M" for ollama, "gpt-4o" for openai)
+        attention_model: HuggingFace model for attention extraction (default: "vikhyatk/moondream2")
+        openai_api_key: OpenAI API key (or set OPENAI_API_KEY env var)
+        openai_base_url: Custom OpenAI base URL (or set OPENAI_BASE_URL env var)
+        device: Device for attention model ("cuda", "cpu", "mps"). Auto-detected if None.
+    """
+    
+    def __init__(
+        self,
+        planner_backend: str = "ollama",
+        planner_model: Optional[str] = None,
+        attention_model: Optional[str] = None,
+        openai_api_key: Optional[str] = None,
+        openai_base_url: Optional[str] = None,
+        device: Optional[str] = None,
+    ):
+        # Stage 1: Planner uses Ollama or OpenAI API
+        self.planner = ActionPlanner(
+            backend=planner_backend,
+            model=planner_model,
+            openai_api_key=openai_api_key,
+            openai_base_url=openai_base_url,
         )
         
-        print(f"Holo MLX output: {output}")
+        # Stage 2: Attention extractor uses transformers (local model)
+        self.attention_extractor = AttentionExtractor(
+            model=attention_model or "vikhyatk/moondream2",
+            device=device,
+        )
         
-        try:
-            # Holo output might be markdown wrapped json
-            content = output.strip()
-            if content.startswith("```json"):
-                content = content[7:]
-            if content.endswith("```"):
-                content = content[:-3]
-            data = json.loads(content.strip())
-            return Solution(**data).actions
-        except Exception as e:
-            print(f"Failed to parse Holo MLX response: {output}")
-            raise e
-
-    def _solve_holo_vllm(self, image_path: str, task_prompt: str) -> List[CaptchaAction]:
+        # Track action history for context
+        self._action_history: List[CaptchaAction] = []
+    
+    def solve_step(
+        self,
+        image_path: str,
+        context: str = "",
+        include_history: bool = True
+    ) -> CaptchaAction:
         """
-        Solves using Holo2 hosted via VLLM (OpenAI compatible API).
-        Requires VLLM running with: vllm serve Hcompany/Holo2-8B
+        Solve a single step of the captcha.
+        
+        This is the core method that:
+        1. Asks the planner what action to take
+        2. For spatial actions (click/drag), extracts coordinates via attention
+        3. Returns a typed CaptchaAction object
+        
+        Args:
+            image_path: Path to the captcha image
+            context: Additional context (e.g., "This is an hCaptcha asking about traffic lights")
+            include_history: Whether to include previous actions in the context
+        
+        Returns:
+            A CaptchaAction object (ClickAction, DragAction, WaitAction, etc.)
         """
-        # Read image
-        with open(image_path, "rb") as f:
-            image_b64 = base64.b64encode(f.read()).decode("utf-8")
-
-        system_prompt = """You are a UI automation agent.
-Your task is to solve the captcha/UI task.
-Output the solution as a JSON object with "actions".
-For clicks, provide "coordinates": [x, y] where x and y are normalized (0-1000) or pixel values.
-For drags, provide "source_coordinates": [x, y] and "target_coordinates": [x, y].
-"""
+        # Resolve path
+        image_path = str(Path(image_path).resolve())
         
-        # Configure client for VLLM
-        base_url = self.openai_base_url or "http://localhost:8000/v1"
-        api_key = self.openai_key or "EMPTY" # VLLM often uses EMPTY
+        if not os.path.exists(image_path):
+            raise FileNotFoundError(f"Image not found: {image_path}")
         
-        client = OpenAI(api_key=api_key, base_url=base_url)
+        # Build context with history
+        full_context = context
+        if include_history and self._action_history:
+            history_str = self._format_history()
+            full_context = f"{context}\n\nPrevious actions taken:\n{history_str}"
         
-        # Determine model name (VLLM serves usually with the name passed to CLI)
-        # We can try to list models or assume Hcompany/Holo2-8B
-        try:
-            models = client.models.list()
-            model_name = models.data[0].id
-        except:
-            model_name = "Hcompany/Holo2-8B"
-
-        print(f"Using VLLM model: {model_name} at {base_url}")
-
-        try:
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": f"Task: {task_prompt}"},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{image_b64}"
-                                }
-                            }
-                        ]
-                    }
-                ],
-                response_format={"type": "json_object"} # VLLM supports json mode if configured? Or we parse text.
-                # Holo2 fine-tuned might not strictly follow json_object constraint if vllm backend doesn't enforce it easily without grammar.
-                # Let's try without response_format if it fails, but for now include it as desired output.
+        # Stage 1: Plan the action
+        print(f"[Stage 1] Planning next action...")
+        planned = self.planner.plan(image_path, full_context)
+        print(f"[Stage 1] Planned: {planned.action_type} - {planned.target_description or planned.reasoning}")
+        
+        # Convert to CaptchaAction based on type
+        action = self._create_action(image_path, planned)
+        
+        # Track history
+        self._action_history.append(action)
+        
+        return action
+    
+    def _create_action(self, image_path: str, planned: PlannedAction) -> CaptchaAction:
+        """
+        Convert a PlannedAction to a CaptchaAction, extracting coordinates if needed.
+        """
+        if planned.action_type == "click":
+            # Stage 2: Extract coordinates via attention
+            print(f"[Stage 2] Extracting click coordinates for: {planned.target_description}")
+            x, y = self.attention_extractor.extract_coordinates(
+                image_path,
+                planned.target_description or "the target element"
             )
-            content = response.choices[0].message.content
-            
-            # Clean up markdown
-            content = content.strip()
-            if content.startswith("```json"):
-                content = content[7:]
-            if content.endswith("```"):
-                content = content[:-3]
-                
-            data = json.loads(content.strip())
-            return Solution(**data).actions
-        except Exception as e:
-            raise RuntimeError(f"Holo VLLM strategy failed: {e}")
-
-    def _solve_holo(self, image_path: str, task_prompt: str) -> List[CaptchaAction]:
-        # Check requirements before using local model
-        from src.captchakraken.hardware import check_requirements
-        ok, msg = check_requirements()
-        if not ok:
-             raise RuntimeError(f"Local LLM requirements not met ({msg}).")
-
-        # Holo uses coordinate based interaction.
-        with open(image_path, "rb") as f:
-            image_b64 = base64.b64encode(f.read()).decode("utf-8")
-            
-        system_prompt = """You are a UI automation agent.
-Your task is to solve the captcha/UI task.
-Output the solution as a JSON object with "actions".
-For clicks, provide "coordinates": [x, y] where x and y are normalized (0-1000) or pixel values.
-For drags, provide "source_coordinates": [x, y] and "target_coordinates": [x, y].
-"""
-        model_name = self._get_best_model('holo') # Matches holo2:8b etc
+            print(f"[Stage 2] Coordinates: ({x}, {y})")
+            return ClickAction(action="click", coordinates=[x, y])
         
-        try:
-            response = ollama.chat(
-                model=model_name,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {
-                        "role": "user",
-                        "content": f"Task: {task_prompt}",
-                        "images": [image_b64]
-                    }
-                ],
-                format='json'
+        elif planned.action_type == "drag":
+            # Extract both source and target coordinates
+            print(f"[Stage 2] Extracting drag coordinates...")
+            print(f"  Source: {planned.target_description}")
+            print(f"  Target: {planned.drag_target_description}")
+            
+            source, target = self.attention_extractor.extract_drag_coordinates(
+                image_path,
+                planned.target_description or "the draggable element",
+                planned.drag_target_description or "the drop target"
             )
-            content = response['message']['content']
-            data = json.loads(content)
-            return Solution(**data).actions
-        except Exception as e:
-             raise RuntimeError(f"Holo strategy failed: {e}")
+            print(f"[Stage 2] Source: {source}, Target: {target}")
+            
+            return DragAction(
+                action="drag",
+                source_coordinates=list(source),
+                target_coordinates=list(target)
+            )
+        
+        elif planned.action_type == "type":
+            return TypeAction(
+                action="type",
+                text=planned.text_to_type or ""
+            )
+        
+        elif planned.action_type == "wait":
+            return WaitAction(
+                action="wait",
+                duration_ms=planned.wait_duration_ms or 500
+            )
+        
+        elif planned.action_type == "request_updated_image":
+            return RequestUpdatedImageAction(action="request_updated_image")
+        
+        elif planned.action_type == "done":
+            # Return a wait with 0 duration to signal completion
+            # The caller should check for this or use the end_condition
+            return WaitAction(action="wait", duration_ms=0)
+        
+        else:
+            raise ValueError(f"Unknown action type: {planned.action_type}")
+    
+    def _format_history(self) -> str:
+        """Format action history for context."""
+        lines = []
+        for i, action in enumerate(self._action_history[-5:], 1):  # Last 5 actions
+            if isinstance(action, ClickAction):
+                lines.append(f"{i}. Clicked at {action.coordinates}")
+            elif isinstance(action, DragAction):
+                lines.append(f"{i}. Dragged from {action.source_coordinates} to {action.target_coordinates}")
+            elif isinstance(action, TypeAction):
+                lines.append(f"{i}. Typed: '{action.text}'")
+            elif isinstance(action, WaitAction):
+                lines.append(f"{i}. Waited {action.duration_ms}ms")
+            elif isinstance(action, RequestUpdatedImageAction):
+                lines.append(f"{i}. Requested updated image")
+        return "\n".join(lines)
+    
+    def solve_loop(
+        self,
+        get_image: Callable[[], str],
+        context: str = "",
+        max_steps: int = 10,
+        end_condition: Optional[Callable[[], bool]] = None,
+    ) -> Iterator[CaptchaAction]:
+        """
+        Solve a captcha with automatic looping.
+        
+        This generator yields actions one at a time until:
+        - max_steps is reached
+        - end_condition() returns True
+        - The planner returns "done" action
+        
+        Args:
+            get_image: Callable that returns the current image path
+                       (called before each step to get fresh screenshot)
+            context: Context string for the captcha
+            max_steps: Maximum number of steps before giving up
+            end_condition: Optional callable that returns True when captcha is solved
+        
+        Yields:
+            CaptchaAction objects to execute
+        
+        Example:
+            def get_screenshot():
+                return take_screenshot("captcha_area.png")
+            
+            def is_solved():
+                return not captcha_element.is_visible()
+            
+            for action in solver.solve_loop(get_screenshot, "Solve captcha", max_steps=10, end_condition=is_solved):
+                if isinstance(action, ClickAction):
+                    pyautogui.click(action.coordinates[0], action.coordinates[1])
+                elif isinstance(action, WaitAction):
+                    time.sleep(action.duration_ms / 1000)
+                # ... handle other actions
+        """
+        # Reset history for new solve session
+        self._action_history = []
+        
+        for step in range(max_steps):
+            print(f"\n{'='*50}")
+            print(f"Step {step + 1}/{max_steps}")
+            print(f"{'='*50}")
+            
+            # Check end condition first
+            if end_condition is not None and end_condition():
+                print("End condition met - captcha solved!")
+                return
+            
+            # Get current image
+            image_path = get_image()
+            
+            # Get next action
+            action = self.solve_step(image_path, context, include_history=True)
+            
+            # Check for "done" signal (wait with 0 duration)
+            if isinstance(action, WaitAction) and action.duration_ms == 0:
+                print("Planner indicates captcha is done")
+                return
+            
+            # Yield the action for execution
+            yield action
+            
+            # For request_updated_image, we just continue to next iteration
+            # The caller should update the image via get_image()
+        
+        print(f"Reached max steps ({max_steps}) without solving")
+    
+    def reset_history(self):
+        """Clear the action history."""
+        self._action_history = []
+    
+    def visualize_attention(
+        self,
+        image_path: str,
+        target_description: str,
+        output_path: Optional[str] = None
+    ):
+        """
+        Visualize where the attention extractor focuses for a given target.
+        
+        Useful for debugging and understanding the model's behavior.
+        
+        Args:
+            image_path: Path to the image
+            target_description: What to focus on
+            output_path: Where to save the visualization (optional)
+        
+        Returns:
+            numpy array of the visualization
+        """
+        return self.attention_extractor.visualize_attention(
+            image_path,
+            target_description,
+            output_path
+        )
+
+
+# Convenience function for simple usage
+def solve_captcha(
+    image_path: str,
+    context: str = "Solve this captcha",
+    **kwargs
+) -> CaptchaAction:
+    """
+    Convenience function to solve a single step of a captcha.
+    
+    Args:
+        image_path: Path to the captcha image
+        context: Context/instructions for solving
+        **kwargs: Additional arguments passed to CaptchaSolver
+    
+    Returns:
+        The next CaptchaAction to perform
+    """
+    solver = CaptchaSolver(**kwargs)
+    return solver.solve_step(image_path, context)
