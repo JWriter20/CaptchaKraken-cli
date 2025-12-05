@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "captchakraken-playwright"
+version = "0.1.0"
+description = "Playwright/Patchright integration for CaptchaKraken"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    "captchakraken",
+    "patchright",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/captchakraken_playwright"]
+
