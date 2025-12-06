@@ -1,10 +1,10 @@
 """
-Tests for the CaptchaSolver with the two-stage architecture.
+Tests for the CaptchaSolver with the intelligent two-stage architecture.
 
 These tests verify:
-1. ActionPlanner correctly identifies action types
-2. AttentionExtractor produces valid coordinates
-3. CaptchaSolver orchestrates both correctly
+1. ActionPlanner correctly identifies action types and handles numbered elements
+2. AttentionExtractor produces valid coordinates and supports detection
+3. CaptchaSolver orchestrates both correctly with intelligent refinement
 """
 
 import pytest
@@ -12,10 +12,12 @@ import os
 import json
 from typing import List
 from unittest.mock import MagicMock, patch, PropertyMock
+from types import SimpleNamespace
 
 from src.captchakraken.action_types import (
     CaptchaAction, ClickAction, DragAction, TypeAction, 
-    WaitAction, RequestUpdatedImageAction, Solution
+    WaitAction, RequestUpdatedImageAction, VerifyAction, Solution,
+    CaptchaContext, InteractableElement, DetectedObject
 )
 from src.captchakraken.solver import CaptchaSolver
 from src.captchakraken.planner import ActionPlanner, PlannedAction
@@ -96,6 +98,21 @@ class TestActionPlanner:
         assert result.target_description == "the checkbox"
         assert result.reasoning == "Need to click"
     
+    def test_parse_response_click_with_element_ids(self):
+        """Test parsing a click action with numbered element IDs."""
+        planner = ActionPlanner()
+        response = '''{"action_type": "click", 
+                       "target_description": "images with traffic lights",
+                       "target_element_ids": [2, 5, 7],
+                       "object_class_to_detect": "traffic light",
+                       "reasoning": "Elements 2, 5, 7 contain traffic lights"}'''
+        
+        result = planner._parse_response(response)
+        
+        assert result.action_type == "click"
+        assert result.target_element_ids == [2, 5, 7]
+        assert result.object_class_to_detect == "traffic light"
+    
     def test_parse_response_drag(self):
         """Test parsing a drag action response."""
         planner = ActionPlanner()
@@ -110,6 +127,22 @@ class TestActionPlanner:
         assert result.target_description == "the puzzle piece"
         assert result.drag_target_description == "the empty slot"
     
+    def test_parse_response_drag_with_element_ids(self):
+        """Test parsing a drag action with source/target element IDs."""
+        planner = ActionPlanner()
+        response = '''{"action_type": "drag", 
+                       "target_description": "element 1",
+                       "drag_target_description": "element 2",
+                       "source_element_id": 1,
+                       "target_element_id": 2,
+                       "reasoning": "Drag element 1 to element 2"}'''
+        
+        result = planner._parse_response(response)
+        
+        assert result.action_type == "drag"
+        assert result.source_element_id == 1
+        assert result.target_element_id == 2
+    
     def test_parse_response_wait(self):
         """Test parsing a wait action response."""
         planner = ActionPlanner()
@@ -119,6 +152,15 @@ class TestActionPlanner:
         
         assert result.action_type == "wait"
         assert result.wait_duration_ms == 1000
+    
+    def test_parse_response_verify(self):
+        """Test parsing a verify action response."""
+        planner = ActionPlanner()
+        response = '{"action_type": "verify", "target_description": "verify button", "reasoning": "Submit solution"}'
+        
+        result = planner._parse_response(response)
+        
+        assert result.action_type == "verify"
     
     def test_parse_response_with_markdown(self):
         """Test parsing response wrapped in markdown code block."""
@@ -131,6 +173,26 @@ class TestActionPlanner:
         
         assert result.action_type == "click"
         assert result.target_description == "button"
+    
+    def test_build_context_with_elements(self):
+        """Test context building includes element information."""
+        planner = ActionPlanner()
+        
+        elements = [
+            {"element_id": 1, "element_type": "image_tile"},
+            {"element_id": 2, "element_type": "image_tile"},
+            {"element_id": 3, "element_type": "verify_button"},
+        ]
+        
+        context = planner._build_context(
+            context="Test context",
+            elements=elements,
+            prompt_text="Select all images with birds"
+        )
+        
+        assert "Select all images with birds" in context
+        assert "Element 1: image_tile" in context
+        assert "Element 3: verify_button" in context
 
 
 class TestAttentionExtractor:
@@ -172,6 +234,30 @@ class TestAttentionExtractor:
         # Should fall back to center (0.5, 0.5)
         assert x_pct == 0.5
         assert y_pct == 0.5
+    
+    def test_map_detections_to_elements(self):
+        """Test mapping detections to numbered elements."""
+        extractor = AttentionExtractor()
+        
+        # Detections in normalized format [x_min, y_min, x_max, y_max]
+        detections = [
+            {"label": "bird", "bbox": [0.1, 0.1, 0.3, 0.3]},
+            {"label": "bird", "bbox": [0.4, 0.4, 0.6, 0.6]},
+        ]
+        
+        # Elements in normalized format [x_min, y_min, x_max, y_max]
+        elements = [
+            {"element_id": 1, "bbox": [0.0, 0.0, 0.33, 0.33]},
+            {"element_id": 2, "bbox": [0.33, 0.0, 0.66, 0.33]},
+            {"element_id": 3, "bbox": [0.33, 0.33, 0.66, 0.66]},
+        ]
+        
+        mapped = extractor.map_detections_to_elements(detections, elements, iou_threshold=0.1)
+        
+        # First detection should overlap with element 1
+        assert 1 in mapped[0]['overlapping_element_ids']
+        # Second detection should overlap with element 3
+        assert 3 in mapped[1]['overlapping_element_ids']
 
 
 class TestCaptchaSolver:
@@ -194,186 +280,278 @@ class TestCaptchaSolver:
         assert solver.planner.backend == "openai"
         assert solver.attention_extractor.model_id == "vikhyatk/moondream2"
     
-    @patch.object(ActionPlanner, 'plan')
-    @patch.object(AttentionExtractor, 'extract_coordinates')
-    def test_solve_step_click(self, mock_extract, mock_plan):
-        """Test solve_step produces correct ClickAction."""
-        # Setup mocks
-        mock_plan.return_value = PlannedAction(
-            action_type="click",
-            target_description="the checkbox"
-        )
-        mock_extract.return_value = (150, 200)
+    @patch.object(ActionPlanner, 'classify_captcha')
+    @patch.object(AttentionExtractor, 'focus')
+    def test_solve_step_checkbox(self, mock_focus, mock_classify):
+        """Specialized checkbox flow returns click with percent + pixels."""
+        mock_classify.return_value = {"captcha_kind": "checkbox"}
+        mock_focus.return_value = (0.25, 0.75)
         
-        solver = CaptchaSolver()
-        
-        # Create a dummy image file
         import tempfile
+        from PIL import Image
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-            f.write(b'\x89PNG\r\n\x1a\n')  # PNG header
+            img = Image.new('RGB', (100, 200), color='white')
+            img.save(f.name)
             temp_path = f.name
         
         try:
-            action = solver.solve_step(temp_path, "Solve this captcha")
+            solver = CaptchaSolver()
+            action = solver.solve_step(temp_path, "click the checkbox")
             
             assert isinstance(action, ClickAction)
-            assert action.action == "click"
-            assert action.coordinates == [150, 200]
+            assert action.point_percent == [0.25, 0.75]
+            assert action.coordinates == [25.0, 150.0]
         finally:
             os.unlink(temp_path)
     
-    @patch.object(ActionPlanner, 'plan')
-    @patch.object(AttentionExtractor, 'extract_drag_coordinates')
-    def test_solve_step_drag(self, mock_extract_drag, mock_plan):
-        """Test solve_step produces correct DragAction."""
-        mock_plan.return_value = PlannedAction(
-            action_type="drag",
-            target_description="the puzzle piece",
-            drag_target_description="the empty slot"
-        )
-        mock_extract_drag.return_value = ((100, 100), (300, 300))
-        
-        solver = CaptchaSolver()
+    @patch.object(ActionPlanner, 'plan_detection_target')
+    @patch.object(ActionPlanner, 'classify_captcha')
+    @patch.object(AttentionExtractor, 'detect_objects')
+    def test_solve_step_image_selection(self, mock_detect, mock_classify, mock_plan_target):
+        """Split-image/images flow returns bounding boxes."""
+        mock_classify.return_value = {"captcha_kind": "images"}
+        mock_plan_target.return_value = {"target_to_detect": "traffic light"}
+        mock_detect.return_value = [
+            {"bbox": [0.1, 0.1, 0.3, 0.3]},
+            {"bbox": [0.5, 0.5, 0.6, 0.6]},
+        ]
         
         import tempfile
+        from PIL import Image
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-            f.write(b'\x89PNG\r\n\x1a\n')
+            img = Image.new('RGB', (100, 100), color='white')
+            img.save(f.name)
             temp_path = f.name
         
         try:
-            action = solver.solve_step(temp_path, "Solve this captcha")
+            solver = CaptchaSolver()
+            action = solver.solve_step(temp_path, "Select all traffic lights")
+            
+            assert isinstance(action, ClickAction)
+            assert len(action.bounding_boxes) == 2
+            assert len(action.bounding_boxes_px) == 2
+            # First bounding box should map to 10-30 pixels on 100x100
+            assert action.bounding_boxes_px[0][:2] == [10.0, 10.0]
+        finally:
+            os.unlink(temp_path)
+    
+    @patch.object(ActionPlanner, 'plan_drag_strategy')
+    @patch.object(ActionPlanner, 'classify_captcha')
+    @patch.object(AttentionExtractor, 'detect_objects')
+    def test_solve_step_drag_logical(self, mock_detect, mock_classify, mock_drag_plan):
+        """Logical drag uses detection for start and end."""
+        mock_classify.return_value = {"captcha_kind": "drag_puzzle", "drag_variant": "logical"}
+        mock_drag_plan.return_value = {
+            "drag_type": "logical",
+            "draggable_prompt": "top movable deer head",
+            "destination_prompt": "top left strawberry",
+        }
+        mock_detect.side_effect = [
+            [{"bbox": [0.1, 0.1, 0.2, 0.2]}],  # draggable
+            [{"bbox": [0.7, 0.7, 0.8, 0.8]}],  # target
+        ]
+        
+        import tempfile
+        from PIL import Image
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            img = Image.new('RGB', (200, 200), color='white')
+            img.save(f.name)
+            temp_path = f.name
+        
+        try:
+            solver = CaptchaSolver()
+            action = solver.solve_step(temp_path, "drag the piece")
             
             assert isinstance(action, DragAction)
-            assert action.action == "drag"
-            assert action.source_coordinates == [100, 100]
-            assert action.target_coordinates == [300, 300]
+            assert action.source_coordinates_pct == [0.15000000000000002, 0.15000000000000002]
+            assert action.target_coordinates_pct == [0.75, 0.75]
+        finally:
+            os.unlink(temp_path)
+    
+    @patch('src.captchakraken.solver.match_template_with_mask')
+    @patch('src.captchakraken.solver.remove_background')
+    @patch('src.captchakraken.solver.extract_segment')
+    @patch('src.captchakraken.solver.find_draggable_candidates')
+    @patch.object(ActionPlanner, 'plan_drag_strategy')
+    @patch.object(ActionPlanner, 'classify_captcha')
+    @patch.object(AttentionExtractor, 'detect_objects')
+    def test_solve_step_drag_template(
+        self,
+        mock_detect,
+        mock_classify,
+        mock_drag_plan,
+        mock_candidates,
+        mock_extract,
+        mock_remove_bg,
+        mock_match,
+    ):
+        """Template drag falls back to heuristic candidate and template match."""
+        mock_classify.return_value = {"captcha_kind": "drag_puzzle", "drag_variant": "template_matching"}
+        mock_drag_plan.return_value = {
+            "drag_type": "template_matching",
+            "draggable_prompt": "top segment movable square",
+            "destination_prompt": "unused",
+        }
+        mock_detect.return_value = []  # force candidate path
+        mock_candidates.return_value = [{"bbox": (0, 0, 20, 20)}]
+        mock_extract.return_value = [[1]]
+        mock_remove_bg.return_value = [[1]]
+        mock_match.return_value = SimpleNamespace(center=(50, 50), confidence=0.9)
+        
+        import tempfile
+        from PIL import Image
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            img = Image.new('RGB', (100, 100), color='white')
+            img.save(f.name)
+            temp_path = f.name
+        
+        try:
+            solver = CaptchaSolver()
+            action = solver.solve_step(temp_path, "solve drag puzzle")
+            
+            assert isinstance(action, DragAction)
+            assert action.template_match_confidence == 0.9
+            assert action.target_coordinates == [50.0, 50.0]
+        finally:
+            os.unlink(temp_path)
+    
+    @patch.object(ActionPlanner, 'read_text')
+    @patch.object(ActionPlanner, 'classify_captcha')
+    def test_solve_step_text(self, mock_classify, mock_read_text):
+        """Text captchas return TypeAction with extracted text."""
+        mock_classify.return_value = {"captcha_kind": "text"}
+        mock_read_text.return_value = "ABC123"
+        
+        import tempfile
+        from PIL import Image
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            img = Image.new('RGB', (80, 40), color='white')
+            img.save(f.name)
+            temp_path = f.name
+        
+        try:
+            solver = CaptchaSolver()
+            action = solver.solve_step(temp_path, "type the text")
+            
+            assert isinstance(action, TypeAction)
+            assert action.text == "ABC123"
         finally:
             os.unlink(temp_path)
     
     @patch.object(ActionPlanner, 'plan')
-    def test_solve_step_wait(self, mock_plan):
-        """Test solve_step produces correct WaitAction."""
-        mock_plan.return_value = PlannedAction(
-            action_type="wait",
-            wait_duration_ms=500
-        )
-        
-        solver = CaptchaSolver()
+    @patch.object(ActionPlanner, 'classify_captcha')
+    def test_solve_step_fallback_wait(self, mock_classify, mock_plan):
+        """Unknown classification falls back to legacy planner."""
+        mock_classify.return_value = {"captcha_kind": "unknown"}
+        mock_plan.return_value = PlannedAction(action_type="wait", wait_duration_ms=250)
         
         import tempfile
+        from PIL import Image
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-            f.write(b'\x89PNG\r\n\x1a\n')
+            img = Image.new('RGB', (50, 50), color='white')
+            img.save(f.name)
             temp_path = f.name
         
         try:
-            action = solver.solve_step(temp_path, "Solve this captcha")
+            solver = CaptchaSolver()
+            action = solver.solve_step(temp_path, "waiting")
             
             assert isinstance(action, WaitAction)
-            assert action.action == "wait"
-            assert action.duration_ms == 500
-        finally:
-            os.unlink(temp_path)
-    
-    @patch.object(ActionPlanner, 'plan')
-    def test_solve_step_request_updated_image(self, mock_plan):
-        """Test solve_step produces RequestUpdatedImageAction."""
-        mock_plan.return_value = PlannedAction(
-            action_type="request_updated_image"
-        )
-        
-        solver = CaptchaSolver()
-        
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-            f.write(b'\x89PNG\r\n\x1a\n')
-            temp_path = f.name
-        
-        try:
-            action = solver.solve_step(temp_path, "Solve this captcha")
-            
-            assert isinstance(action, RequestUpdatedImageAction)
-            assert action.action == "request_updated_image"
+            assert action.duration_ms == 250
         finally:
             os.unlink(temp_path)
     
     def test_format_history(self):
-        """Test action history formatting."""
+        """Test action history formatting with bounding boxes."""
         solver = CaptchaSolver()
         solver._action_history = [
-            ClickAction(action="click", coordinates=[100, 200]),
+            ClickAction(action="click", bounding_boxes=[[0.1, 0.1, 0.2, 0.2]]),
             WaitAction(action="wait", duration_ms=500),
-            ClickAction(action="click", coordinates=[300, 400]),
+            ClickAction(action="click", coordinates=[300.0, 400.0]),
         ]
         
         history = solver._format_history()
         
-        assert "Clicked at [100, 200]" in history
+        assert "Clicked 1 detected boxes" in history
         assert "Waited 500ms" in history
-        assert "Clicked at [300, 400]" in history
+        assert "Clicked at [300.0, 400.0]" in history
     
-    @patch.object(ActionPlanner, 'plan')
-    @patch.object(AttentionExtractor, 'extract_coordinates')
-    def test_solve_loop_max_steps(self, mock_extract, mock_plan):
-        """Test solve_loop respects max_steps."""
-        mock_plan.return_value = PlannedAction(
-            action_type="click",
-            target_description="checkbox"
-        )
-        mock_extract.return_value = (100, 100)
-        
+    def test_format_history_with_element_ids(self):
+        """Test action history formatting with element IDs."""
         solver = CaptchaSolver()
+        solver._action_history = [
+            ClickAction(action="click", target_ids=[1, 3, 5], all_coordinates=[[50, 50], [150, 50], [250, 50]]),
+            VerifyAction(action="verify", target_id=10),
+        ]
         
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-            f.write(b'\x89PNG\r\n\x1a\n')
-            temp_path = f.name
+        history = solver._format_history()
         
-        try:
-            actions = list(solver.solve_loop(
-                get_image=lambda: temp_path,
-                context="test",
-                max_steps=3,
-                end_condition=None
-            ))
-            
-            assert len(actions) == 3
-        finally:
-            os.unlink(temp_path)
+        assert "Clicked elements [1, 3, 5]" in history
+        assert "Clicked verify button" in history
     
-    @patch.object(ActionPlanner, 'plan')
-    @patch.object(AttentionExtractor, 'extract_coordinates')
-    def test_solve_loop_end_condition(self, mock_extract, mock_plan):
-        """Test solve_loop stops when end_condition is met."""
-        mock_plan.return_value = PlannedAction(
-            action_type="click",
-            target_description="checkbox"
-        )
-        mock_extract.return_value = (100, 100)
-        
+    def test_normalize_elements_pixel_to_percentage(self):
+        """Test element bbox normalization from pixels to percentages."""
         solver = CaptchaSolver()
+        solver._current_image_size = (300, 300)
         
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-            f.write(b'\x89PNG\r\n\x1a\n')
-            temp_path = f.name
+        elements = [
+            {"element_id": 1, "bbox": [0, 0, 100, 100]},  # pixel format [x, y, w, h]
+            {"element_id": 2, "bbox": [100, 0, 100, 100]},
+        ]
         
-        try:
-            call_count = [0]
-            
-            def end_condition():
-                call_count[0] += 1
-                return call_count[0] >= 2  # Stop after 2 checks (1 action)
-            
-            actions = list(solver.solve_loop(
-                get_image=lambda: temp_path,
-                context="test",
-                max_steps=10,
-                end_condition=end_condition
-            ))
-            
-            assert len(actions) == 1
-        finally:
-            os.unlink(temp_path)
+        normalized = solver._normalize_elements(elements)
+        
+        # First element should be normalized to [0, 0, 0.333, 0.333]
+        assert normalized[0]['bbox'][0] == 0.0
+        assert abs(normalized[0]['bbox'][2] - 0.333) < 0.01
+    
+    def test_get_element_center(self):
+        """Test getting element center from bbox."""
+        solver = CaptchaSolver()
+        solver._current_image_size = (300, 300)
+        
+        elements = [
+            {"element_id": 1, "bbox": [0, 0, 100, 100]},  # Center should be (50, 50)
+            {"element_id": 2, "bbox": [100, 100, 100, 100]},  # Center should be (150, 150)
+        ]
+        
+        center1 = solver._get_element_center(1, elements)
+        center2 = solver._get_element_center(2, elements)
+        
+        assert center1 == (50, 50)
+        assert center2 == (150, 150)
+    
+    def test_normalize_elements_pixel_to_percentage(self):
+        """Test element bbox normalization from pixels to percentages."""
+        solver = CaptchaSolver()
+        solver._current_image_size = (300, 300)
+        
+        elements = [
+            {"element_id": 1, "bbox": [0, 0, 100, 100]},  # pixel format [x, y, w, h]
+            {"element_id": 2, "bbox": [100, 0, 100, 100]},
+        ]
+        
+        normalized = solver._normalize_elements(elements)
+        
+        # First element should be normalized to [0, 0, 0.333, 0.333]
+        assert normalized[0]['bbox'][0] == 0.0
+        assert abs(normalized[0]['bbox'][2] - 0.333) < 0.01
+    
+    def test_get_element_center(self):
+        """Test getting element center from bbox."""
+        solver = CaptchaSolver()
+        solver._current_image_size = (300, 300)
+        
+        elements = [
+            {"element_id": 1, "bbox": [0, 0, 100, 100]},  # Center should be (50, 50)
+            {"element_id": 2, "bbox": [100, 100, 100, 100]},  # Center should be (150, 150)
+        ]
+        
+        center1 = solver._get_element_center(1, elements)
+        center2 = solver._get_element_center(2, elements)
+        
+        assert center1 == (50, 50)
+        assert center2 == (150, 150)
 
 
 class TestTypes:
@@ -384,6 +562,16 @@ class TestTypes:
         action = ClickAction(action="click", coordinates=[100, 200])
         assert action.action == "click"
         assert action.coordinates == [100, 200]
+    
+    def test_click_action_with_element_ids(self):
+        """Test ClickAction with multiple element IDs."""
+        action = ClickAction(
+            action="click",
+            target_ids=[1, 3, 5],
+            all_coordinates=[[50, 50], [150, 50], [250, 50]]
+        )
+        assert action.target_ids == [1, 3, 5]
+        assert len(action.all_coordinates) == 3
     
     def test_drag_action_validation(self):
         """Test DragAction validates correctly."""
@@ -396,17 +584,70 @@ class TestTypes:
         assert action.source_coordinates == [100, 100]
         assert action.target_coordinates == [200, 200]
     
+    def test_drag_action_with_element_ids(self):
+        """Test DragAction with element IDs."""
+        action = DragAction(
+            action="drag",
+            source_id=1,
+            target_id=2,
+            source_coordinates=[50, 50],
+            target_coordinates=[150, 150]
+        )
+        assert action.source_id == 1
+        assert action.target_id == 2
+    
+    def test_verify_action(self):
+        """Test VerifyAction validates correctly."""
+        action = VerifyAction(action="verify", target_id=10)
+        assert action.action == "verify"
+        assert action.target_id == 10
+    
     def test_solution_with_multiple_actions(self):
         """Test Solution can contain multiple action types."""
         solution = Solution(actions=[
             {"action": "click", "coordinates": [100, 100]},
             {"action": "wait", "duration_ms": 500},
             {"action": "click", "coordinates": [200, 200]},
+            {"action": "verify", "target_id": 10},
         ])
         
-        assert len(solution.actions) == 3
+        assert len(solution.actions) == 4
         assert solution.actions[0].action == "click"
         assert solution.actions[1].action == "wait"
+        assert solution.actions[3].action == "verify"
+    
+    def test_captcha_context(self):
+        """Test CaptchaContext model."""
+        context = CaptchaContext(
+            prompt_text="Select all images with traffic lights",
+            captcha_type="recaptcha",
+            captcha_subtype="challenge",
+            has_numbered_overlays=True,
+        )
+        assert context.prompt_text == "Select all images with traffic lights"
+        assert context.has_numbered_overlays == True
+    
+    def test_interactable_element(self):
+        """Test InteractableElement model."""
+        elem = InteractableElement(
+            element_id=1,
+            bbox=[0.0, 0.0, 0.33, 0.33],
+            element_type="image_tile",
+            description="Image showing a bird"
+        )
+        assert elem.element_id == 1
+        assert elem.element_type == "image_tile"
+    
+    def test_detected_object(self):
+        """Test DetectedObject model."""
+        obj = DetectedObject(
+            label="traffic light",
+            bbox=[0.1, 0.2, 0.3, 0.4],
+            confidence=0.95,
+            overlapping_element_ids=[2, 5]
+        )
+        assert obj.label == "traffic light"
+        assert obj.overlapping_element_ids == [2, 5]
 
 
 # Parametrized tests for real images (if available)
@@ -424,22 +665,32 @@ def test_solver_with_real_images(filename, config):
         pytest.skip(f"Test image not found: {image_path}")
     
     # Skip actual inference in unit tests - mock instead
-    with patch.object(ActionPlanner, 'plan') as mock_plan, \
-         patch.object(AttentionExtractor, 'extract_coordinates') as mock_extract:
+    with patch.object(ActionPlanner, 'classify_captcha') as mock_classify, \
+         patch.object(ActionPlanner, 'plan_detection_target') as mock_plan_target, \
+         patch.object(ActionPlanner, 'plan_drag_strategy') as mock_drag_plan, \
+         patch.object(AttentionExtractor, 'focus') as mock_focus, \
+         patch.object(AttentionExtractor, 'detect_objects') as mock_detect:
         
-        # Setup mocks based on expected action type
-        if config["expected_action_type"] == "click":
-            mock_plan.return_value = PlannedAction(
-                action_type="click",
-                target_description="the target element"
-            )
-            mock_extract.return_value = (500, 500)
-        elif config["expected_action_type"] == "drag":
-            mock_plan.return_value = PlannedAction(
-                action_type="drag",
-                target_description="source element",
-                drag_target_description="target location"
-            )
+        # Determine classification based on filename
+        if "Drag" in filename:
+            mock_classify.return_value = {"captcha_kind": "drag_puzzle", "drag_variant": "logical"}
+            mock_drag_plan.return_value = {
+                "drag_type": "logical",
+                "draggable_prompt": "top movable piece",
+                "destination_prompt": "target slot",
+            }
+            mock_detect.side_effect = [
+                [{"bbox": [0.2, 0.2, 0.3, 0.3]}],
+                [{"bbox": [0.7, 0.7, 0.8, 0.8]}],
+            ]
+        elif "images" in filename.lower() or "images" in config["description"].lower():
+            mock_classify.return_value = {"captcha_kind": "images"}
+            mock_plan_target.return_value = {"target_to_detect": "traffic light"}
+            mock_detect.return_value = [{"bbox": [0.1, 0.1, 0.2, 0.2]}]
+        else:
+            mock_classify.return_value = {"captcha_kind": "checkbox"}
+            mock_focus.return_value = (0.5, 0.5)
+            mock_detect.return_value = []
         
         solver = CaptchaSolver()
         action = solver.solve_step(image_path, config["prompt"])

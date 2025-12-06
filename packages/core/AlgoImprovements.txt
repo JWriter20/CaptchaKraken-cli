@@ -1,0 +1,62 @@
+Our model is trying to do too much at once, for the currently level of intelligence, we cannot, so lets specialize.
+
+
+Highlighting the interactable images via the dom seems less reliable than expected. Get rid of that logic for pure image Highlighting
+if we can do the overlay of clickable elements based on the DOM that is great, and since the return type is just a list of actions to take,
+this one would be easy and we can return something like {action: "click", ids: [1, 4, 6]} for example. 
+
+
+Steps our program should take:
+1. classify the captcha as one of "checkbox" | "split-image" | "images" | "drag_puzzle" | "text"
+  a. "checkbox" | a simple checkbox that we just need to click
+  b. "split-image" | when the captcha gives you a prompt like "select all squares with motorcycles" and the
+  image is 1 coherent image that has been split up into (usually 16) squares, the goal is to select all of them
+  that match the image.
+  c. "images" | a captcha with a bunch of separate images (usually 9) and you have to identify which ones 
+  align with the prompt question. Ex. hcaptchaImages1.png 
+  d. "drag_puzzle" | we need to drag a few objects to where they belong in another part of the image based on the 
+  prompt or intuitive understanding.
+  e. "text" | the original captcha, usually around 6 warped characters, we need to identify what these characters are
+  and type them into the textbox. 
+
+2. Handle the captcha differently based on the type:
+  a. checkbox - Use moondream focus to focus on the checkbox, and then return the action 
+    {action: "click", point: {xPercent: Float, yPercent: Float}}
+  b. "split-image" - Use our planner based on the prompt and image to find what image we should try to detect
+    then run detect with that, and return {action: "click", boundingBoxes: [// all of the bounding boxes of our detected elements]} 
+    playwright-js or playwright-py will handle clicking all of the interactive boxes from the dom that intersect with our detected bounding boxes.
+  c. "images" - Use our planner based on the prompt and image to find what image we should try to detect
+    then run detect with that, and return {action: "click", boundingBoxes: [// all of the bounding boxes of our detected elements]} 
+    playwright-js or playwright-py will handle grouping of very close elements into single clicks and then executing clicks on each 
+    of these clusters we find, or where they overlap with clickable elements in the dom. 
+  d. drag_puzzle -    
+  
+  First we need to identify if this is a template-matching drag puzzle (hcaptchaDragImage1.png and hcaptchaDragImage2.png), or logical dragging puzzle (hcaptchaDragImages3.png)
+  use the planner for this.
+
+  We will solve each drag individually, looping it to solve both.
+  
+    1. If it is a logical dragging puzzle 
+  
+      We will need to make a mutilayered query. Use the prompt and image to reason in the dragging action, what is the 
+        item we need to drag, the prompt passed in should be of the format: "{location} movable {item} {if square colored background/draggable element is square, then "square"}" 
+        ex. "top segment movable square" for hcaptchaDragImage1.png, 
+        ex. "top movable deer head" for hcaptchaDragImage2.png,
+        ex. "bottom movable deer legs" for hcaptchaDragImage2.png,
+        ex. "bottom right movable bee" for hcaptchaDragImages3.png,
+
+      Then ask the planner with the image to describe where we need the image dragged to, and then use detect to find where.
+      ex. "top left strawberry" for hcaptchaDragImages3.png
+
+    2. If it is a template-matching drag puzzle, 
+    
+      a. we need to identify the draggable element in the same way we do above.
+
+    
+    After we find the image we need to drag, we will use openCV to extract the segment itself (if it has a background which they usually do)
+    and find where it matches using openCV (template_matching.py) then return the drag action from the center of our selected draggable element to 
+    the target { action: "drag", start: point at center of bounding box, end: destination point from template_matching}
+
+
+  e. Just pass in the image to the brain and have it return the text, then the function should return:
+  {action: "type", text: "*extracted text*"}

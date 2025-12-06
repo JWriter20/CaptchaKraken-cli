@@ -1,0 +1,208 @@
+[
+  {
+    "cloudflare.png": {
+      "target_bounding_boxes": [
+        {
+          "checkbox": [
+            0.0625,
+            0.3367,
+            0.1431,
+            0.6817
+          ]
+        }
+      ]
+    },
+    "hcaptchaBasic.png": {
+      "target_bounding_boxes": [
+        {
+          "checkbox": [
+            0.0559,
+            0.2836,
+            0.1563,
+            0.6696
+          ]
+        }
+      ]
+    },
+    "recaptchaBasic.png": {
+      "target_bounding_boxes": [
+        {
+          "checkbox": [
+            0.0534,
+            0.322,
+            0.1456,
+            0.6756
+          ]
+        }
+      ]
+    },
+    "hcaptchaImages1.png": {
+      "target_bounding_boxes": [
+        {
+          "topMiddleBirdGroup": [
+            0.3467,
+            0.2089,
+            0.6513,
+            0.4194
+          ],
+          "topRightBirdGroup": [
+            0.6654,
+            0.2112,
+            0.9665,
+            0.4146
+          ],
+          "bottomLeftBirdGroup": [
+            0.0315,
+            0.6464,
+            0.3327,
+            0.8475
+          ]
+        }
+      ]
+    },
+    "recaptchaImages.png": {
+      "target_area_percentages": [
+        {
+          "promptCar": [
+            0.6841,
+            0.0232,
+            0.9645,
+            0.1911
+          ],
+          "topMiddleCarGroup": [
+            0.3454,
+            0.2183,
+            0.6635,
+            0.4383
+          ],
+          "middleRightCarGroup": [
+            0.6635,
+            0.4406,
+            0.985,
+            0.6653
+          ],
+          "bottomRightCar": [
+            0.6635,
+            0.663,
+            0.9816,
+            0.8806
+          ]
+        }
+      ]
+    },
+    "recaptchaImages2.png": {
+      "target_area_percentages": [
+        {
+          "motorcycleContainer": [
+            0.2672,
+            0.2183,
+            0.9799,
+            0.8404
+          ]
+        }
+      ]
+    },
+    "recaptchaImages3.png": {
+      "target_area_percentages": [
+        {
+          "bottomLeftFireHydrant": [
+            0.0273,
+            0.6642,
+            0.3446,
+            0.8841
+          ],
+          "middleFireHydrant": [
+            0.3446,
+            0.4395,
+            0.6619,
+            0.6642
+          ],
+          "topRightFireHydrant": [
+            0.6619,
+            0.2148,
+            0.9826,
+            0.4418
+          ]
+        }
+      ]
+    },
+    "hcaptchaDragImage1.png": {
+      "target_area_percentages": [
+        {
+          "topSegment": [
+            0.7825,
+            0.3827,
+            0.9535,
+            0.5577
+          ],
+          "bottomSegment": [
+            0.7669,
+            0.5483,
+            0.9457,
+            0.7233
+          ],
+          "topSegmentDesination": [
+            0.0544,
+            0.5932,
+            0.2643,
+            0.7824
+          ],
+          "bottomSegmentDesination": [
+            0.2643,
+            0.2502,
+            0.4612,
+            0.4205
+          ]
+        }
+      ]
+    },
+    "hcaptchaDragImage2.png": {
+      "target_area_percentages": [
+        {
+          "deerhead": [
+            0.2375,
+            0.2053,
+            0.4131,
+            0.378
+          ],
+          "deerlegs": [
+            0.2272,
+            0.6381,
+            0.4027,
+            0.8084
+          ],
+          "deerheadDesination": [
+            0.3382,
+            0.3401,
+            0.5215,
+            0.5057
+          ],
+          "deerlegsDesination": [
+            0.3588,
+            0.553,
+            0.5525,
+            0.7257
+          ]
+        }
+      ]
+    },
+    "hcaptchaDragImages3.png": {
+      "target_area_percentages": [
+        {
+          "bee": [
+            0.7814,
+            0.6287,
+            0.9553,
+            0.8084
+          ],
+          "beeDesinationStrawberry": [
+            0.0389,
+            0.2408,
+            0.2544,
+            0.4371
+          ]
+        }
+      ]
+    }
+  }
+]

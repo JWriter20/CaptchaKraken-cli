@@ -6,12 +6,14 @@ Supports multiple backends:
 - moondream: Uses native point()/detect() methods
 - qwen-vl: Uses Ollama with coordinate prompting
 - florence: Uses Florence-2 grounding (requires GPU)
+
+Enhanced with intelligent element detection and focus capabilities.
 """
 from __future__ import annotations
 
 import os
 import re
-from typing import Optional, Tuple, List, Literal, TYPE_CHECKING
+from typing import Optional, Tuple, List, Literal, Dict, Any, TYPE_CHECKING
 import numpy as np
 from PIL import Image
 
@@ -27,6 +29,12 @@ class AttentionExtractor:
     - "moondream": Uses vikhyatk/moondream2 with native point()/detect() methods
     - "qwen-vl": Uses Qwen2-VL via Ollama with coordinate prompting
     - "florence": Uses Microsoft Florence-2 grounding
+    
+    Enhanced capabilities:
+    - detect_objects(): Find all instances of a class (birds, cars, etc.)
+    - detect_interactable_elements(): Automatically find clickable elements
+    - focus(): High-precision pointing for specific elements
+    - map_detections_to_elements(): Map detected objects to numbered elements
     """
     
     def __init__(
@@ -46,6 +54,7 @@ class AttentionExtractor:
         self._last_attention_grid = None
         self._last_grid_size = None
         self._last_points = None
+        self._last_detections = None
         
         if device is None:
             import torch
@@ -115,6 +124,10 @@ class AttentionExtractor:
         
         print(f"[AttentionExtractor] Florence-2 loaded on {self.device}")
     
+    # =========================================================================
+    # CORE EXTRACTION METHODS
+    # =========================================================================
+    
     def extract_coordinates(
         self,
         image_path: str,
@@ -156,6 +169,290 @@ class AttentionExtractor:
         
         print(f"[AttentionExtractor] Result: ({x_pct:.4f}, {y_pct:.4f})")
         return (x_pct, y_pct)
+    
+    def focus(
+        self,
+        image_path: str,
+        target_description: str,
+    ) -> Tuple[float, float]:
+        """
+        High-precision pointing using moondream's point() method.
+        
+        This is an alias for extract_coordinates but emphasizes
+        the use of point() for precision focusing on specific elements.
+        
+        Args:
+            image_path: Path to the image
+            target_description: Detailed description of what to focus on
+        
+        Returns:
+            Tuple of (x, y) as percentages in [0.0, 1.0] range
+        """
+        return self.extract_coordinates(image_path, target_description)
+    
+    def detect_objects(
+        self,
+        image_path: str,
+        object_class: str,
+    ) -> List[Dict[str, Any]]:
+        """
+        Detect all instances of an object class in the image.
+        
+        Uses moondream's detect() method to find all matching objects.
+        
+        Args:
+            image_path: Path to the image
+            object_class: Class to detect (e.g., "bird", "car", "traffic light")
+        
+        Returns:
+            List of detected objects with bounding boxes:
+            [{"label": str, "bbox": [x_min, y_min, x_max, y_max], ...}, ...]
+            Coordinates are percentages in [0.0, 1.0] range.
+        """
+        self._load_model()
+        
+        image = Image.open(image_path).convert("RGB")
+        img_width, img_height = image.size
+        
+        print(f"[AttentionExtractor] Detecting: {object_class}")
+        
+        detections = []
+        
+        if self.backend == "moondream" and hasattr(self._model, 'detect'):
+            import torch
+            with torch.no_grad():
+                try:
+                    result = self._model.detect(image, object_class)
+                    # detect() returns {'objects': [{'x_min', 'y_min', 'x_max', 'y_max'}, ...]}
+                    if result and 'objects' in result:
+                        for obj in result['objects']:
+                            detections.append({
+                                "label": object_class,
+                                "bbox": [obj['x_min'], obj['y_min'], obj['x_max'], obj['y_max']],
+                            })
+                        print(f"[AttentionExtractor] detect() found {len(detections)} {object_class}(s)")
+                except Exception as e:
+                    print(f"[AttentionExtractor] detect() failed: {e}")
+        
+        elif self.backend == "florence":
+            detections = self._detect_florence(image, object_class)
+        
+        self._last_detections = detections
+        return detections
+    
+    def detect_interactable_elements(
+        self,
+        image_path: str,
+    ) -> List[Dict[str, Any]]:
+        """
+        Automatically detect interactable elements like buttons, checkboxes, images.
+        
+        Uses moondream to identify clickable/draggable areas.
+        
+        Args:
+            image_path: Path to the image
+        
+        Returns:
+            List of detected elements with bounding boxes
+        """
+        self._load_model()
+        
+        image = Image.open(image_path).convert("RGB")
+        
+        all_elements = []
+        
+        # Try to detect common interactable element types
+        element_types = ["button", "checkbox", "image", "icon", "tile"]
+        
+        if self.backend == "moondream" and hasattr(self._model, 'detect'):
+            import torch
+            with torch.no_grad():
+                for elem_type in element_types:
+                    try:
+                        result = self._model.detect(image, elem_type)
+                        if result and 'objects' in result:
+                            for obj in result['objects']:
+                                all_elements.append({
+                                    "label": elem_type,
+                                    "bbox": [obj['x_min'], obj['y_min'], obj['x_max'], obj['y_max']],
+                                    "element_type": elem_type,
+                                })
+                    except Exception:
+                        continue
+        
+        print(f"[AttentionExtractor] Found {len(all_elements)} interactable elements")
+        return all_elements
+    
+    def map_detections_to_elements(
+        self,
+        detections: List[Dict[str, Any]],
+        elements: List[Dict[str, Any]],
+        iou_threshold: float = 0.3,
+    ) -> List[Dict[str, Any]]:
+        """
+        Map detected objects to numbered elements based on bounding box overlap.
+        
+        Args:
+            detections: List of detections from detect_objects()
+            elements: List of numbered elements (with 'element_id' and 'bbox')
+            iou_threshold: Minimum IoU to consider a match
+        
+        Returns:
+            Detections with 'overlapping_element_ids' field added
+        """
+        def calc_iou(box1, box2):
+            """Calculate IoU between two boxes [x_min, y_min, x_max, y_max]."""
+            x1 = max(box1[0], box2[0])
+            y1 = max(box1[1], box2[1])
+            x2 = min(box1[2], box2[2])
+            y2 = min(box1[3], box2[3])
+            
+            if x2 <= x1 or y2 <= y1:
+                return 0.0
+            
+            intersection = (x2 - x1) * (y2 - y1)
+            area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+            area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+            union = area1 + area2 - intersection
+            
+            return intersection / union if union > 0 else 0.0
+        
+        def bbox_to_corners(bbox):
+            """Convert [x, y, w, h] to [x_min, y_min, x_max, y_max]."""
+            if len(bbox) == 4:
+                # Check if already corners (values normalized 0-1)
+                if bbox[2] <= 1.0 and bbox[3] <= 1.0:
+                    return bbox  # Already in corner format
+                # Otherwise it's [x, y, w, h] format
+                return [bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3]]
+            return bbox
+        
+        for det in detections:
+            det_bbox = det['bbox']
+            overlapping_ids = []
+            
+            for elem in elements:
+                elem_bbox = bbox_to_corners(elem.get('bbox', []))
+                if elem_bbox:
+                    iou = calc_iou(det_bbox, elem_bbox)
+                    if iou >= iou_threshold:
+                        overlapping_ids.append(elem.get('element_id'))
+            
+            det['overlapping_element_ids'] = overlapping_ids
+        
+        return detections
+    
+    # =========================================================================
+    # INTELLIGENT QUERIES
+    # =========================================================================
+    
+    def describe_element(
+        self,
+        image_path: str,
+        element_description: str,
+    ) -> str:
+        """
+        Get a detailed description of an element in the image.
+        
+        Useful for understanding what an element is before deciding to interact.
+        
+        Args:
+            image_path: Path to the image
+            element_description: What to describe (e.g., "element 3", "the draggable piece")
+        
+        Returns:
+            Text description of the element
+        """
+        self._load_model()
+        
+        image = Image.open(image_path).convert("RGB")
+        
+        if self.backend == "moondream":
+            import torch
+            with torch.no_grad():
+                if hasattr(self._model, 'query'):
+                    # Use moondream's query method if available
+                    prompt = f"Describe {element_description} in detail. What does it look like?"
+                    try:
+                        result = self._model.query(image, prompt)
+                        if isinstance(result, dict):
+                            return result.get('answer', str(result))
+                        return str(result)
+                    except Exception as e:
+                        print(f"[AttentionExtractor] query() failed: {e}")
+                
+                # Fallback: use caption with encoding
+                if hasattr(self._model, 'caption'):
+                    try:
+                        result = self._model.caption(image)
+                        return result.get('caption', '') if isinstance(result, dict) else str(result)
+                    except Exception:
+                        pass
+        
+        return f"Unable to describe {element_description}"
+    
+    def ask_about_image(
+        self,
+        image_path: str,
+        question: str,
+    ) -> str:
+        """
+        Ask a question about the image.
+        
+        Args:
+            image_path: Path to the image
+            question: Question to ask (e.g., "What should be dragged?", "Which elements contain birds?")
+        
+        Returns:
+            Answer to the question
+        """
+        self._load_model()
+        
+        image = Image.open(image_path).convert("RGB")
+        
+        if self.backend == "moondream":
+            import torch
+            with torch.no_grad():
+                if hasattr(self._model, 'query'):
+                    try:
+                        result = self._model.query(image, question)
+                        if isinstance(result, dict):
+                            return result.get('answer', str(result))
+                        return str(result)
+                    except Exception as e:
+                        print(f"[AttentionExtractor] query() failed: {e}")
+        
+        elif self.backend == "qwen-vl":
+            return self._ask_qwen_vl(image_path, question)
+        
+        return "Unable to answer the question"
+    
+    def _ask_qwen_vl(self, image_path: str, question: str) -> str:
+        """Ask a question using Ollama."""
+        import ollama
+        
+        ollama_model = self.model_id if self.model_id else "hf.co/unsloth/gemma-3-12b-it-GGUF:Q4_K_M"
+        
+        try:
+            response = ollama.chat(
+                model=ollama_model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": question,
+                        "images": [image_path]
+                    }
+                ],
+                options={"temperature": 0.1}
+            )
+            return response["message"]["content"]
+        except Exception as e:
+            print(f"[AttentionExtractor] Ollama failed: {e}")
+            return "Unable to answer"
+    
+    # =========================================================================
+    # BACKEND-SPECIFIC EXTRACTION METHODS
+    # =========================================================================
     
     def _extract_moondream(self, image: Image.Image, target_description: str) -> Tuple[float, float]:
         """Extract coordinates using moondream's native point() method."""
@@ -321,6 +618,59 @@ For example: x=25%, y=50%"""
         # Fallback
         return (0.5, 0.5)
     
+    def _detect_florence(self, image: Image.Image, object_class: str) -> List[Dict[str, Any]]:
+        """Detect objects using Florence-2."""
+        import torch
+        
+        img_width, img_height = image.size
+        detections = []
+        
+        task_prompt = "<CAPTION_TO_PHRASE_GROUNDING>"
+        prompt = f"{task_prompt} {object_class}"
+        
+        inputs = self._processor(
+            text=prompt,
+            images=image,
+            return_tensors="pt"
+        ).to(self.device)
+        
+        with torch.no_grad():
+            generated_ids = self._model.generate(
+                input_ids=inputs["input_ids"],
+                pixel_values=inputs["pixel_values"],
+                max_new_tokens=256,
+                num_beams=3,
+            )
+        
+        generated_text = self._processor.batch_decode(
+            generated_ids, skip_special_tokens=False
+        )[0]
+        
+        parsed = self._processor.post_process_generation(
+            generated_text,
+            task=task_prompt,
+            image_size=(img_width, img_height)
+        )
+        
+        if task_prompt in parsed and parsed[task_prompt].get('bboxes'):
+            for bbox in parsed[task_prompt]['bboxes']:
+                # Convert pixel coords to percentages
+                detections.append({
+                    "label": object_class,
+                    "bbox": [
+                        bbox[0] / img_width,
+                        bbox[1] / img_height,
+                        bbox[2] / img_width,
+                        bbox[3] / img_height,
+                    ],
+                })
+        
+        return detections
+    
+    # =========================================================================
+    # DRAG OPERATIONS
+    # =========================================================================
+    
     def extract_drag_coordinates(
         self,
         image_path: str,
@@ -331,6 +681,10 @@ For example: x=25%, y=50%"""
         source = self.extract_coordinates(image_path, source_description)
         target = self.extract_coordinates(image_path, target_description)
         return (source, target)
+    
+    # =========================================================================
+    # VISUALIZATION
+    # =========================================================================
     
     def visualize_attention(
         self,
@@ -365,6 +719,78 @@ For example: x=25%, y=50%"""
             ax.add_patch(plt.Circle((px, py), 20, fill=False, color='lime', linewidth=2, zorder=10))
         
         ax.set_title(f'Target: "{target_description}"\nPosition: ({x_pct:.2%}, {y_pct:.2%}) | Pixel: ({px}, {py})')
+        ax.axis('off')
+        
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        print(f"[AttentionExtractor] Saved visualization: {output_path}")
+        return output_path
+    
+    def visualize_detections(
+        self,
+        image_path: str,
+        detections: List[Dict[str, Any]],
+        output_path: str = "detections.png",
+        elements: Optional[List[Dict[str, Any]]] = None,
+    ) -> str:
+        """Visualize detected objects with bounding boxes."""
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as patches
+        
+        image = Image.open(image_path).convert("RGB")
+        img_array = np.array(image)
+        img_height, img_width = img_array.shape[:2]
+        
+        fig, ax = plt.subplots(1, 1, figsize=(12, 8))
+        ax.imshow(img_array)
+        
+        colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD']
+        
+        for i, det in enumerate(detections):
+            bbox = det['bbox']
+            color = colors[i % len(colors)]
+            
+            # Convert from percentage to pixel coordinates
+            x1 = bbox[0] * img_width
+            y1 = bbox[1] * img_height
+            x2 = bbox[2] * img_width
+            y2 = bbox[3] * img_height
+            
+            rect = patches.Rectangle(
+                (x1, y1), x2 - x1, y2 - y1,
+                linewidth=2, edgecolor=color, facecolor='none'
+            )
+            ax.add_patch(rect)
+            
+            label = det.get('label', '')
+            if det.get('overlapping_element_ids'):
+                label += f" (elements: {det['overlapping_element_ids']})"
+            
+            ax.text(x1, y1 - 5, label, color=color, fontsize=10, fontweight='bold')
+        
+        # Draw numbered elements if provided
+        if elements:
+            for elem in elements:
+                bbox = elem.get('bbox', [])
+                if len(bbox) >= 4:
+                    x, y, w, h = bbox[0], bbox[1], bbox[2], bbox[3]
+                    # Determine if bbox is percentage or pixel based
+                    if w <= 1 and h <= 1:  # Percentage
+                        x, y = x * img_width, y * img_height
+                        w, h = w * img_width, h * img_height
+                    
+                    rect = patches.Rectangle(
+                        (x, y), w, h,
+                        linewidth=1, edgecolor='white', facecolor='none',
+                        linestyle='--'
+                    )
+                    ax.add_patch(rect)
+                    ax.text(x + 2, y + 12, str(elem.get('element_id', '')), 
+                           color='white', fontsize=8, fontweight='bold')
+        
+        ax.set_title(f'Detected {len(detections)} objects')
         ax.axis('off')
         
         plt.tight_layout()

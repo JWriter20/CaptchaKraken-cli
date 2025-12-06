@@ -2,11 +2,12 @@
 """
 Test script for the new pointing-based coordinate extraction.
 
-Run: python scripts/test_pointing.py
+Run: python scripts/test_pointing.py <image_path> <query>
 """
 
 import os
 import sys
+import argparse
 
 # Add project root to path
 project_root = os.path.join(os.path.dirname(__file__), '..')
@@ -14,18 +15,7 @@ sys.path.insert(0, project_root)
 
 from src.captchakraken.attention import AttentionExtractor
 
-# Test images directory
-IMAGES_DIR = os.path.join(os.path.dirname(__file__), '..', 'captchaimages')
-
-# Test cases: (image_name, target_description, expected_region)
-TEST_CASES = [
-    ("hcaptchaBasic.png", "the checkbox", "left side"),
-    ("recaptchaBasic.png", "the checkbox", "left side"),  
-    ("cloudflare.png", "the checkbox or verification button", "center"),
-]
-
-
-def test_single_image(extractor: AttentionExtractor, image_path: str, target: str):
+def test_pointing(extractor: AttentionExtractor, image_path: str, target: str, output_path: str = None):
     """Test coordinate extraction on a single image."""
     print(f"\n{'='*60}")
     print(f"Testing: {os.path.basename(image_path)}")
@@ -38,7 +28,11 @@ def test_single_image(extractor: AttentionExtractor, image_path: str, target: st
         print(f"\n✓ Position: ({x_pct:.2%}, {y_pct:.2%})")
         
         # Generate visualization
-        output_name = f"test_output_{os.path.basename(image_path)}"
+        if output_path is None:
+            output_name = f"test_pointing_{os.path.basename(image_path)}"
+        else:
+            output_name = output_path
+            
         vis_path = extractor.visualize_attention(
             image_path, 
             target,
@@ -56,6 +50,13 @@ def test_single_image(extractor: AttentionExtractor, image_path: str, target: st
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Test point extraction on an image using AttentionExtractor.")
+    parser.add_argument("image_path", help="Path to the image file")
+    parser.add_argument("query", help="Target description to point to")
+    parser.add_argument("--output", "-o", help="Output path for visualization", default=None)
+    
+    args = parser.parse_args()
+
     print("="*60)
     print("Testing Coordinate Extraction")
     print("="*60)
@@ -67,32 +68,22 @@ def main():
         model="vikhyatk/moondream2"
     )
     
-    results = []
-    
-    for image_name, target, expected in TEST_CASES:
-        image_path = os.path.join(IMAGES_DIR, image_name)
+    if not os.path.exists(args.image_path):
+        print(f"\n✗ Error: Image not found at {args.image_path}")
+        return
         
-        if not os.path.exists(image_path):
-            print(f"\n⚠ Skipping {image_name} - file not found")
-            continue
-        
-        success, coords = test_single_image(extractor, image_path, target)
-        results.append((image_name, success, coords))
+    success, coords = test_pointing(extractor, args.image_path, args.query, args.output)
     
     # Summary
     print("\n" + "="*60)
     print("SUMMARY")
     print("="*60)
     
-    for image_name, success, coords in results:
-        status = "✓" if success else "✗"
-        coord_str = f"({coords[0]:.2%}, {coords[1]:.2%})" if coords else "N/A"
-        print(f"{status} {image_name}: {coord_str}")
-    
-    passed = sum(1 for _, s, _ in results if s)
-    print(f"\nPassed: {passed}/{len(results)}")
+    if success:
+        print(f"✓ {os.path.basename(args.image_path)}: ({coords[0]:.2%}, {coords[1]:.2%})")
+    else:
+        print(f"✗ {os.path.basename(args.image_path)}: Pointing failed")
 
 
 if __name__ == "__main__":
     main()
-
