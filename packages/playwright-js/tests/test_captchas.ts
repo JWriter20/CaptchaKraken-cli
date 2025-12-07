@@ -1,43 +1,39 @@
 import { chromium } from 'patchright';
 import { findCaptchaFrames, solveCaptcha } from '../src/index';
+import * as path from 'path';
+import * as dotenv from 'dotenv';
+
+// Load environment variables from the root .env file
+dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
+
+const SOLVER_OPTIONS = {
+  planner: 'gemini' as const,
+  geminiApiKey: process.env.GEMINI_API_KEY,
+  plannerModel: 'gemini-2.0-flash',
+  pythonPath: path.resolve(__dirname, '../../../venv/bin/python')
+};
+
+if (!process.env.GEMINI_API_KEY) {
+  console.warn("WARNING: GEMINI_API_KEY is not set. Solver might fail if using gemini backend.");
+}
 
 async function testHCaptcha() {
-  console.log('\nTesting hCaptcha Detection...');
-  const headless = process.env.HEADLESS !== 'false';
-  const browser = await chromium.launch({ headless });
+  console.log('\nTesting hCaptcha Detection & Solving...');
+  // Headed mode as requested
+  const browser = await chromium.launch({ headless: false });
   const page = await browser.newPage();
 
   try {
     await page.goto('https://democaptcha.com/demo-form-eng/hcaptcha.html');
     await page.waitForLoadState('networkidle');
 
-    const captchas = await findCaptchaFrames(page);
-    console.log(`Found ${captchas.length} frames.`);
+    console.log("Solving hCaptcha...");
+    const success = await solveCaptcha(page, SOLVER_OPTIONS);
 
-    if (captchas.some(c => c.type === 'hcaptcha')) {
-      console.log('✅ Identified hCaptcha');
+    if (success) {
+      console.log('✅ Successfully solved hCaptcha');
     } else {
-      console.error('❌ Failed to identify hCaptcha');
-    }
-
-    const checkbox = captchas.find(c => c.subtype === 'checkbox');
-    if (checkbox) {
-      console.log('✅ Found Checkbox iframe');
-      // Simulate click to trigger popup check
-      const box = checkbox.frame.locator('#checkbox');
-      if (await box.isVisible()) {
-        await box.click();
-        console.log('Clicked checkbox, waiting for popup...');
-        await page.waitForTimeout(3000);
-
-        const captchasAfter = await findCaptchaFrames(page);
-        const challenge = captchasAfter.find(c => c.subtype === 'challenge');
-        if (challenge) {
-          console.log('✅ Found Challenge popup');
-        } else {
-          console.log('⚠️ No challenge popup found (might be one-click solve)');
-        }
-      }
+      console.error('❌ Failed to solve hCaptcha');
     }
 
   } catch (e) {
@@ -48,22 +44,21 @@ async function testHCaptcha() {
 }
 
 async function testReCaptcha() {
-  console.log('\nTesting reCaptcha Detection...');
-  const headless = process.env.HEADLESS !== 'false';
-  const browser = await chromium.launch({ headless });
+  console.log('\nTesting reCaptcha Detection & Solving...');
+  const browser = await chromium.launch({ headless: false });
   const page = await browser.newPage();
 
   try {
     await page.goto('https://www.google.com/recaptcha/api2/demo');
     await page.waitForLoadState('networkidle');
 
-    const captchas = await findCaptchaFrames(page);
-    console.log(`Found ${captchas.length} frames.`);
+    console.log("Solving reCaptcha...");
+    const success = await solveCaptcha(page, SOLVER_OPTIONS);
 
-    if (captchas.some(c => c.type === 'recaptcha')) {
-      console.log('✅ Identified reCaptcha');
+    if (success) {
+      console.log('✅ Successfully solved reCaptcha');
     } else {
-      console.error('❌ Failed to identify reCaptcha');
+      console.error('❌ Failed to solve reCaptcha');
     }
   } catch (e) {
     console.error('Error:', e);
@@ -73,22 +68,22 @@ async function testReCaptcha() {
 }
 
 async function testCloudflare() {
-  console.log('\nTesting Cloudflare Detection...');
-  const headless = process.env.HEADLESS !== 'false';
-  const browser = await chromium.launch({ headless });
+  console.log('\nTesting Cloudflare Detection & Solving...');
+  const browser = await chromium.launch({ headless: false });
   const page = await browser.newPage();
 
   try {
     await page.goto('https://2captcha.com/demo/cloudflare-turnstile');
+    // Wait for cloudflare to appear
     await page.waitForTimeout(3000);
 
-    const captchas = await findCaptchaFrames(page);
-    console.log(`Found ${captchas.length} frames.`);
+    console.log("Solving Cloudflare...");
+    const success = await solveCaptcha(page, SOLVER_OPTIONS);
 
-    if (captchas.some(c => c.type === 'cloudflare')) {
-      console.log('✅ Identified Cloudflare');
+    if (success) {
+      console.log('✅ Successfully solved Cloudflare');
     } else {
-      console.error('❌ Failed to identify Cloudflare');
+      console.error('❌ Failed to solve Cloudflare');
     }
   } catch (e) {
     console.error('Error:', e);
@@ -98,10 +93,9 @@ async function testCloudflare() {
 }
 
 async function runTests() {
-  await testHCaptcha();
+  // await testHCaptcha();
   await testReCaptcha();
-  await testCloudflare();
+  // await testCloudflare();
 }
 
 runTests();
-

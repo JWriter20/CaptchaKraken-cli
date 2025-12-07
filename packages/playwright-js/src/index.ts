@@ -249,8 +249,24 @@ async function executeClick(
 ): Promise<void> {
   if (action.action !== 'click') return;
 
-  // Multi-click support via all_coordinates
-  if (action.all_coordinates) {
+  const box = await locator.boundingBox();
+  if (!box) {
+    console.error("Could not get bounding box for click target");
+    return;
+  }
+
+  // Use percentages if available - more reliable than pixel coordinates calculated by Python
+  if (action.all_coordinates_pct && action.all_coordinates_pct.length > 0) {
+    for (const coordPct of action.all_coordinates_pct) {
+      const x = box.width * coordPct[0];
+      const y = box.height * coordPct[1];
+      console.log(`  Clicking pct at (${coordPct[0]}, ${coordPct[1]}) -> (${x}, ${y})`);
+      await locator.click({ position: { x, y } });
+      await new Promise(r => setTimeout(r, 200));
+    }
+  }
+  // Fallback to all_coordinates (likely pixels)
+  else if (action.all_coordinates) {
     for (const coords of action.all_coordinates) {
       console.log(`  Clicking at (${coords[0]}, ${coords[1]})`);
       await locator.click({ position: { x: coords[0], y: coords[1] } });
@@ -262,6 +278,9 @@ async function executeClick(
     for (const targetId of action.target_ids) {
       const elem = elements.find(e => e.element_id === targetId);
       if (elem) {
+        // element bbox is usually percentage in InteractableElement if normalized? 
+        // Need to check how extraction works. 
+        // But here we might just click based on relative bbox if available.
         const x = elem.bbox[0] + elem.bbox[2] / 2;
         const y = elem.bbox[1] + elem.bbox[3] / 2;
         console.log(`  Clicking element ${targetId} at (${x}, ${y})`);
@@ -270,7 +289,16 @@ async function executeClick(
       }
     }
   }
-  // Single click with coordinates
+  // Single click with percentage (Preferred)
+  else if (action.point_percent) {
+    const x = box.width * action.point_percent[0];
+    const y = box.height * action.point_percent[1];
+    console.log(`  Clicking at ${action.point_percent[0] * 100}%, ${action.point_percent[1] * 100}% -> (${x}, ${y})`);
+    await locator.click({
+      position: { x, y }
+    });
+  }
+  // Single click with coordinates (Fallback)
   else if (action.coordinates) {
     console.log(`  Clicking at (${action.coordinates[0]}, ${action.coordinates[1]})`);
     await locator.click({
@@ -289,40 +317,55 @@ async function executeDrag(
 ): Promise<void> {
   if (action.action !== 'drag') return;
 
-  const source = action.source_coordinates;
-  const target = action.target_coordinates;
-
-  if (!source || !target) {
-    console.log("  Missing drag coordinates");
+  const box = await locator.boundingBox();
+  if (!box) {
+    console.error("Could not get bounding box for drag target");
     return;
   }
 
-  const box = await locator.boundingBox();
-  if (box) {
-    const absSx = box.x + source[0];
-    const absSy = box.y + source[1];
-    const absTx = box.x + target[0];
-    const absTy = box.y + target[1];
+  let sourceX, sourceY, targetX, targetY;
 
-    console.log(`  Dragging from (${absSx}, ${absSy}) to (${absTx}, ${absTy})`);
+  // Prefer percentages
+  if (action.source_coordinates_pct && action.target_coordinates_pct) {
+    sourceX = box.x + (box.width * action.source_coordinates_pct[0]);
+    sourceY = box.y + (box.height * action.source_coordinates_pct[1]);
+    targetX = box.x + (box.width * action.target_coordinates_pct[0]);
+    targetY = box.y + (box.height * action.target_coordinates_pct[1]);
+    console.log(`  Dragging using percentages: (${action.source_coordinates_pct}) -> (${action.target_coordinates_pct})`);
+  } else {
+    // Fallback to absolute pixels (relative to element top-left)
+    const source = action.source_coordinates;
+    const target = action.target_coordinates;
 
-    // Use mouse on the page
-    const page = 'page' in pageOrFrame ? pageOrFrame.page() : pageOrFrame;
-    await page.mouse.move(absSx, absSy);
-    await page.mouse.down();
-
-    // Move in steps for smoother drag
-    const steps = 20;
-    for (let i = 1; i <= steps; i++) {
-      const t = i / steps;
-      const currentX = absSx + (absTx - absSx) * t;
-      const currentY = absSy + (absTy - absSy) * t;
-      await page.mouse.move(currentX, currentY);
-      await new Promise(r => setTimeout(r, 20));
+    if (!source || !target) {
+      console.log("  Missing drag coordinates");
+      return;
     }
 
-    await page.mouse.up();
+    sourceX = box.x + source[0];
+    sourceY = box.y + source[1];
+    targetX = box.x + target[0];
+    targetY = box.y + target[1];
   }
+
+  console.log(`  Dragging from (${sourceX}, ${sourceY}) to (${targetX}, ${targetY})`);
+
+  // Use mouse on the page
+  const page = 'page' in pageOrFrame ? pageOrFrame.page() : pageOrFrame;
+  await page.mouse.move(sourceX, sourceY);
+  await page.mouse.down();
+
+  // Move in steps for smoother drag
+  const steps = 20;
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    const currentX = sourceX + (targetX - sourceX) * t;
+    const currentY = sourceY + (targetY - sourceY) * t;
+    await page.mouse.move(currentX, currentY);
+    await new Promise(r => setTimeout(r, 20));
+  }
+
+  await page.mouse.up();
 }
 
 /**

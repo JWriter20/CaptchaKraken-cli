@@ -16,6 +16,10 @@ import base64
 from typing import Optional, List, Literal, Dict, Any, Tuple
 from dataclasses import dataclass, field
 
+try:
+    import google.generativeai as genai
+except ImportError:
+    genai = None
 
 @dataclass
 class PlannedAction:
@@ -228,6 +232,7 @@ class ActionPlanner:
     Supports multiple backends:
     - ollama: Local Ollama server with multimodal models (llava, gemma, etc.)
     - openai: OpenAI API (GPT-4V, etc.)
+    - gemini: Google Gemini API (Gemini 2.0 Flash, etc.)
     
     Enhanced features:
     - Understands numbered overlay elements
@@ -237,22 +242,39 @@ class ActionPlanner:
     
     def __init__(
         self,
-        backend: Literal["ollama", "openai"] = "ollama",
+        backend: Literal["ollama", "openai", "gemini"] = "ollama",
         model: Optional[str] = None,
         openai_api_key: Optional[str] = None,
         openai_base_url: Optional[str] = None,
         ollama_host: Optional[str] = None,
+        gemini_api_key: Optional[str] = None,
         thinking_enabled: bool = True,
     ):
         self.backend = backend
         self.openai_api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
         self.openai_base_url = openai_base_url or os.getenv("OPENAI_BASE_URL")
         self.ollama_host = ollama_host or os.getenv("OLLAMA_HOST", "http://localhost:11434")
+        self.gemini_api_key = gemini_api_key or os.getenv("GEMINI_API_KEY")
         self.thinking_enabled = thinking_enabled
         
+        # Configure Gemini if selected
+        if self.backend == "gemini":
+            if not genai:
+                raise ImportError("google-generativeai package is required for Gemini backend. Install it with: pip install google-generativeai")
+            if not self.gemini_api_key:
+                # Warning or error? Let's rely on environment or user providing it.
+                pass
+            else:
+                genai.configure(api_key=self.gemini_api_key)
+
         # Default models per backend
         if model is None:
-            self.model = "hf.co/unsloth/gemma-3-12b-it-GGUF:Q4_K_M" if backend == "ollama" else "gpt-4o"
+            if backend == "ollama":
+                self.model = "hf.co/unsloth/gemma-3-12b-it-GGUF:Q4_K_M"
+            elif backend == "openai":
+                self.model = "gpt-4o"
+            elif backend == "gemini":
+                self.model = "gemini-2.0-flash-exp"
         else:
             self.model = model
     
@@ -305,9 +327,32 @@ class ActionPlanner:
                 ],
                 temperature=0.1,
                 max_tokens=600,
+                response_format={"type": "json_object"},
             )
             return response.choices[0].message.content
         
+        if self.backend == "gemini":
+            if not genai:
+                raise ValueError("google-generativeai not installed")
+            
+            # Configure API Key if not already done globally
+            if self.gemini_api_key:
+                genai.configure(api_key=self.gemini_api_key)
+
+            model = genai.GenerativeModel(self.model)
+            
+            # Load image
+            import PIL.Image
+            img = PIL.Image.open(image_path)
+            
+            # Gemini generate_content accepts list of text and images
+            # Enforce JSON if supported by generation_config
+            response = model.generate_content(
+                [prompt, img],
+                generation_config=genai.types.GenerationConfig(response_mime_type="application/json")
+            )
+            return response.text
+            
         raise ValueError(f"Unknown backend: {self.backend}")
     
     def _safe_json_loads(self, content: str, default: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -344,7 +389,7 @@ class ActionPlanner:
         """Classify captcha into the specialized categories."""
         prompt = CLASSIFICATION_PROMPT
         if prompt_text:
-            prompt += f'\n\nInstruction text: "{prompt_text}"'
+            prompt += f'\\n\\nInstruction text: "{prompt_text}"'
         
         raw = self._chat_with_image(prompt, image_path)
         return self._safe_json_loads(
@@ -380,7 +425,7 @@ class ActionPlanner:
         """Decide drag puzzle mode and generate prompts for draggable and destination."""
         prompt = DRAG_STRATEGY_PROMPT
         if prompt_text:
-            prompt += f'\n\nPrompt/instructions: "{prompt_text}"'
+            prompt += f'\\n\\nPrompt/instructions: "{prompt_text}"'
         
         raw = self._chat_with_image(prompt, image_path)
         parsed = self._safe_json_loads(
@@ -457,6 +502,8 @@ class ActionPlanner:
             return self._plan_ollama(image_path, full_context)
         elif self.backend == "openai":
             return self._plan_openai(image_path, full_context)
+        elif self.backend == "gemini":
+            return self._plan_gemini(image_path, full_context)
         else:
             raise ValueError(f"Unknown backend: {self.backend}")
     
@@ -473,17 +520,17 @@ class ActionPlanner:
             parts.append(f"Captcha prompt: \"{prompt_text}\"")
         
         if elements:
-            parts.append(f"\nNumbered elements visible in image ({len(elements)} total):")
+            parts.append(f"\\nNumbered elements visible in image ({len(elements)} total):")
             for elem in elements[:20]:  # Limit to first 20
                 elem_id = elem.get('element_id', elem.get('id', '?'))
                 elem_type = elem.get('element_type', 'unknown')
                 parts.append(f"  - Element {elem_id}: {elem_type}")
-            parts.append("\nUse these element IDs in your response when applicable.")
+            parts.append("\\nUse these element IDs in your response when applicable.")
         
         if context:
-            parts.append(f"\nAdditional context: {context}")
+            parts.append(f"\\nAdditional context: {context}")
         
-        return "\n".join(parts)
+        return "\\n".join(parts)
     
     def _plan_ollama(self, image_path: str, context: str) -> PlannedAction:
         """Plan using Ollama with a multimodal model."""
@@ -491,9 +538,9 @@ class ActionPlanner:
         
         prompt = PLANNING_PROMPT
         if self.thinking_enabled:
-            prompt = THINKING_PROMPT + "\n\n" + prompt
+            prompt = THINKING_PROMPT + "\\n\\n" + prompt
         if context:
-            prompt += f"\n\n{context}"
+            prompt += f"\\n\\n{context}"
         
         response = ollama.chat(
             model=self.model,
@@ -532,9 +579,9 @@ class ActionPlanner:
         
         prompt = PLANNING_PROMPT
         if self.thinking_enabled:
-            prompt = THINKING_PROMPT + "\n\n" + prompt
+            prompt = THINKING_PROMPT + "\\n\\n" + prompt
         if context:
-            prompt += f"\n\n{context}"
+            prompt += f"\\n\\n{context}"
         
         response = client.chat.completions.create(
             model=self.model,
@@ -557,6 +604,31 @@ class ActionPlanner:
         )
         
         return self._parse_response(response.choices[0].message.content)
+    
+    def _plan_gemini(self, image_path: str, context: str) -> PlannedAction:
+        """Plan using Google Gemini API."""
+        if not genai:
+            raise ImportError("google-generativeai package is required for Gemini backend.")
+        
+        # Ensure configured
+        if self.gemini_api_key:
+            genai.configure(api_key=self.gemini_api_key)
+
+        model = genai.GenerativeModel(self.model)
+        
+        import PIL.Image
+        img = PIL.Image.open(image_path)
+        
+        prompt = PLANNING_PROMPT
+        if self.thinking_enabled:
+            prompt = THINKING_PROMPT + "\\n\\n" + prompt
+        if context:
+            prompt += f"\\n\\n{context}"
+        
+        # Gemini generate_content accepts list of text and images
+        response = model.generate_content([prompt, img])
+        
+        return self._parse_response(response.text)
     
     def _parse_response(self, response_text: str) -> PlannedAction:
         """Parse the LLM response into a PlannedAction."""
@@ -600,8 +672,6 @@ class ActionPlanner:
         Returns:
             Dict with captcha_type, requires_selection, is_checkbox, etc.
         """
-        import ollama
-        
         prompt = """Analyze this captcha image and respond with a JSON object containing:
 {
   "captcha_type": "recaptcha_v2" | "recaptcha_v3" | "hcaptcha" | "cloudflare" | "slider" | "puzzle" | "text" | "other",
@@ -616,14 +686,8 @@ class ActionPlanner:
 
 Respond with ONLY the JSON object."""
         
-        response = ollama.chat(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt, "images": [image_path]}],
-            options={"temperature": 0.1}
-        )
-        
         try:
-            content = response["message"]["content"]
+            content = self._chat_with_image(prompt, image_path)
             json_start = content.find("{")
             json_end = content.rfind("}") + 1
             if json_start != -1:
@@ -644,16 +708,8 @@ Respond with ONLY the JSON object."""
         Returns:
             Answer to the question
         """
-        import ollama
-        
         prompt = f"""{question}
 
 Provide a brief, direct answer. If asking about specific elements, reference them by their number."""
         
-        response = ollama.chat(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt, "images": [image_path]}],
-            options={"temperature": 0.1}
-        )
-        
-        return response["message"]["content"]
+        return self._chat_with_image(prompt, image_path)

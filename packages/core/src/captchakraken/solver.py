@@ -31,6 +31,7 @@ Usage:
 """
 
 import os
+import sys
 from typing import List, Optional, Callable, Iterator, Union, Dict, Any
 from pathlib import Path
 from PIL import Image
@@ -82,6 +83,7 @@ class CaptchaSolver:
         attention_backend: str = "moondream",
         openai_api_key: Optional[str] = None,
         openai_base_url: Optional[str] = None,
+        gemini_api_key: Optional[str] = None,
         device: Optional[str] = None,
     ):
         # Stage 1: Planner uses Ollama or OpenAI API
@@ -90,6 +92,7 @@ class CaptchaSolver:
             model=planner_model,
             openai_api_key=openai_api_key,
             openai_base_url=openai_base_url,
+            gemini_api_key=gemini_api_key,
         )
         
         # Stage 2: Attention extractor uses transformers (local model)
@@ -138,7 +141,7 @@ class CaptchaSolver:
         classification = self.planner.classify_captcha(image_path, prompt_text or context)
         captcha_kind = (classification.get("captcha_kind") or "unknown").lower()
         drag_variant = (classification.get("drag_variant") or "unknown").lower()
-        print(f"[Specialized] Classified as: {captcha_kind} (drag_variant={drag_variant})")
+        print(f"[Specialized] Classified as: {captcha_kind} (drag_variant={drag_variant})", file=sys.stderr)
         
         action: Optional[CaptchaAction] = None
         
@@ -160,12 +163,12 @@ class CaptchaSolver:
             elif captcha_kind == "text":
                 action = self._solve_text_captcha(image_path)
         except Exception as e:
-            print(f"[Specialized] Handler error: {e}")
+            print(f"[Specialized] Handler error: {e}", file=sys.stderr)
             action = None
         
         # Fallback to legacy planner if needed
         if action is None:
-            print("[Fallback] Falling back to legacy planner flow")
+            print("[Fallback] Falling back to legacy planner flow", file=sys.stderr)
             action = self._solve_with_legacy_planner(
                 image_path=image_path,
                 context=context,
@@ -231,6 +234,7 @@ class CaptchaSolver:
         bounding_boxes_pct: List[List[float]] = []
         bounding_boxes_px: List[List[float]] = []
         all_coordinates: List[List[float]] = []
+        all_coordinates_pct: List[List[float]] = []
         
         for det in detections:
             bbox = det.get("bbox")
@@ -241,6 +245,7 @@ class CaptchaSolver:
             bounding_boxes_px.append(self._bbox_pct_to_px(bbox_pct))
             center_pct = self._bbox_center_pct(bbox_pct)
             all_coordinates.append(list(self._pct_to_pixels_tuple(center_pct)))
+            all_coordinates_pct.append(list(center_pct))
         
         if not bounding_boxes_pct:
             raise ValueError(f"Detection returned no boxes for target '{target_label}'")
@@ -252,7 +257,9 @@ class CaptchaSolver:
             bounding_boxes=bounding_boxes_pct,
             bounding_boxes_px=bounding_boxes_px,
             all_coordinates=all_coordinates if len(all_coordinates) > 1 else None,
+            all_coordinates_pct=all_coordinates_pct if len(all_coordinates_pct) > 1 else None,
             coordinates=all_coordinates[0] if all_coordinates else None,
+            point_percent=all_coordinates_pct[0] if all_coordinates_pct else None,
         )
     
     def _solve_drag_puzzle(
@@ -632,11 +639,18 @@ class CaptchaSolver:
             
             if all_coords:
                 print(f"[Stage 2] Using element centers: {all_coords}")
+                # Convert to pct if possible
+                all_coords_pct = []
+                for coord in all_coords:
+                    all_coords_pct.append(list(self._pixels_to_pct(tuple(coord))))
+
                 return ClickAction(
                     action="click",
                     target_ids=planned.target_element_ids,
                     coordinates=all_coords[0] if len(all_coords) == 1 else None,
                     all_coordinates=all_coords if len(all_coords) > 1 else None,
+                    all_coordinates_pct=all_coords_pct if len(all_coords_pct) > 1 else None,
+                    point_percent=all_coords_pct[0] if len(all_coords_pct) == 1 else None,
                 )
         
         # Fall back to attention-based extraction
@@ -654,7 +668,11 @@ class CaptchaSolver:
             x, y = x_pct, y_pct
         
         print(f"[Stage 2] Coordinates: ({x}, {y})")
-        return ClickAction(action="click", coordinates=[x, y])
+        return ClickAction(
+            action="click",
+            coordinates=[x, y],
+            point_percent=[x_pct, y_pct]
+        )
     
     def _create_drag_action(
         self,
@@ -732,12 +750,23 @@ class CaptchaSolver:
         
         print(f"[Stage 2] Source: {source_coords}, Target: {target_coords}")
         
+        # Calculate percentages for response if not already available
+        source_pct = None
+        target_pct = None
+        
+        if self._current_image_size:
+             w, h = self._current_image_size
+             source_pct = [source_coords[0]/w, source_coords[1]/h]
+             target_pct = [target_coords[0]/w, target_coords[1]/h]
+        
         return DragAction(
             action="drag",
             source_id=planned.source_element_id,
             source_coordinates=list(source_coords),
+            source_coordinates_pct=source_pct,
             target_id=planned.target_element_id,
-            target_coordinates=list(target_coords)
+            target_coordinates=list(target_coords),
+            target_coordinates_pct=target_pct
         )
     
     def _create_verify_action(

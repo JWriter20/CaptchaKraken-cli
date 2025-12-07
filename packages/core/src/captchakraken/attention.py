@@ -11,6 +11,7 @@ Enhanced with intelligent element detection and focus capabilities.
 from __future__ import annotations
 
 import re
+import sys
 from typing import Optional, Tuple, List, Literal, Dict, Any, TYPE_CHECKING
 import numpy as np
 from PIL import Image
@@ -50,7 +51,7 @@ class AttentionExtractor:
             if torch.cuda.is_available():
                 self.device = "cuda"
                 if hasattr(torch.version, "hip") and torch.version.hip:
-                    print(f"[AttentionExtractor] Detected ROCm (HIP {torch.version.hip}), using AMD GPU: {torch.cuda.get_device_name(0)}")
+                    print(f"[AttentionExtractor] Detected ROCm (HIP {torch.version.hip}), using AMD GPU: {torch.cuda.get_device_name(0)}", file=sys.stderr)
             elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
                 self.device = "mps"
             else:
@@ -72,9 +73,6 @@ class AttentionExtractor:
         
         if self.backend == "moondream":
             self._load_moondream()
-        elif self.backend == "qwen-vl":
-            # Qwen-VL uses Ollama, no local model to load
-            pass
         else:
             raise ValueError(f"Unknown backend: {self.backend}")
     
@@ -83,7 +81,7 @@ class AttentionExtractor:
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
         
-        print(f"[AttentionExtractor] Loading moondream: {self.model_id}")
+        print(f"[AttentionExtractor] Loading moondream: {self.model_id}", file=sys.stderr)
         
         # Prefer FP16 on GPU; CPU stays FP32
         if self.device == "cuda":
@@ -104,10 +102,10 @@ class AttentionExtractor:
                 trust_remote_code=True
             )
         except Exception as e:
-            print(f"[AttentionExtractor] AutoTokenizer unavailable: {e}")
+            print(f"[AttentionExtractor] AutoTokenizer unavailable: {e}", file=sys.stderr)
 
         dtype_display = getattr(self._model, "dtype", dtype)
-        print(f"[AttentionExtractor] Moondream loaded on {self.device} (dtype={dtype_display})")
+        print(f"[AttentionExtractor] Moondream loaded on {self.device} (dtype={dtype_display})", file=sys.stderr)
     
     # =========================================================================
     # CORE EXTRACTION METHODS
@@ -133,8 +131,8 @@ class AttentionExtractor:
         image = Image.open(image_path).convert("RGB")
         img_width, img_height = image.size
         
-        print(f"[AttentionExtractor] Image: {img_width}x{img_height}")
-        print(f"[AttentionExtractor] Target: {target_description}")
+        print(f"[AttentionExtractor] Image: {img_width}x{img_height}", file=sys.stderr)
+        print(f"[AttentionExtractor] Target: {target_description}", file=sys.stderr)
         
         if self.backend == "moondream":
             x_pct, y_pct = self._extract_moondream(image, target_description)
@@ -150,7 +148,7 @@ class AttentionExtractor:
         # Store pixel coords for visualization
         self._last_points = [(int(x_pct * img_width), int(y_pct * img_height))]
         
-        print(f"[AttentionExtractor] Result: ({x_pct:.4f}, {y_pct:.4f})")
+        print(f"[AttentionExtractor] Result: ({x_pct:.4f}, {y_pct:.4f})", file=sys.stderr)
         return (x_pct, y_pct)
     
     def focus(
@@ -197,7 +195,7 @@ class AttentionExtractor:
         image = Image.open(image_path).convert("RGB")
         img_width, img_height = image.size
         
-        print(f"[AttentionExtractor] Detecting: {object_class}")
+        print(f"[AttentionExtractor] Detecting: {object_class}", file=sys.stderr)
         
         detections = []
         

@@ -14,6 +14,7 @@ class ClickAction(Action):
     # Pixel coordinates for single click (fallback for downstream executors)
     coordinates: Optional[List[float]] = None  # [x, y] as percentages or pixels
     all_coordinates: Optional[List[List[float]]] = None  # Multiple coordinates for multi-click
+    all_coordinates_pct: Optional[List[List[float]]] = None  # Multiple normalized coordinates for multi-click
     # Normalized coordinates for single-click targets
     point_percent: Optional[List[float]] = None  # [x_pct, y_pct] in [0, 1]
     # Bounding boxes for multi-select captchas (normalized and absolute variants)

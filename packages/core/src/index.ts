@@ -6,6 +6,8 @@ export type CaptchaAction =
     action: 'click';
     coordinates?: [number, number];
     all_coordinates?: [number, number][];
+    all_coordinates_pct?: [number, number][];
+    point_percent?: [number, number];
     target_ids?: number[];
     bounding_boxes?: number[][];
   }
@@ -13,6 +15,8 @@ export type CaptchaAction =
     action: 'drag';
     source_coordinates: [number, number];
     target_coordinates: [number, number];
+    source_coordinates_pct?: [number, number];
+    target_coordinates_pct?: [number, number];
     source_id?: number;
     target_id?: number;
   }
@@ -22,7 +26,7 @@ export type CaptchaAction =
   | { action: 'verify'; target_id?: number };
 
 export interface SolveOptions {
-  /** Backend for action planning: "ollama" or "openai" */
+  /** Backend for action planning: "ollama" or "openai" or "gemini" */
   planner?: 'ollama' | 'openai' | 'gemini';
   /** Model name for the planner */
   plannerModel?: string;
@@ -32,6 +36,8 @@ export interface SolveOptions {
   apiKey?: string;
   /** OpenAI base URL (if using openai planner) */
   apiBase?: string;
+  /** Gemini API key (if using gemini planner) */
+  geminiApiKey?: string;
   /** Path to Python executable */
   pythonPath?: string;
   /** Extracted prompt text */
@@ -78,6 +84,9 @@ export async function solveCaptcha(
     if (options.apiBase) {
       args.push('--api-base', options.apiBase);
     }
+    if (options.geminiApiKey) {
+      args.push('--gemini-api-key', options.geminiApiKey);
+    }
     if (options.promptText) {
       args.push('--prompt-text', options.promptText);
     }
@@ -112,7 +121,24 @@ export async function solveCaptcha(
       }
 
       try {
-        const result = JSON.parse(stdout);
+        // Attempt to find the last valid JSON line
+        const lines = stdout.trim().split('\n');
+        let jsonStr = '';
+        for (let i = lines.length - 1; i >= 0; i--) {
+          const line = lines[i].trim();
+          if (line.startsWith('{') && line.endsWith('}')) {
+            jsonStr = line;
+            break;
+          }
+        }
+
+        if (!jsonStr) {
+          // Fallback: try parsing the whole stdout if single line or clean
+          jsonStr = stdout;
+        }
+
+        console.log(`JSON output: ${jsonStr}`);
+        const result = JSON.parse(jsonStr);
         resolve(result);
       } catch {
         reject(new Error(`Failed to parse JSON output: ${stdout}`));
