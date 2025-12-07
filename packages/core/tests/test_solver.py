@@ -202,7 +202,8 @@ class TestAttentionExtractor:
         """Test extractor initializes correctly."""
         extractor = AttentionExtractor(backend="moondream")
         assert extractor.backend == "moondream"
-        assert extractor.model_id == "vikhyatk/moondream2"
+        # Default should use moondream2 on Hugging Face
+        assert "moondream" in extractor.model_id.lower()
     
     def test_parse_percentage_xy_format(self):
         """Test parsing x=%, y=% format coordinates."""
@@ -368,10 +369,8 @@ class TestCaptchaSolver:
         finally:
             os.unlink(temp_path)
     
-    @patch('src.captchakraken.solver.match_template_with_mask')
-    @patch('src.captchakraken.solver.remove_background')
-    @patch('src.captchakraken.solver.extract_segment')
-    @patch('src.captchakraken.solver.find_draggable_candidates')
+    @patch.object(ActionPlanner, 'refine_drag')
+    @patch.object(ActionPlanner, 'get_drag_destination')
     @patch.object(ActionPlanner, 'plan_drag_strategy')
     @patch.object(ActionPlanner, 'classify_captcha')
     @patch.object(AttentionExtractor, 'detect_objects')
@@ -380,23 +379,33 @@ class TestCaptchaSolver:
         mock_detect,
         mock_classify,
         mock_drag_plan,
-        mock_candidates,
-        mock_extract,
-        mock_remove_bg,
-        mock_match,
+        mock_get_dest,
+        mock_refine,
     ):
-        """Template drag falls back to heuristic candidate and template match."""
+        """Template drag now uses iterative visual solver."""
         mock_classify.return_value = {"captcha_kind": "drag_puzzle", "drag_variant": "template_matching"}
         mock_drag_plan.return_value = {
             "drag_type": "template_matching",
             "draggable_prompt": "top segment movable square",
             "destination_prompt": "unused",
         }
-        mock_detect.return_value = []  # force candidate path
-        mock_candidates.return_value = [{"bbox": (0, 0, 20, 20)}]
-        mock_extract.return_value = [[1]]
-        mock_remove_bg.return_value = [[1]]
-        mock_match.return_value = SimpleNamespace(center=(50, 50), confidence=0.9)
+        
+        # 1. Detection of draggable
+        mock_detect.return_value = [{"bbox": [0.0, 0.0, 0.2, 0.2]}] # Top-left 20%
+        
+        # 2. Initial proposal
+        mock_get_dest.return_value = {
+            "target_x": 0.5,
+            "target_y": 0.5,
+            "reasoning": "Move to center"
+        }
+        
+        # 3. Refinement (accepted immediately)
+        mock_refine.return_value = {
+            "status": "correct",
+            "adjustment": {},
+            "reasoning": "Looks good"
+        }
         
         import tempfile
         from PIL import Image
@@ -410,10 +419,14 @@ class TestCaptchaSolver:
             action = solver.solve_step(temp_path, "solve drag puzzle")
             
             assert isinstance(action, DragAction)
-            assert action.template_match_confidence == 0.9
+            # Source center of [0,0,0.2,0.2] is [0.1, 0.1] -> 10, 10
+            assert action.source_coordinates == [10.0, 10.0]
+            # Target is [0.5, 0.5] -> 50, 50
             assert action.target_coordinates == [50.0, 50.0]
+            
         finally:
-            os.unlink(temp_path)
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
     
     @patch.object(ActionPlanner, 'read_text')
     @patch.object(ActionPlanner, 'classify_captcha')

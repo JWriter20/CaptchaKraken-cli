@@ -1,5 +1,5 @@
 import { Page, Frame, ElementHandle } from 'patchright';
-import { solveCaptcha, CaptchaAction, SolveOptions, applyOverlays } from 'captchakraken';
+import { solveCaptcha as solveCaptchaCore, CaptchaAction, SolveOptions, applyOverlays } from 'captchakraken';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -11,7 +11,7 @@ export { findCaptchaFrames, DetectedCaptcha, extractCaptchaInfo, InteractableEle
 /**
  * Find and solve all captchas on the page, handling popup challenges.
  */
-export async function solveCaptchasOnPage(
+export async function solveCaptcha(
   page: Page,
   options: SolveOptions = {}
 ): Promise<boolean> {
@@ -187,7 +187,7 @@ export async function solveCaptchaLoop(
       }
 
       // Get action from solver with element info
-      const action = await solveCaptcha(tmpPath, prompt, {
+      const action = await solveCaptchaCore(tmpPath, prompt, {
         ...options,
         elements: elements,
         promptText: promptText || undefined,
@@ -247,6 +247,8 @@ async function executeClick(
   action: CaptchaAction,
   elements: InteractableElement[]
 ): Promise<void> {
+  if (action.action !== 'click') return;
+
   // Multi-click support via all_coordinates
   if (action.all_coordinates) {
     for (const coords of action.all_coordinates) {
@@ -285,6 +287,8 @@ async function executeDrag(
   locator: ReturnType<Page['locator']>,
   action: CaptchaAction
 ): Promise<void> {
+  if (action.action !== 'drag') return;
+
   const source = action.source_coordinates;
   const target = action.target_coordinates;
 
@@ -330,6 +334,8 @@ async function executeVerify(
   action: CaptchaAction,
   elements: InteractableElement[]
 ): Promise<void> {
+  if (action.action !== 'verify') return;
+
   // Try to find verify button from elements
   const verifyElem = elements.find(e =>
     e.element_type === 'verify_button' || e.element_type === 'submit_button'

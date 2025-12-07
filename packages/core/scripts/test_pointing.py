@@ -9,9 +9,11 @@ import os
 import sys
 import argparse
 
-# Add project root to path
+# Add project root and src to path
 project_root = os.path.join(os.path.dirname(__file__), '..')
+src_root = os.path.join(project_root, 'src')
 sys.path.insert(0, project_root)
+sys.path.insert(0, src_root)
 
 from src.captchakraken.attention import AttentionExtractor
 
@@ -27,17 +29,20 @@ def test_pointing(extractor: AttentionExtractor, image_path: str, target: str, o
         x_pct, y_pct = extractor.extract_coordinates(image_path, target)
         print(f"\n✓ Position: ({x_pct:.2%}, {y_pct:.2%})")
         
-        # Generate visualization
-        if output_path is None:
-            output_name = f"test_pointing_{os.path.basename(image_path)}"
-        else:
-            output_name = output_path
-            
-        vis_path = extractor.visualize_attention(
-            image_path, 
-            target,
-            output_path=output_name
-        )
+        # Generate visualization    
+    if output_path is None:
+        # Create test-results directory if it doesn't exist
+        results_dir = os.path.join(project_root, "test-results")
+        os.makedirs(results_dir, exist_ok=True)
+        output_name = os.path.join(results_dir, f"test_pointing_{os.path.basename(image_path)}")
+    else:
+        output_name = output_path
+        
+    vis_path = extractor.visualize_attention(
+        image_path, 
+        target,
+        output_path=output_name
+    )
         print(f"✓ Visualization saved: {vis_path}")
         
         return True, (x_pct, y_pct)
@@ -54,6 +59,18 @@ def main():
     parser.add_argument("image_path", help="Path to the image file")
     parser.add_argument("query", help="Target description to point to")
     parser.add_argument("--output", "-o", help="Output path for visualization", default=None)
+    parser.add_argument(
+        "--model",
+        "-m",
+        help="Hugging Face model id (default: vikhyatk/moondream2)",
+        default="vikhyatk/moondream2",
+    )
+    parser.add_argument(
+        "--device",
+        "-d",
+        help="Device to run on (cuda, mps, cpu). Leave empty to auto-detect.",
+        default=None,
+    )
     
     args = parser.parse_args()
 
@@ -62,10 +79,11 @@ def main():
     print("="*60)
     
     # Create extractor with moondream backend (uses native point() method)
-    print("\nInitializing AttentionExtractor (moondream backend with point())...")
+    print(f"\nInitializing AttentionExtractor (backend=moondream, model={args.model})...")
     extractor = AttentionExtractor(
         backend="moondream",
-        model="vikhyatk/moondream2"
+        model=args.model,
+        device=args.device,
     )
     
     if not os.path.exists(args.image_path):

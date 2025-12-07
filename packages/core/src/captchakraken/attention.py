@@ -5,13 +5,11 @@ Uses VLM pointing/detection capabilities to extract coordinates.
 Supports multiple backends:
 - moondream: Uses native point()/detect() methods
 - qwen-vl: Uses Ollama with coordinate prompting
-- florence: Uses Florence-2 grounding (requires GPU)
 
 Enhanced with intelligent element detection and focus capabilities.
 """
 from __future__ import annotations
 
-import os
 import re
 from typing import Optional, Tuple, List, Literal, Dict, Any, TYPE_CHECKING
 import numpy as np
@@ -26,9 +24,8 @@ class AttentionExtractor:
     Extracts coordinates using VLM pointing/detection capabilities.
     
     Backends:
-    - "moondream": Uses vikhyatk/moondream2 with native point()/detect() methods
+    - "moondream": Uses vikhyatk/moondream2 (HF Transformers) with native point()/detect() methods
     - "qwen-vl": Uses Qwen2-VL via Ollama with coordinate prompting
-    - "florence": Uses Microsoft Florence-2 grounding
     
     Enhanced capabilities:
     - detect_objects(): Find all instances of a class (birds, cars, etc.)
@@ -41,32 +38,34 @@ class AttentionExtractor:
         self,
         model: str = "vikhyatk/moondream2",
         device: Optional[str] = None,
-        backend: Literal["moondream", "qwen-vl", "florence"] = "moondream",
+        backend: Literal["moondream", "qwen-vl"] = "moondream",
     ):
         self.model_id = model
         self.backend = backend
         
-        self._model = None
-        self._tokenizer = None
-        self._processor = None
-        
-        # For visualization
-        self._last_attention_grid = None
-        self._last_grid_size = None
-        self._last_points = None
-        self._last_detections = None
-        
+        # Decide device
         if device is None:
             import torch
+            # Prefer CUDA/ROCm if available (torch reports ROCm as cuda)
             if torch.cuda.is_available():
                 self.device = "cuda"
+                if hasattr(torch.version, "hip") and torch.version.hip:
+                    print(f"[AttentionExtractor] Detected ROCm (HIP {torch.version.hip}), using AMD GPU: {torch.cuda.get_device_name(0)}")
             elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
                 self.device = "mps"
             else:
                 self.device = "cpu"
         else:
             self.device = device
-    
+
+        self._model = None
+        
+        # For visualization
+        self._last_attention_grid = None
+        self._last_grid_size = None
+        self._last_points = None
+        self._last_detections = None
+
     def _load_model(self):
         if self._model is not None:
             return
@@ -76,53 +75,39 @@ class AttentionExtractor:
         elif self.backend == "qwen-vl":
             # Qwen-VL uses Ollama, no local model to load
             pass
-        elif self.backend == "florence":
-            self._load_florence()
         else:
             raise ValueError(f"Unknown backend: {self.backend}")
     
     def _load_moondream(self):
-        """Load moondream2 model."""
+        """Load moondream v2 via the Hugging Face implementation."""
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
         
         print(f"[AttentionExtractor] Loading moondream: {self.model_id}")
         
+        # Prefer FP16 on GPU; CPU stays FP32
+        if self.device == "cuda":
+            dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+        else:
+            dtype = torch.float32
+
         self._model = AutoModelForCausalLM.from_pretrained(
             self.model_id,
             trust_remote_code=True,
-            torch_dtype=torch.float16 if self.device != "cpu" else torch.float32,
+            torch_dtype=dtype,
         ).to(self.device)
         self._model.eval()
-        
-        self._tokenizer = AutoTokenizer.from_pretrained(
-            self.model_id,
-            trust_remote_code=True
-        )
-        
-        print(f"[AttentionExtractor] Moondream loaded on {self.device}")
-    
-    def _load_florence(self):
-        """Load Florence-2 model."""
-        import torch
-        from transformers import AutoModelForCausalLM, AutoProcessor
-        
-        model_id = "microsoft/Florence-2-base"
-        print(f"[AttentionExtractor] Loading Florence-2: {model_id}")
-        
-        self._model = AutoModelForCausalLM.from_pretrained(
-            model_id,
-            trust_remote_code=True,
-            torch_dtype=torch.float16 if self.device != "cpu" else torch.float32,
-        ).to(self.device)
-        self._model.eval()
-        
-        self._processor = AutoProcessor.from_pretrained(
-            model_id,
-            trust_remote_code=True
-        )
-        
-        print(f"[AttentionExtractor] Florence-2 loaded on {self.device}")
+
+        try:
+            AutoTokenizer.from_pretrained(
+                self.model_id,
+                trust_remote_code=True
+            )
+        except Exception as e:
+            print(f"[AttentionExtractor] AutoTokenizer unavailable: {e}")
+
+        dtype_display = getattr(self._model, "dtype", dtype)
+        print(f"[AttentionExtractor] Moondream loaded on {self.device} (dtype={dtype_display})")
     
     # =========================================================================
     # CORE EXTRACTION METHODS
@@ -155,8 +140,6 @@ class AttentionExtractor:
             x_pct, y_pct = self._extract_moondream(image, target_description)
         elif self.backend == "qwen-vl":
             x_pct, y_pct = self._extract_qwen_vl(image_path, target_description, img_width, img_height)
-        elif self.backend == "florence":
-            x_pct, y_pct = self._extract_florence(image, target_description)
         else:
             x_pct, y_pct = 0.5, 0.5
         
@@ -222,7 +205,18 @@ class AttentionExtractor:
             import torch
             with torch.no_grad():
                 try:
-                    result = self._model.detect(image, object_class)
+                    # Try preferred signature from Moondream3 preview: detect(image=..., query=..., settings)
+                    result = None
+                    try:
+                        result = self._model.detect(
+                            image=image,
+                            query=object_class,
+                            settings={"max_objects": 12},
+                        )
+                    except TypeError:
+                        # Fallback to positional signature detect(image, "car")
+                        result = self._model.detect(image, object_class)
+                    
                     # detect() returns {'objects': [{'x_min', 'y_min', 'x_max', 'y_max'}, ...]}
                     if result and 'objects' in result:
                         for obj in result['objects']:
@@ -233,9 +227,6 @@ class AttentionExtractor:
                         print(f"[AttentionExtractor] detect() found {len(detections)} {object_class}(s)")
                 except Exception as e:
                     print(f"[AttentionExtractor] detect() failed: {e}")
-        
-        elif self.backend == "florence":
-            detections = self._detect_florence(image, object_class)
         
         self._last_detections = detections
         return detections
@@ -449,23 +440,21 @@ class AttentionExtractor:
         except Exception as e:
             print(f"[AttentionExtractor] Ollama failed: {e}")
             return "Unable to answer"
-    
+
     # =========================================================================
     # BACKEND-SPECIFIC EXTRACTION METHODS
     # =========================================================================
     
     def _extract_moondream(self, image: Image.Image, target_description: str) -> Tuple[float, float]:
-        """Extract coordinates using moondream's native point() method."""
+        """Extract coordinates using moondream's native point() method or manual generation."""
         import torch
         
         with torch.no_grad():
-            # Use moondream's native point() method
+            # Use moondream's native point() method if available (original Moondream models)
             if hasattr(self._model, 'point'):
                 print("[AttentionExtractor] Using moondream point() method")
                 try:
                     result = self._model.point(image, target_description)
-                    # point() returns {'points': [{'x': float, 'y': float}, ...]}
-                    # x, y are already normalized to [0, 1]
                     if result and 'points' in result and len(result['points']) > 0:
                         point = result['points'][0]
                         x_pct, y_pct = point['x'], point['y']
@@ -476,13 +465,11 @@ class AttentionExtractor:
                 except Exception as e:
                     print(f"[AttentionExtractor] point() failed: {e}")
             
-            # Try detect() method as fallback
-            if hasattr(self._model, 'detect'):
+            # Try detect() method as fallback (original Moondream models)
+            elif hasattr(self._model, 'detect'):
                 print("[AttentionExtractor] Using moondream detect() method")
                 try:
                     result = self._model.detect(image, target_description)
-                    # detect() returns {'objects': [{'x_min': float, 'y_min': float, 'x_max': float, 'y_max': float}, ...]}
-                    # Values are normalized to [0, 1]
                     if result and 'objects' in result and len(result['objects']) > 0:
                         obj = result['objects'][0]
                         x_pct = (obj['x_min'] + obj['x_max']) / 2
@@ -493,7 +480,7 @@ class AttentionExtractor:
                         print(f"[AttentionExtractor] detect() returned no objects: {result}")
                 except Exception as e:
                     print(f"[AttentionExtractor] detect() failed: {e}")
-            
+
             # Fallback to center if nothing works
             print("[AttentionExtractor] No detection methods worked, using center")
             return (0.5, 0.5)
@@ -567,105 +554,6 @@ For example: x=25%, y=50%"""
         # Fallback to center
         print(f"[AttentionExtractor] Could not parse percentages, using center")
         return (0.5, 0.5)
-    
-    def _extract_florence(self, image: Image.Image, target_description: str) -> Tuple[float, float]:
-        """Extract coordinates using Florence-2 grounding."""
-        import torch
-        
-        img_width, img_height = image.size
-        
-        # Florence-2 uses special task prompts
-        task_prompt = "<CAPTION_TO_PHRASE_GROUNDING>"
-        prompt = f"{task_prompt} {target_description}"
-        
-        inputs = self._processor(
-            text=prompt,
-            images=image,
-            return_tensors="pt"
-        ).to(self.device)
-        
-        with torch.no_grad():
-            generated_ids = self._model.generate(
-                input_ids=inputs["input_ids"],
-                pixel_values=inputs["pixel_values"],
-                max_new_tokens=256,
-                num_beams=3,
-            )
-        
-        generated_text = self._processor.batch_decode(
-            generated_ids, skip_special_tokens=False
-        )[0]
-        
-        # Parse Florence output
-        parsed = self._processor.post_process_generation(
-            generated_text,
-            task=task_prompt,
-            image_size=(img_width, img_height)
-        )
-        
-        print(f"[AttentionExtractor] Florence parsed: {parsed}")
-        
-        # Extract bounding box and get center (Florence returns pixel coords)
-        if task_prompt in parsed and parsed[task_prompt].get('bboxes'):
-            bboxes = parsed[task_prompt]['bboxes']
-            if bboxes:
-                bbox = bboxes[0]  # First match
-                x_center = (bbox[0] + bbox[2]) / 2
-                y_center = (bbox[1] + bbox[3]) / 2
-                # Convert to percentages
-                return (x_center / img_width, y_center / img_height)
-        
-        # Fallback
-        return (0.5, 0.5)
-    
-    def _detect_florence(self, image: Image.Image, object_class: str) -> List[Dict[str, Any]]:
-        """Detect objects using Florence-2."""
-        import torch
-        
-        img_width, img_height = image.size
-        detections = []
-        
-        task_prompt = "<CAPTION_TO_PHRASE_GROUNDING>"
-        prompt = f"{task_prompt} {object_class}"
-        
-        inputs = self._processor(
-            text=prompt,
-            images=image,
-            return_tensors="pt"
-        ).to(self.device)
-        
-        with torch.no_grad():
-            generated_ids = self._model.generate(
-                input_ids=inputs["input_ids"],
-                pixel_values=inputs["pixel_values"],
-                max_new_tokens=256,
-                num_beams=3,
-            )
-        
-        generated_text = self._processor.batch_decode(
-            generated_ids, skip_special_tokens=False
-        )[0]
-        
-        parsed = self._processor.post_process_generation(
-            generated_text,
-            task=task_prompt,
-            image_size=(img_width, img_height)
-        )
-        
-        if task_prompt in parsed and parsed[task_prompt].get('bboxes'):
-            for bbox in parsed[task_prompt]['bboxes']:
-                # Convert pixel coords to percentages
-                detections.append({
-                    "label": object_class,
-                    "bbox": [
-                        bbox[0] / img_width,
-                        bbox[1] / img_height,
-                        bbox[2] / img_width,
-                        bbox[3] / img_height,
-                    ],
-                })
-        
-        return detections
     
     # =========================================================================
     # DRAG OPERATIONS

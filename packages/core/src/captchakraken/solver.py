@@ -46,15 +46,9 @@ from .action_types import (
     CaptchaContext,
     InteractableElement,
 )
-# Template-matching utilities live at top-level of core src
-from template_matching import (
-    extract_segment,
-    remove_background,
-    match_template_with_mask,
-    find_draggable_candidates,
-)
 from .planner import ActionPlanner, PlannedAction
 from .attention import AttentionExtractor
+from .overlay import add_drag_overlay
 
 
 class CaptchaSolver:
@@ -267,13 +261,14 @@ class CaptchaSolver:
         prompt_text: str,
         drag_variant: str = "unknown",
     ) -> DragAction:
-        """Handle drag puzzles with template-matching or logical flows."""
+        """Handle drag puzzles with iterative or logical flows."""
         strategy = self.planner.plan_drag_strategy(image_path, prompt_text)
         variant = (strategy.get("drag_type") or drag_variant or "logical").lower()
         print(f"[Specialized] Drag strategy variant: {variant}")
         
         if variant == "template_matching":
-            return self._solve_template_drag(image_path, strategy)
+            # Now uses the iterative visual approach
+            return self._solve_iterative_drag(image_path, strategy, prompt_text)
         return self._solve_logical_drag(image_path, strategy)
     
     def _solve_logical_drag(self, image_path: str, strategy: Dict[str, Any]) -> DragAction:
@@ -281,7 +276,10 @@ class CaptchaSolver:
         draggable_prompt = strategy.get("draggable_prompt") or "movable piece"
         destination_prompt = strategy.get("destination_prompt") or "target location"
         
+        # 1. Find draggable
         source_bbox = self._detect_bbox_with_fallback(image_path, draggable_prompt)
+        
+        # 2. Find destination (bee logic: finding destination and reasoning)
         target_bbox = self._detect_bbox_with_fallback(image_path, destination_prompt)
         
         source_center_pct = self._bbox_center_pct(source_bbox)
@@ -298,49 +296,131 @@ class CaptchaSolver:
             target_coordinates_pct=list(target_center_pct),
         )
     
-    def _solve_template_drag(self, image_path: str, strategy: Dict[str, Any]) -> DragAction:
-        """Template-matching drag using OpenCV helpers."""
+    def _solve_iterative_drag(self, image_path: str, strategy: Dict[str, Any], prompt_text: str) -> DragAction:
+        """
+        Iterative visual solver for drag puzzles.
+        1. Locate draggable piece
+        2. Visual loop: Propose move -> Visual Feedback -> Refine -> Repeat
+        """
         draggable_prompt = strategy.get("draggable_prompt") or "movable piece"
         
-        # Try model-based detection first
-        source_bbox_pct = self._detect_bbox_with_fallback(image_path, draggable_prompt, allow_empty=True)
-        
-        # If detection fails, fall back to heuristic candidates
-        if source_bbox_pct is None:
-            candidates = find_draggable_candidates(image_path)
-            if candidates:
-                source_bbox_px = candidates[0]["bbox"]
-                source_bbox_pct = self._bbox_px_to_pct(source_bbox_px)
-                print("[Specialized] Using heuristic draggable candidate")
-        
-        if source_bbox_pct is None:
-            raise ValueError("Unable to locate draggable element for template drag")
-        
+        # 1. Locate the draggable piece
+        print(f"[Iterative] Locating draggable: {draggable_prompt}")
+        source_bbox_pct = self._detect_bbox_with_fallback(image_path, draggable_prompt)
+        if not source_bbox_pct:
+            raise ValueError("Could not locate draggable piece for iterative solve")
+            
         source_bbox_px = self._bbox_pct_to_px(source_bbox_pct)
         source_center_pct = self._bbox_center_pct(source_bbox_pct)
-        source_center_px = self._pct_to_pixels_tuple(source_center_pct)
         
-        # Extract and clean the draggable piece, then match
-        segment = extract_segment(image_path, tuple(source_bbox_px))
-        cleaned = remove_background(segment)
-        match = match_template_with_mask(
-            base_image=image_path,
-            template_image=cleaned,
-            exclude_regions=[tuple(source_bbox_px)],
-        )
+        # Working copy for overlays
+        import shutil
+        import tempfile
         
-        target_center_px = match.center
-        target_center_pct = self._pixels_to_pct(target_center_px)
+        # Create a temp file that preserves the extension
+        ext = os.path.splitext(image_path)[1] or ".png"
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tf:
+            work_path = tf.name
+        shutil.copy2(image_path, work_path)
         
-        return DragAction(
-            action="drag",
-            source_coordinates=list(source_center_px),
-            source_coordinates_pct=list(source_center_pct),
-            target_coordinates=[float(target_center_px[0]), float(target_center_px[1])],
-            target_coordinates_pct=list(target_center_pct),
-            template_match_confidence=match.confidence,
-        )
-    
+        try:
+            # 2. Initial Proposal
+            # Draw just the source border first so the model knows what we are moving, plus grid
+            add_drag_overlay(work_path, source_bbox_px)
+            
+            # Ask where to go (pass bbox for extra context)
+            initial_plan = self.planner.get_drag_destination(
+                work_path,
+                prompt_text or "",
+                draggable_bbox_pct=source_bbox_pct,
+            )
+            
+            target_center_pct = [
+                initial_plan.get("target_x", source_center_pct[0]),
+                initial_plan.get("target_y", source_center_pct[1]),
+            ]
+                
+            # Clamp to [0,1]
+            target_center_pct = [
+                max(0.0, min(1.0, target_center_pct[0])),
+                max(0.0, min(1.0, target_center_pct[1]))
+            ]
+            
+            # 3. Refinement Loop
+            max_iterations = 3
+            current_target_pct = target_center_pct
+            
+            for i in range(max_iterations):
+                print(f"[Iterative] Iteration {i+1}: Proposed target {current_target_pct}")
+                
+                # Reset working image from original to clear previous arrows
+                shutil.copy2(image_path, work_path)
+                
+                # Calculate target bbox (same size as source)
+                w_pct = source_bbox_pct[2] - source_bbox_pct[0]
+                h_pct = source_bbox_pct[3] - source_bbox_pct[1]
+                
+                target_bbox_pct = [
+                    current_target_pct[0] - w_pct/2,
+                    current_target_pct[1] - h_pct/2,
+                    current_target_pct[0] + w_pct/2,
+                    current_target_pct[1] + h_pct/2
+                ]
+                
+                # Draw full overlay: Source Border + Arrow + Target Box + Grid
+                target_bbox_px = self._bbox_pct_to_px(target_bbox_pct)
+                target_center_px = self._pct_to_pixels_tuple(current_target_pct)
+                
+                add_drag_overlay(
+                    work_path, 
+                    source_bbox_px, 
+                    target_bbox=target_bbox_px, 
+                    target_center=target_center_px,
+                )
+                
+                # Ask for refinement
+                refinement = self.planner.refine_drag(work_path)
+                print(f"[Iterative] Feedback: {refinement.get('status')} - {refinement.get('adjustment')}")
+                
+                if refinement.get("status") == "correct":
+                    print("[Iterative] Model accepted solution")
+                    break
+                
+                # Apply adjustment
+                adj = refinement.get("adjustment", {})
+                dx = adj.get("x_offset", 0) or 0
+                dy = adj.get("y_offset", 0) or 0
+                
+                # If adjustment is tiny, assume done
+                if abs(dx) < 0.01 and abs(dy) < 0.01:
+                    print("[Iterative] Adjustment too small, stopping")
+                    break
+                    
+                current_target_pct[0] += dx
+                current_target_pct[1] += dy
+                
+                # Clamp
+                current_target_pct = [
+                    max(0.0, min(1.0, current_target_pct[0])),
+                    max(0.0, min(1.0, current_target_pct[1]))
+                ]
+            
+            # Final result
+            target_px = self._pct_to_pixels_tuple(current_target_pct)
+            source_px = self._pct_to_pixels_tuple(source_center_pct)
+            
+            return DragAction(
+                action="drag",
+                source_coordinates=list(source_px),
+                source_coordinates_pct=list(source_center_pct),
+                target_coordinates=list(target_px),
+                target_coordinates_pct=list(current_target_pct),
+            )
+            
+        finally:
+            if os.path.exists(work_path):
+                os.unlink(work_path)
+
     def _solve_text_captcha(self, image_path: str) -> TypeAction:
         """Handle warped-text captchas via LLM text read."""
         text = self.planner.read_text(image_path)

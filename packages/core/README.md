@@ -5,9 +5,9 @@ AI-powered captcha solver using attention-based coordinate extraction.
 CaptchaKraken solves captchas using a two-stage approach:
 
 1. **Action Planning** (Ollama/OpenAI API) - An LLM analyzes the captcha to determine what action is needed
-2. **Attention-Based Targeting** (Transformers) - A local VLM processes the target, and we extract **actual attention weights** from the model's internal layers to find coordinates
+2. **Attention-Based Targeting** (Transformers) - A local VLM (Vision Language Model) processes the target to find precise coordinates using its internal pointing capabilities.
 
-This separates "what to do" from "where to do it", using real attention values (not prompting for coordinates).
+This separates "what to do" from "where to do it".
 
 ## Architecture
 
@@ -25,31 +25,15 @@ This separates "what to do" from "where to do it", using real attention values (
 │  ────────────────────────────────────────────────────────               │
 │  1. Load moondream2 (or other VLM) via transformers                     │
 │  2. Pass image + "the checkbox" through model                           │
-│  3. Hook into attention layers, capture weight tensors                  │
-│  4. Analyze attention matrix: which image patches get highest weights?  │
-│  5. Map patch grid position → pixel coordinates                         │
+│  3. Model uses internal attention/pointing mechanisms to find object    │
+│  4. Returns precise pixel coordinates                                   │
 │  Output: coordinates=[342, 156]                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## How Attention Extraction Works
 
-```
-Image (400x300) → Vision Encoder → 14×14 grid = 196 image patch tokens
-
-Text: "the checkbox" → Text tokens
-
-                    ATTENTION MATRIX
-                    ────────────────
-                    Patch_0  Patch_1  Patch_2  ... Patch_195
-    "the"           [0.01,   0.02,    0.01,   ...  0.01]
-    "checkbox"      [0.01,   0.85,    0.02,   ...  0.01]
-                             ↑
-                    HIGH ATTENTION = this patch contains the checkbox
-                    Grid position (0, 1) → Pixel coordinates (21, 10)
-```
-
-We extract the **raw attention weight tensors** from transformer layers, not the model's text output.
+We leverage the pointing and object detection capabilities of modern VLMs (like Moondream2) which are trained to ground text descriptions to image coordinates. This allows for high-precision targeting without relying on brittle DOM selectors or object detection models trained on limited classes.
 
 ## Installation
 

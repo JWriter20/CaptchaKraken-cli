@@ -75,6 +75,7 @@ Examples:
     parser.add_argument("--prompt-text", help="Extracted prompt text from the captcha")
     parser.add_argument("--prompt-image-url", help="URL of the prompt image")
     parser.add_argument("--challenge-element-selector", help="Selector for the main challenge element (informational)")
+    parser.add_argument("--elements", help="JSON string of detected interactable elements")
 
     # Output options
     parser.add_argument(
@@ -122,8 +123,21 @@ Examples:
         if args.prompt_image_url:
             context += f"\nPrompt Image URL: {args.prompt_image_url}"
         
+        # Parse elements if provided
+        elements = None
+        if args.elements:
+            try:
+                elements = json.loads(args.elements)
+            except json.JSONDecodeError:
+                print(f"Warning: Failed to parse elements JSON", file=sys.stderr)
+
         # Normal solve mode
-        action = solver.solve_step(args.image_path, context)
+        action = solver.solve_step(
+            args.image_path,
+            context,
+            elements=elements,
+            prompt_text=args.prompt_text
+        )
         
         # Convert to dict for JSON output
         action_data = action.model_dump()

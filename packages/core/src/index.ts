@@ -2,11 +2,24 @@ import { spawn } from 'child_process';
 import * as path from 'path';
 
 export type CaptchaAction =
-  | { action: 'click'; coordinates: [number, number] }
-  | { action: 'drag'; source_coordinates: [number, number]; target_coordinates: [number, number] }
+  | {
+    action: 'click';
+    coordinates?: [number, number];
+    all_coordinates?: [number, number][];
+    target_ids?: number[];
+    bounding_boxes?: number[][];
+  }
+  | {
+    action: 'drag';
+    source_coordinates: [number, number];
+    target_coordinates: [number, number];
+    source_id?: number;
+    target_id?: number;
+  }
   | { action: 'type'; text: string; target_id?: number }
   | { action: 'wait'; duration_ms: number }
-  | { action: 'request_updated_image' };
+  | { action: 'request_updated_image' }
+  | { action: 'verify'; target_id?: number };
 
 export interface SolveOptions {
   /** Backend for action planning: "ollama" or "openai" */
@@ -27,6 +40,8 @@ export interface SolveOptions {
   promptImageUrl?: string;
   /** Selector for the challenge element */
   challengeElementSelector?: string;
+  /** Detected interactable elements */
+  elements?: any[];
 }
 
 /**
@@ -71,6 +86,9 @@ export async function solveCaptcha(
     }
     if (options.challengeElementSelector) {
       args.push('--challenge-element-selector', options.challengeElementSelector);
+    }
+    if (options.elements) {
+      args.push('--elements', JSON.stringify(options.elements));
     }
 
     const pythonExec = options.pythonPath || 'python3';
@@ -120,15 +138,15 @@ export async function applyOverlays(
   return new Promise((resolve, reject) => {
     const pythonScript = path.resolve(__dirname, '../src/captchakraken/overlay.py');
     const boxesJson = JSON.stringify(boxes);
-    
+
     const proc = spawn(pythonPath, [pythonScript, imagePath, boxesJson]);
-    
+
     let stderr = '';
-    
+
     proc.stderr.on('data', (data) => {
       stderr += data.toString();
     });
-    
+
     proc.on('close', (code) => {
       if (code !== 0) {
         reject(new Error(`Overlay script exited with code ${code}: ${stderr}`));

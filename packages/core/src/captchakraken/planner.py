@@ -179,6 +179,48 @@ TEXT_EXTRACTION_PROMPT = """Read the text in this captcha and return ONLY JSON:
 }"""
 
 
+DRAG_INITIAL_PROMPT = """You are solving a drag-and-drop puzzle.
+1. The image shows a source piece highlighted in RED.
+2. A green grid overlay marks 10% increments.
+
+The goal is to move this piece to the correct location to solve the puzzle.
+Instruction: {prompt_text}
+
+Return the target center coordinates as percentages (0.0 to 1.0) of the image width/height.
+Use the grid lines to estimate the coordinates precisely.
+
+Respond ONLY with JSON:
+{{
+  "target_x": float, // 0.0-1.0
+  "target_y": float, // 0.0-1.0
+  "reasoning": "brief explanation"
+}}
+"""
+
+DRAG_REFINEMENT_PROMPT = """You are refining a puzzle solution.
+The image shows:
+1. The draggable piece (Red Box)
+2. A proposed move (Red Arrow) pointing to a dashed target box.
+3. A green grid overlay where each cell is 10% of the image size.
+
+Goal: Move the piece to {prompt_text}.
+
+Look at the dashed target box. Is it perfectly aligned with the correct destination?
+- If it is correct, return status "correct".
+- If it is slightly off, use the grid to estimate precise adjustments (e.g., "move down 0.05", "move left 0.1").
+
+Respond ONLY with JSON:
+{{
+  "status": "correct" | "needs_adjustment",
+  "adjustment": {{
+    "x_offset": float, // Negative = Move Left, Positive = Move Right (e.g., -0.05 is 5% left)
+    "y_offset": float  // Negative = Move Up, Positive = Move Down (e.g., 0.1 is 10% down)
+  }},
+  "reasoning": "why the adjustment is needed, referencing grid lines if helpful"
+}}
+"""
+
+
 class ActionPlanner:
     """
     Queries an LLM to determine the next action for solving a captcha.
@@ -366,6 +408,29 @@ class ActionPlanner:
         parsed = self._safe_json_loads(raw, {"text": ""})
         return parsed.get("text", "")
     
+    def get_drag_destination(
+        self,
+        image_path: str,
+        prompt_text: str,
+        draggable_bbox_pct: Optional[List[float]] = None,
+    ) -> Dict[str, Any]:
+        """Ask where to move the highlighted piece using the iterative prompt."""
+        prompt = DRAG_INITIAL_PROMPT.format(prompt_text=prompt_text or "")
+        raw = self._chat_with_image(prompt, image_path)
+        return self._safe_json_loads(
+            raw,
+            {"target_x": 0.5, "target_y": 0.5, "reasoning": "fallback"},
+        )
+
+    def refine_drag(self, image_path: str, prompt_text: str = "") -> Dict[str, Any]:
+        """Ask for verification/adjustment of the proposed drag."""
+        prompt = DRAG_REFINEMENT_PROMPT.format(prompt_text=prompt_text or "the solution")
+        raw = self._chat_with_image(prompt, image_path)
+        return self._safe_json_loads(
+            raw,
+            {"status": "needs_adjustment", "adjustment": {"x_offset": 0, "y_offset": 0}, "reasoning": "fallback"}
+        )
+
     def plan(
         self,
         image_path: str,

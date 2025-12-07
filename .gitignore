@@ -41,7 +41,11 @@ yarn-debug.log*
 yarn-error.log*
 
 # Test artifacts
+test-results/
 test_output_*.png
 test_*.png
 !captchaimages/*.png
 attention_heatmap.png
+heatmap_outputs/
+visualization_report.html
+recaptcha_overlay_test.png

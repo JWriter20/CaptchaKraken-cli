@@ -3,12 +3,15 @@ import pytest
 import os
 import sys
 import json
+import shutil
 from pathlib import Path
+from PIL import Image
 
 # Add src to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
 from captchakraken.planner import ActionPlanner
+from captchakraken.overlay import add_drag_overlay
 
 # Paths
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -91,4 +94,74 @@ def test_real_planner_reasoning(planner, filename, context, expected_kind, expec
             actual = drag_plan.get("destination_prompt", "").lower()
             expected = expected_params["destination_prompt"].lower()
             assert expected in actual, f"Expected destination prompt to contain '{expected}', got '{actual}'"
+
+
+def test_drag_destination_diagnostics_deer_head(planner, tmp_path):
+    """
+    Diagnostics for the deer-head drag puzzle to catch fallback 0.5,0.5 outputs.
+    We highlight the head, ask the planner for move coordinates, and save an
+    overlay showing the proposed move.
+    """
+    image_path = os.path.join(IMAGES_DIR, "hcaptchaDragImage2.png")
+    if not os.path.exists(image_path):
+        pytest.skip(f"Image not found: {image_path}")
+
+    # Ground-truth source box (normalized) from targetAreaPercentages.json
+    source_bbox_pct = [0.2375, 0.2053, 0.4131, 0.378]
+
+    with Image.open(image_path) as img:
+        img_width, img_height = img.size
+
+    def pct_to_px(bbox_pct):
+        x1, y1, x2, y2 = bbox_pct
+        return [x1 * img_width, y1 * img_height, x2 * img_width, y2 * img_height]
+
+    source_bbox_px = pct_to_px(source_bbox_pct)
+    source_center_pct = (
+        (source_bbox_pct[0] + source_bbox_pct[2]) / 2,
+        (source_bbox_pct[1] + source_bbox_pct[3]) / 2,
+    )
+
+    work_path = tmp_path / "deer_head_overlay.png"
+    shutil.copyfile(image_path, work_path)
+    add_drag_overlay(str(work_path), source_bbox_px)
+    
+    initial_plan = planner.get_drag_destination(str(work_path), prompt_text="Move the draggable piece to the correct spot")
+    print(f"Initial drag plan: {json.dumps(initial_plan, default=str)}")
+    
+    target_pct = [
+        initial_plan.get("target_x"),
+        initial_plan.get("target_y"),
+    ]
+    
+    assert all(v is not None for v in target_pct), "Model did not return target coordinates"
+
+    # Clamp to image bounds and guard against the fallback center
+    target_pct = [
+        max(0.0, min(1.0, target_pct[0])),
+        max(0.0, min(1.0, target_pct[1])),
+    ]
+    assert not (
+        abs(target_pct[0] - 0.5) < 1e-3 and abs(target_pct[1] - 0.5) < 1e-3
+    ), "Model returned fallback center (0.5, 0.5) instead of a directed move"
+
+    w_pct = source_bbox_pct[2] - source_bbox_pct[0]
+    h_pct = source_bbox_pct[3] - source_bbox_pct[1]
+    target_bbox_pct = [
+        max(0.0, target_pct[0] - w_pct / 2),
+        max(0.0, target_pct[1] - h_pct / 2),
+        min(1.0, target_pct[0] + w_pct / 2),
+        min(1.0, target_pct[1] + h_pct / 2),
+    ]
+    target_bbox_px = pct_to_px(target_bbox_pct)
+    target_center_px = (target_pct[0] * img_width, target_pct[1] * img_height)
+
+    add_drag_overlay(
+        str(work_path),
+        source_bbox_px,
+        target_bbox=target_bbox_px,
+        target_center=target_center_px,
+    )
+
+    print(f"Diagnostic overlay saved to {work_path}")
 

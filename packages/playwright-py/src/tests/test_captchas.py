@@ -1,13 +1,14 @@
+import os
 import pytest
 from patchright.sync_api import sync_playwright
 from captchakraken_playwright.detection import find_captcha_frames, get_captcha_type
-from captchakraken_playwright.solver import solve_captchas_on_page
+from captchakraken_playwright.solver import solve_captcha
 
 @pytest.fixture(scope="module")
 def browser():
     with sync_playwright() as p:
-        # Running in headless mode for CI/Environment compatibility
-        browser = p.chromium.launch(headless=True)
+        headless = os.getenv("HEADLESS", "true").lower() == "true"
+        browser = p.chromium.launch(headless=headless)
         yield browser
         browser.close()
 

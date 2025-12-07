@@ -4,6 +4,7 @@ import os
 import sys
 import json
 import argparse
+import math
 from PIL import Image, ImageDraw, ImageFont
 
 # Font cache to prevent repeated font loading
@@ -128,6 +129,35 @@ def draw_enhanced_bounding_box(draw, bbox, text, image_size):
         draw.rectangle([bg_x1, bg_y1, bg_x2, bg_y2], fill=color, outline='white', width=2)
         draw.text((text_x, text_y), text, fill='white', font=font)
 
+def draw_red_border(draw, bbox, width=3):
+    """Draw a solid red border around a bounding box."""
+    x1, y1, x2, y2 = bbox
+    color = '#FF0000'
+    draw.rectangle([x1, y1, x2, y2], outline=color, width=width)
+
+def draw_arrow(draw, start, end, color='#FF0000', width=4):
+    """Draw an arrow from start to end (high visibility for model feedback)."""
+    x1, y1 = start
+    x2, y2 = end
+    
+    draw.line([start, end], fill=color, width=width)
+    
+    # Arrow head
+    angle = math.atan2(y2 - y1, x2 - x1)
+    arrow_len = 20
+    angle_offset = math.pi / 6  # 30 degrees
+    
+    p1 = (
+        x2 - arrow_len * math.cos(angle - angle_offset),
+        y2 - arrow_len * math.sin(angle - angle_offset)
+    )
+    p2 = (
+        x2 - arrow_len * math.cos(angle + angle_offset),
+        y2 - arrow_len * math.sin(angle + angle_offset)
+    )
+    
+    draw.polygon([end, p1, p2], fill=color)
+
 def add_overlays_to_image(image_path: str, boxes: list[dict]):
     """
     Load an image, draw bounding boxes and numbered labels, and save it back.
@@ -152,6 +182,84 @@ def add_overlays_to_image(image_path: str, boxes: list[dict]):
         print(f"Error adding overlays: {e}", file=sys.stderr)
         raise
 
+
+def draw_grid_overlay(draw, image_size, step=0.1):
+    """Draw a 10% grid overlay with labels (more readable)."""
+    width, height = image_size
+    line_color = '#00FF00'  # Green
+    text_color = '#00FF00'
+    bg_color = (0, 32, 0, 180)  # Semi-transparent dark background for labels
+    font_size = max(10, min(18, int(width * 0.025)))
+    font = get_cross_platform_font(font_size)
+    
+    # Draw vertical lines and labels
+    for i in range(1, int(1/step)):
+        x = int(i * step * width)
+        draw.line([(x, 0), (x, height)], fill=line_color, width=1)
+        label = f"{int(i*step*100)}%"
+        if font:
+            bbox = draw.textbbox((0, 0), label, font=font)
+        else:
+            bbox = draw.textbbox((0, 0), label)
+        w = bbox[2] - bbox[0]
+        h = bbox[3] - bbox[1]
+        # Top label background
+        draw.rectangle([x + 2, 2, x + 2 + w + 4, 2 + h + 4], fill=bg_color)
+        draw.text((x + 4, 4), label, fill=text_color, font=font)
+
+    # Draw horizontal lines and labels
+    for i in range(1, int(1/step)):
+        y = int(i * step * height)
+        draw.line([(0, y), (width, y)], fill=line_color, width=1)
+        label = f"{int(i*step*100)}%"
+        if font:
+            bbox = draw.textbbox((0, 0), label, font=font)
+        else:
+            bbox = draw.textbbox((0, 0), label)
+        w = bbox[2] - bbox[0]
+        h = bbox[3] - bbox[1]
+        # Left label background
+        draw.rectangle([2, y + 2, 2 + w + 4, y + 2 + h + 4], fill=bg_color)
+        draw.text((4, y + 4), label, fill=text_color, font=font)
+
+def add_drag_overlay(image_path: str, source_bbox: list[float], target_bbox: list[float] = None, target_center: tuple = None, show_grid: bool = False):
+    """
+    Add drag-and-drop visualization:
+    - Red border around source
+    - Arrow to target
+    - Dashed border around target
+    - Optional: 10% grid overlay
+    """
+    try:
+        with Image.open(image_path) as img:
+            img = img.convert('RGBA')
+            draw = ImageDraw.Draw(img)
+            
+            # Draw source border
+            # source_bbox is [x1, y1, x2, y2]
+            draw_red_border(draw, source_bbox)
+            
+            if target_center:
+                # Calculate source center
+                source_center = (
+                    (source_bbox[0] + source_bbox[2]) / 2,
+                    (source_bbox[1] + source_bbox[3]) / 2
+                )
+                
+                # Draw arrow
+                draw_arrow(draw, source_center, target_center)
+            
+            if target_bbox:
+                 # Draw target dashed box (using None as text to skip label)
+                draw_enhanced_bounding_box(draw, target_bbox, None, img.size)
+                
+            img = img.convert('RGB')
+            img.save(image_path)
+            
+    except Exception as e:
+        print(f"Error adding drag overlays: {e}", file=sys.stderr)
+        raise
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Add overlays to an image")
     parser.add_argument("image_path", help="Path to the image to modify")
@@ -166,4 +274,3 @@ if __name__ == "__main__":
     except Exception as e:
         print(json.dumps({"status": "error", "message": str(e)}))
         sys.exit(1)
-
