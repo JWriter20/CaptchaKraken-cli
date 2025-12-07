@@ -66,8 +66,8 @@ class CaptchaSolver:
     - Numbered element mapping
     
     Args:
-        planner_backend: Backend for action planning ("ollama" or "openai")
-        planner_model: Model for planning (default: "hf.co/unsloth/gemma-3-12b-it-GGUF:Q4_K_M" for ollama, "gpt-4o" for openai)
+        planner_backend: Backend for action planning ("ollama", "openai", "gemini", or "deepseek")
+        planner_model: Model for planning (default: "hf.co/unsloth/gemma-3-12b-it-GGUF:Q4_K_M" for ollama, "gpt-4o" for openai, "gemini-2.0-flash-exp" for gemini, "deepseek-chat" for deepseek)
         attention_model: HuggingFace model for attention extraction (default: "vikhyatk/moondream2")
         attention_backend: Backend for attention ("moondream", "qwen-vl", "florence")
         openai_api_key: OpenAI API key (or set OPENAI_API_KEY env var)

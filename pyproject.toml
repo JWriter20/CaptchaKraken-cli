@@ -31,3 +31,13 @@ captchakraken = "captchakraken.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/captchakraken"]
 
+# Development scripts (run with: hatch run <script>)
+[tool.hatch.envs.default.scripts]
+test = "pytest"
+test-detection = "python scripts/test_detection.py captchaimages/recaptchaBasic.png checkbox"
+test-pointing = "python scripts/test_pointing.py captchaimages/recaptchaBasic.png 'the checkbox in the center'"
+check-hw = "python scripts/check_hw.py"
+install-models = "bash scripts/install_models.sh"
+lint = "echo 'Add your linting command here'"
+format = "echo 'Add your formatting command here'"
+

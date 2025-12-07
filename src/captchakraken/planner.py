@@ -242,7 +242,7 @@ class ActionPlanner:
     
     def __init__(
         self,
-        backend: Literal["ollama", "openai", "gemini"] = "ollama",
+        backend: Literal["ollama", "openai", "gemini", "deepseek"] = "ollama",
         model: Optional[str] = None,
         openai_api_key: Optional[str] = None,
         openai_base_url: Optional[str] = None,
@@ -275,6 +275,8 @@ class ActionPlanner:
                 self.model = "gpt-4o"
             elif backend == "gemini":
                 self.model = "gemini-2.0-flash-exp"
+            elif backend == "deepseek":
+                self.model = "deepseek-chat"
         else:
             self.model = model
     
@@ -330,7 +332,32 @@ class ActionPlanner:
                 response_format={"type": "json_object"},
             )
             return response.choices[0].message.content
-        
+
+        if self.backend == "deepseek":
+            from openai import OpenAI
+
+            client = OpenAI(
+                api_key=self.openai_api_key,
+                base_url=self.openai_base_url or "https://api.deepseek.com/v1"
+            )
+            image_data, media_type = self._encode_image_base64(image_path)
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{image_data}"}},
+                        ],
+                    }
+                ],
+                temperature=0.1,
+                max_tokens=600,
+                response_format={"type": "json_object"},
+            )
+            return response.choices[0].message.content
+
         if self.backend == "gemini":
             if not genai:
                 raise ValueError("google-generativeai not installed")
