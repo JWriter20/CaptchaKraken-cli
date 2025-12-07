@@ -64,32 +64,3 @@ CaptchaAction = Union[ClickAction, DragAction, TypeAction, WaitAction, RequestUp
 class Solution(BaseModel):
     """Complete solution with ordered actions."""
     actions: List[CaptchaAction]
-
-
-# Rich context passed from playwright packages
-class CaptchaContext(BaseModel):
-    """Rich context about the captcha for intelligent solving."""
-    prompt_text: Optional[str] = None  # "Select all images with traffic lights"
-    prompt_image_url: Optional[str] = None  # URL of prompt image if any
-    captcha_type: Optional[str] = None  # recaptcha, hcaptcha, cloudflare
-    captcha_subtype: Optional[str] = None  # checkbox, challenge
-    
-    # Numbered interactable elements from DOM extraction
-    elements: Optional[List["InteractableElement"]] = None
-    has_numbered_overlays: bool = False  # True if image has numbered overlay boxes
-
-
-class InteractableElement(BaseModel):
-    """An interactable element detected in the captcha."""
-    element_id: int  # The numbered ID (1, 2, 3, ...)
-    bbox: List[float]  # [x, y, width, height] relative to screenshot
-    element_type: Optional[str] = None  # "image", "checkbox", "button", "slider"
-    description: Optional[str] = None  # Optional description
-
-
-class DetectedObject(BaseModel):
-    """Object detected by moondream detect()."""
-    label: str
-    bbox: List[float]  # [x_min, y_min, x_max, y_max] as percentages
-    confidence: Optional[float] = None
-    overlapping_element_ids: Optional[List[int]] = None  # Element IDs this detection overlaps with

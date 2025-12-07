@@ -8,7 +8,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 try:
-    from src.captchakraken.hardware import check_requirements
+    from src.hardware import check_requirements
 except ImportError:
     # Fallback if src is not found (e.g. strange structure)
     print("Error: Could not import hardware check module.")

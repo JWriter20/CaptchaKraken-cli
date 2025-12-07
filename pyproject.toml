@@ -26,10 +26,10 @@ dependencies = [
 ]
 
 [project.scripts]
-captchakraken = "captchakraken.cli:main"
+captchakraken = "src.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/captchakraken"]
+packages = ["src"]
 
 # Development scripts (run with: hatch run <script>)
 [tool.hatch.envs.default.scripts]

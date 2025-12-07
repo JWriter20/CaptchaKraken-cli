@@ -10,8 +10,8 @@ from PIL import Image
 # Add src to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
-from captchakraken.planner import ActionPlanner
-from captchakraken.overlay import add_drag_overlay
+from src.planner import ActionPlanner
+from src.overlay import add_drag_overlay
 
 # Paths
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))

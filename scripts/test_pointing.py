@@ -15,7 +15,7 @@ src_root = os.path.join(project_root, 'src')
 sys.path.insert(0, project_root)
 sys.path.insert(0, src_root)
 
-from src.captchakraken.attention import AttentionExtractor
+from src.attention import AttentionExtractor
 
 def test_pointing(extractor: AttentionExtractor, image_path: str, target: str, output_path: str = None):
     """Test coordinate extraction on a single image."""

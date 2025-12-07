@@ -2,18 +2,22 @@
 CaptchaKraken - AI-powered captcha solver using attention-based coordinate extraction.
 
 Usage:
-    from captchakraken import CaptchaSolver
+    from src import CaptchaSolver
     
-    solver = CaptchaSolver()
-    action = solver.solve_step("captcha.png", "Solve this captcha")
-    
-    # Intelligent solving with element info
-    action = solver.solve_step_intelligent(
-        "captcha.png",
-        context="Select all traffic lights",
-        elements=[{"element_id": 1, "bbox": [0, 0, 100, 100]}, ...],
-        prompt_text="Select all images with traffic lights"
+    # Ollama (default)
+    solver = CaptchaSolver(
+        model="llama3.2:3b",
+        provider="ollama"
     )
+    
+    # OpenAI
+    solver = CaptchaSolver(
+        model="gpt-4o",
+        provider="openai",
+        api_key="your-api-key"
+    )
+    
+    action = solver.solve_step("captcha.png")
 """
 
 from .solver import CaptchaSolver, solve_captcha
@@ -28,9 +32,6 @@ from .action_types import (
     RequestUpdatedImageAction,
     VerifyAction,
     Solution,
-    CaptchaContext,
-    InteractableElement,
-    DetectedObject,
 )
 from .overlay import add_overlays_to_image
 
@@ -54,13 +55,9 @@ __all__ = [
     "VerifyAction",
     "Solution",
     
-    # Context Types
-    "CaptchaContext",
-    "InteractableElement",
-    "DetectedObject",
-    
     # Utilities
     "add_overlays_to_image",
 ]
 
 __version__ = "0.3.0"
+

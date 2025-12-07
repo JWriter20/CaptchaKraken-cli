@@ -17,10 +17,10 @@ from typing import Optional, List, Tuple, Dict, Any
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from PIL import Image, ImageDraw
-from captchakraken.attention import AttentionExtractor
-from captchakraken.solver import CaptchaSolver
-from captchakraken.action_types import DragAction
-from captchakraken.planner import ActionPlanner
+from src.attention import AttentionExtractor
+from src.solver import CaptchaSolver
+from src.action_types import DragAction
+from src.planner import ActionPlanner
 from unittest.mock import MagicMock
 
 # Images directory
@@ -482,7 +482,7 @@ def main():
             elif method == "iterative_drag":
                 print("  → Running iterative drag visualization (real planner)")
                 
-                from captchakraken.overlay import add_drag_overlay
+                from src.overlay import add_drag_overlay
                 import shutil
                 import tempfile
                 import os

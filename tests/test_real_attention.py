@@ -8,7 +8,7 @@ from pathlib import Path
 # Add src to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
-from captchakraken.attention import AttentionExtractor
+from src.attention import AttentionExtractor
 
 # Paths
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))

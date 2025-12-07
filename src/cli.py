@@ -2,7 +2,7 @@
 CaptchaKraken CLI - Command-line interface for captcha solving.
 
 Usage:
-    python -m src.captchakraken.cli image.png model_name api_provider [api_key]
+    python -m src.cli image.png model_name api_provider [api_key]
 """
 
 import argparse
@@ -10,10 +10,7 @@ import json
 import sys
 import os
 
-# Add src to path if running directly
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-from src.captchakraken.solver import CaptchaSolver
+from src.solver import CaptchaSolver
 
 
 def main():
@@ -23,13 +20,13 @@ def main():
         epilog="""
 Examples:
   # Basic usage with Ollama (no API key needed)
-  python -m src.captchakraken.cli captcha.png llama3.2:3b ollama
+  python -m src.cli captcha.png llama3.2:3b ollama
 
   # Use OpenAI
-  python -m src.captchakraken.cli captcha.png gpt-4o openai sk-your-api-key
+  python -m src.cli captcha.png gpt-4o openai sk-your-api-key
 
   # Use Gemini
-  python -m src.captchakraken.cli captcha.png gemini-2.0-flash-exp gemini your-gemini-key
+  python -m src.cli captcha.png gemini-2.0-flash-exp gemini your-gemini-key
         """
     )
 
@@ -39,12 +36,12 @@ Examples:
     )
     parser.add_argument(
         "model",
-        help="AI model to use for solving"
+        help="AI model to use for solving ie. gpt-4o, gemini-2.0-flash-exp, llama3.2-vision, deepseek-chat"
     )
     parser.add_argument(
         "api_provider",
         choices=["ollama", "openai", "gemini", "deepseek"],
-        help="API provider to use"
+        help="API provider to use one of: ollama, openai, gemini, deepseek"
     )
     parser.add_argument(
         "api_key",
@@ -65,22 +62,12 @@ Examples:
         sys.exit(1)
 
     try:
-        # Map API provider to solver parameters
-        solver_kwargs = {
-            "planner_backend": args.api_provider,
-            "planner_model": args.model,
-        }
-
-        if args.api_provider == "openai":
-            solver_kwargs["openai_api_key"] = args.api_key
-        elif args.api_provider == "gemini":
-            solver_kwargs["gemini_api_key"] = args.api_key
-        elif args.api_provider == "deepseek":
-            # DeepSeek uses OpenAI-compatible API
-            solver_kwargs["openai_api_key"] = args.api_key
-            solver_kwargs["openai_base_url"] = "https://api.deepseek.com/v1"
-
-        solver = CaptchaSolver(**solver_kwargs)
+        # Create solver with simplified interface
+        solver = CaptchaSolver(
+            model=args.model,
+            provider=args.api_provider,
+            api_key=args.api_key,
+        )
 
         # Solve the captcha - use a default context since the user wants to simplify
         action = solver.solve_step(
@@ -102,3 +89,4 @@ Examples:
 
 if __name__ == "__main__":
     main()
+

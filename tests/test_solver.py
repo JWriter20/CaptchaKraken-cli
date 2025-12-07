@@ -14,14 +14,13 @@ from typing import List
 from unittest.mock import MagicMock, patch, PropertyMock
 from types import SimpleNamespace
 
-from src.captchakraken.action_types import (
+from src.action_types import (
     CaptchaAction, ClickAction, DragAction, TypeAction, 
-    WaitAction, RequestUpdatedImageAction, VerifyAction, Solution,
-    CaptchaContext, InteractableElement, DetectedObject
+    WaitAction, RequestUpdatedImageAction, VerifyAction, Solution
 )
-from src.captchakraken.solver import CaptchaSolver
-from src.captchakraken.planner import ActionPlanner, PlannedAction
-from src.captchakraken.attention import AttentionExtractor
+from src.solver import CaptchaSolver
+from src.planner import ActionPlanner, PlannedAction
+from src.attention import AttentionExtractor
 
 
 # Path to test images
@@ -274,8 +273,9 @@ class TestCaptchaSolver:
     def test_solver_initialization_custom_backends(self):
         """Test solver with custom backend configuration."""
         solver = CaptchaSolver(
-            planner_backend="openai",
-            attention_model="vikhyatk/moondream2"
+            model="gpt-4o",
+            provider="openai",
+            api_key="test-key"
         )
         
         assert solver.planner.backend == "openai"
@@ -629,38 +629,6 @@ class TestTypes:
         assert solution.actions[1].action == "wait"
         assert solution.actions[3].action == "verify"
     
-    def test_captcha_context(self):
-        """Test CaptchaContext model."""
-        context = CaptchaContext(
-            prompt_text="Select all images with traffic lights",
-            captcha_type="recaptcha",
-            captcha_subtype="challenge",
-            has_numbered_overlays=True,
-        )
-        assert context.prompt_text == "Select all images with traffic lights"
-        assert context.has_numbered_overlays == True
-    
-    def test_interactable_element(self):
-        """Test InteractableElement model."""
-        elem = InteractableElement(
-            element_id=1,
-            bbox=[0.0, 0.0, 0.33, 0.33],
-            element_type="image_tile",
-            description="Image showing a bird"
-        )
-        assert elem.element_id == 1
-        assert elem.element_type == "image_tile"
-    
-    def test_detected_object(self):
-        """Test DetectedObject model."""
-        obj = DetectedObject(
-            label="traffic light",
-            bbox=[0.1, 0.2, 0.3, 0.4],
-            confidence=0.95,
-            overlapping_element_ids=[2, 5]
-        )
-        assert obj.label == "traffic light"
-        assert obj.overlapping_element_ids == [2, 5]
 
 
 # Parametrized tests for real images (if available)
