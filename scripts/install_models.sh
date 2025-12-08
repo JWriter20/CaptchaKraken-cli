@@ -64,7 +64,7 @@ if command_exists pip; then
     fi
     
     # Install core dependencies (Ollama + Gemini backends)
-    pip install transformers accelerate pillow pydantic numpy scipy ollama google-generativeai
+    pip install transformers accelerate pillow pydantic numpy scipy ollama google-genai
     echo "    ✓ Python packages installed"
 else
     echo "    Error: 'pip' not found."

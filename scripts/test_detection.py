@@ -18,6 +18,7 @@ sys.path.insert(0, src_root)
 
 from src.attention import AttentionExtractor
 
+
 def test_detection(extractor: AttentionExtractor, image_path: str, object_class: str, output_path: str = None, max_objects: int = 24):
     """Test object detection on a single image."""
     print(f"\n{'='*60}")
@@ -94,7 +95,7 @@ def main():
     print("="*60)
     print("Testing moondream detect() Method")
     print("="*60)
-    
+
     # Create extractor with moondream
     print(f"\nInitializing AttentionExtractor (model={args.model})...")
     extractor = AttentionExtractor(
@@ -110,7 +111,6 @@ def main():
     # Actually, test_detection calls extractor.detect_objects, so we can just modify test_detection
     # to accept max_objects
     success, detections = test_detection(extractor, args.image_path, args.query, args.output, args.max_objects)
-    
     # Summary
     print("\n" + "="*60)
     print("SUMMARY")
@@ -124,7 +124,7 @@ def main():
             center_y = (bbox[1] + bbox[3]) / 2
             print(f"  Detection {i+1}: Center at ({center_x:.2%}, {center_y:.2%})")
     else:
-        print(f"✗ {os.path.basename(args.image_path)}: Detection failed")
+        print(f"✗ {os.path.basename(args.image_path)}: Moondream detection failed")
 
 
 if __name__ == "__main__":

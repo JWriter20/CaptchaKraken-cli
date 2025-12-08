@@ -17,6 +17,19 @@ Usage:
     actions = solver.solve("captcha.png", "Select all traffic lights")
 """
 
+from pathlib import Path
+
+# Best-effort load of .env from project root so GEMINI_API_KEY and others are
+# available even when running scripts directly (e.g. scripts/test_detection.py).
+try:  # pragma: no cover - environment setup
+    from dotenv import load_dotenv
+
+    project_root = Path(__file__).resolve().parent.parent
+    load_dotenv(project_root / ".env")
+except Exception:
+    # If python-dotenv is not installed or .env is missing, just continue.
+    pass
+
 from .action_types import (
     CaptchaAction,
     ClickAction,

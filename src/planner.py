@@ -25,9 +25,13 @@ def _debug_log(message: str) -> None:
         print(f"[Planner DEBUG] {message}", file=sys.stderr)
 
 try:
-    import google.generativeai as genai
-except ImportError:
-    genai = None
+    # New Gemini SDK (direct Gemini API, no Vertex AI dependency)
+    from google import genai  # type: ignore[import-not-found]
+    from google.genai.types import GenerateContentConfig, Part  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - optional dependency
+    genai = None  # type: ignore[assignment]
+    GenerateContentConfig = None  # type: ignore[assignment]
+    Part = None  # type: ignore[assignment]
 
 
 # For grid selection: select numbered squares
@@ -65,6 +69,10 @@ PLAN_WITH_TOOLS_PROMPT = """You are a captcha solver. Analyze this image and dec
 
 {instruction}
 
+First, briefly identify what kind of puzzle this is and the *goal* in concrete visual terms
+(e.g., \"drag the missing piece into the exact slot where its shape and orientation match\", \"drag the slider handle to the gap\", \"click the checkbox\").
+Keep this goal consistent for all later steps.
+
 You have two tools available:
 1. detect(object_class) - Find all instances of an object (e.g., "traffic light", "bus", "bicycle")
    Use when: You need to find multiple instances of something
@@ -74,8 +82,15 @@ You have two tools available:
 
 You can also return a direct action if you know exactly what to do:
 - click: Click on something (provide target_description for point() to find it)
-- drag: Drag something (provide source_description and target_description)
-- type: Type text (provide the text to type)
+- drag: Drag something. For source_description, describe the specific movable piece in natural language, not a generic UI label. Good examples: "top segment movable square", "bottom right movable bee", "movable W square". BAD examples: "Move", "button", "drag handle".
+  For drag_target_description, describe where that piece should end up, also in concrete visual terms (e.g.,
+  "matching W outline slot that has the same shape and orientation",
+  "missing jigsaw piece slot that completes the animal",
+  "gap in the broken line that this segment fits into",
+  "matching socket the plug should connect to").
+  In these drag puzzles, you are almost always dragging \"missing piece(s)\" into the place it belongs.
+  Do NOT invent new words or shapes that are not already implied by the puzzle; instead, focus on exact alignment with the existing slot/outline.
+- type: Type text (provide the text to type, maintain casing, typically 6 characters, ignore reflections, noise, etc.)
 - wait: Wait for loading
 - done: Captcha is already solved
 
@@ -95,13 +110,16 @@ Or return an action:
   "drag_target_description": "where to drag to (for drag)",
   "text": "text to type (for type)",
   "duration_ms": 500,
-  "reasoning": "brief explanation"
+  "reasoning": "brief explanation that refers back to the puzzle goal you identified"
 }}"""
 
 
 # For text captchas: read the text
 TEXT_READ_PROMPT = """Read the distorted text in this captcha image.
 Look carefully at each character, accounting for distortion, rotation, and noise.
+
+Typically, these captchas contain exactly 6 characters.
+Only respond with more than 6 or fewer than 6 characters if you are confident that the captcha clearly shows more or fewer characters.
 
 Respond ONLY with JSON:
 {{
@@ -114,6 +132,26 @@ DRAG_REFINE_PROMPT = """You are refining a drag action for a captcha puzzle.
 
 {instruction}
 
+Goal: Drag the "{source_desc}" to the "{target_desc}".
+Keep this goal strict. Do not invent new goals like "forming words" or "aligning text" unless explicitly stated.
+Focus on visual alignment: shapes, cutouts, slots, or completing a pattern.
+
+CRITICAL: The destination must be DISTINCT from the source. You are never dragging something to itself.
+The source (RED border) and destination (DASHED border) should be in different locations.
+If they appear to overlap or be very close, you need to make larger adjustments to find the correct distinct target location.
+
+Most of these puzzles involve dragging a SINGLE movable piece into the ONE slot where it belongs.
+Common patterns include:
+- completing a picture by dropping a missing jigsaw-like piece into its matching cut-out
+- sliding a missing segment into a gap to complete a line or track
+- dragging a letter or symbol so it exactly overlaps the matching outline/slot (same shape and orientation)
+- dragging one item directly onto the counterpart it is visually connected to
+
+Before judging the current destination, silently decide:
+- what is the visual goal of THIS puzzle?
+- what specific slot/outline/gap does the dragged piece clearly belong to?
+Use that same goal consistently for all adjustments; do NOT change the goal between iterations.
+
 The image shows:
 - RED border: The source element (what we're dragging)
 - RED arrow: The current proposed drag path
@@ -124,7 +162,7 @@ Current destination: ({target_x:.1%}, {target_y:.1%})
 {history_text}
 
 Evaluate this drag destination:
-1. Is the destination correct? Will dropping here solve the puzzle?
+1. Is the destination correct? Will dropping here solve the puzzle according to the goal you identified?
 2. If not, what RELATIVE adjustment is needed?
 
 Provide adjustments as percentages of image size:
@@ -135,7 +173,7 @@ Make SMALL adjustments (typically 1-5%). We can refine iteratively.
 
 Respond ONLY with JSON:
 {{
-  "conclusion": "brief assessment of current position (e.g., 'too far right, height looks good')",
+  "conclusion": "brief assessment of current position in terms of that goal (e.g., 'slightly too far right, height matches the W-shaped slot')",
   "decision": "accept" | "adjust",
   "dx": 0.0,
   "dy": 0.0
@@ -159,19 +197,25 @@ class ActionPlanner:
         self.backend = backend
         self.ollama_host = ollama_host or os.getenv("OLLAMA_HOST", "http://localhost:11434")
         self.gemini_api_key = gemini_api_key or os.getenv("GEMINI_API_KEY")
+        self._genai_client = None
 
         # Configure Gemini if selected
         if self.backend == "gemini":
             if not genai:
-                raise ImportError("google-generativeai required. Install: pip install google-generativeai")
-            if self.gemini_api_key:
-                genai.configure(api_key=self.gemini_api_key)
+                raise ImportError("google-genai required. Install: pip install google-genai")
+
+            if not self.gemini_api_key:
+                raise ValueError("GEMINI_API_KEY is required for Gemini backend when not using Vertex AI.")
+
+            # Simple direct Gemini client using API key
+            self._genai_client = genai.Client(api_key=self.gemini_api_key)  # type: ignore[call-arg]
 
         # Default models per backend
         if model is None:
             if backend == "ollama":
                 self.model = "llama3.2-vision"
             elif backend == "gemini":
+                # Default Gemini model; can be overridden by caller
                 self.model = "gemini-2.5-flash-lite"
             else:
                 raise ValueError(f"Unknown backend: {backend}")
@@ -186,7 +230,7 @@ class ActionPlanner:
         _debug_log(f"Backend: {self.backend}, Model: {self.model}")
         _debug_log(f"Image path: {image_path}")
         _debug_log(f"=== PROMPT START ===\n{prompt}\n=== PROMPT END ===")
-        
+
         if self.backend == "ollama":
             import ollama
 
@@ -200,19 +244,39 @@ class ActionPlanner:
             return result
 
         if self.backend == "gemini":
-            if not genai:
-                raise ValueError("google-generativeai not installed")
-            if self.gemini_api_key:
-                genai.configure(api_key=self.gemini_api_key)
+            if not genai or not GenerateContentConfig or not Part:
+                raise ValueError("google-genai not installed or incomplete. Install: pip install google-genai")
 
-            model = genai.GenerativeModel(self.model)
-            import PIL.Image
+            if self._genai_client is None:
+                if not self.gemini_api_key:
+                    raise ValueError("GEMINI_API_KEY is required for Gemini backend when not using Vertex AI.")
+                self._genai_client = genai.Client(api_key=self.gemini_api_key)  # type: ignore[call-arg]
 
-            img = PIL.Image.open(image_path)
+            # Load image bytes
+            import mimetypes
 
-            response = model.generate_content(
-                [prompt, img],
-                generation_config=genai.types.GenerationConfig(response_mime_type="application/json", temperature=0.0),
+            mime_type, _ = mimetypes.guess_type(image_path)
+            if not mime_type:
+                mime_type = "image/png"
+
+            with open(image_path, "rb") as f:
+                image_bytes = f.read()
+
+            # Configure response as JSON (planner expects JSON it can parse)
+            config = GenerateContentConfig(
+                temperature=0.0,
+                response_mime_type="application/json",
+            )
+
+            contents = [
+                Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                prompt,
+            ]
+
+            response = self._genai_client.models.generate_content(  # type: ignore[union-attr]
+                model=self.model,
+                contents=contents,
+                config=config,
             )
             result = response.text
             _debug_log(f"=== RAW RESPONSE ===\n{result}\n=== END RESPONSE ===")
@@ -258,31 +322,31 @@ class ActionPlanner:
             List of integers (1-based indices) to select.
         """
         total = rows * cols
-        
-        _debug_log(f"get_grid_selection called")
+
+        _debug_log("get_grid_selection called")
         _debug_log(f"  context instruction: '{instruction}'")
         _debug_log(f"  grid: {rows}x{cols} = {total} cells")
-        
+
         prompt = SELECT_GRID_PROMPT.format(rows=rows, cols=cols, total=total)
         response = self._chat_with_image(prompt, image_path)
         result = self._parse_json(response)
-        
+
         selected = result.get("selected_numbers", [])
-        
+
         # Log all the detailed reasoning from the structured response
         _debug_log(f"Model extracted instruction: '{result.get('instruction_text', '(not provided)')}'")
         _debug_log(f"Reference image shows: '{result.get('reference_image_shows', '(not provided)')}'")
         _debug_log(f"Looking for: '{result.get('looking_for', '(not provided)')}'")
-        
+
         cell_contents = result.get("cell_contents", {})
         if cell_contents:
-            _debug_log(f"Cell contents analysis:")
+            _debug_log("Cell contents analysis:")
             for cell_num, content in sorted(cell_contents.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 0):
                 _debug_log(f"  Cell {cell_num}: {content}")
-        
+
         _debug_log(f"Selected numbers: {selected}")
         _debug_log(f"Reasoning: {result.get('reasoning', '(not provided)')}")
-        
+
         return selected
 
     # ------------------------------------------------------------------
@@ -314,6 +378,8 @@ class ActionPlanner:
         instruction: str,
         current_target: List[float],
         history: List[Dict[str, Any]],
+        source_description: str = "movable item",
+        target_description: str = "matching slot",
     ) -> Dict[str, Any]:
         """
         Refine a drag destination with visual feedback.
@@ -324,6 +390,8 @@ class ActionPlanner:
             current_target: Current target position [x, y] as percentages (0-1)
             history: List of previous refinements:
                 [{"destination": [x, y], "conclusion": "...", "decision": "..."}]
+            source_description: Description of the item being dragged
+            target_description: Description of where it should go
 
         Returns:
             {
@@ -350,6 +418,8 @@ class ActionPlanner:
 
         prompt = DRAG_REFINE_PROMPT.format(
             instruction=instruction or "Complete the drag puzzle.",
+            source_desc=source_description,
+            target_desc=target_description,
             target_x=current_target[0],
             target_y=current_target[1],
             history_text=history_text,

@@ -21,15 +21,6 @@ import tempfile
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
-# Debug flag - set via CAPTCHA_DEBUG=1 environment variable
-DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
-
-
-def _debug_log(message: str) -> None:
-    """Print debug message if debugging is enabled."""
-    if DEBUG:
-        print(f"[Solver DEBUG] {message}", file=sys.stderr)
-
 from PIL import Image
 
 from .action_types import (
@@ -43,6 +34,15 @@ from .attention import AttentionExtractor
 from .imagePreprocessing import get_grid_bounding_boxes
 from .overlay import add_drag_overlay, add_overlays_to_image
 from .planner import ActionPlanner
+
+# Debug flag - set via CAPTCHA_DEBUG=1 environment variable
+DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
+
+
+def _debug_log(message: str) -> None:
+    """Print debug message if debugging is enabled."""
+    if DEBUG:
+        print(f"[Solver DEBUG] {message}", file=sys.stderr)
 
 
 class CaptchaSolver:
@@ -88,9 +88,8 @@ class CaptchaSolver:
 
         self.planner = ActionPlanner(**planner_kwargs)  # type: ignore[arg-type]
 
-        # Setup attention extractor (Moondream for detect/point)
+        # Setup attention extractor (GroundingDINO + CLIP + FastSAM for detect/point)
         self.attention = AttentionExtractor(
-            model="vikhyatk/moondream2",
             device=None,  # Auto-detect
         )
 
@@ -269,11 +268,16 @@ class CaptchaSolver:
                 )
 
             elif action_type == "drag":
+                # The planner may return either "drag_target_description" (as specified
+                # in the prompt) or a generic "target_description". Prefer the
+                # drag-specific key but keep backwards-compatible behaviour.
+                target_description = result.get("drag_target_description") or result.get("target_description")
+
                 return self._solve_drag(
                     image_path,
                     instruction,
                     result.get("source_description"),
-                    result.get("target_description"),
+                    target_description,
                 )
 
             elif action_type == "click":
@@ -312,31 +316,26 @@ class CaptchaSolver:
         - dx: +0.05 (5% to the right)
         - dy: -0.02 (2% up)
         """
-        source_desc = source_description or "draggable piece"
+        source_desc = source_description or "movable item"
 
-        # 1. Find source
+        # 1. Find source (use greyscale for better edge detection)
         print(f"[Solver] Finding drag source: '{source_desc}'", file=sys.stderr)
         source_x, source_y = self.attention.extract_coordinates(image_path, source_desc)
         source_coords = [source_x, source_y]
 
         print(f"[Solver] Drag source at: ({source_x:.2%}, {source_y:.2%})", file=sys.stderr)
 
-        # 2. Initial target estimate
-        if target_description:
-            print(f"[Solver] Finding drag target: '{target_description}'", file=sys.stderr)
-            target_x, target_y = self.attention.extract_coordinates(image_path, target_description)
-        else:
-            # Default: slightly to the right of source
-            target_x, target_y = min(source_x + 0.2, 0.9), source_y
-
+        # 2. Initial target estimate - always start at center
+        # Let the LLM guide us iteratively with small adjustments
+        target_x, target_y = 0.5, 0.5
         current_target = [target_x, target_y]
-        print(f"[Solver] Initial target estimate: ({target_x:.2%}, {target_y:.2%})", file=sys.stderr)
+        print(f"[Solver] Starting drag target at center: ({target_x:.2%}, {target_y:.2%})", file=sys.stderr)
 
         # 3. Iterative refinement with visual feedback
         history: List[dict] = []
 
-        ext = os.path.splitext(image_path)[1] or ".png"
-        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tf:
+        work_ext = os.path.splitext(image_path)[1] or ".png"
+        with tempfile.NamedTemporaryFile(suffix=work_ext, delete=False) as tf:
             work_path = tf.name
 
         assert self._image_size is not None
@@ -344,7 +343,6 @@ class CaptchaSolver:
 
         try:
             for i in range(max_iterations):
-                # Reset working image
                 shutil.copy2(image_path, work_path)
 
                 # Convert to pixels for overlay
@@ -352,8 +350,10 @@ class CaptchaSolver:
                 source_px = [source_x * w, source_y * h]
                 target_px = [current_target[0] * w, current_target[1] * h]
 
-                # Source bbox (small box around point)
-                box_size = 0.05
+                # Source bbox (box around the drag handle / piece).
+                # A slightly larger box helps capture the *entire* draggable element
+                # (e.g., the whole puzzle piece) instead of just a tooltip like "Move".
+                box_size = 0.08
                 source_bbox_px = [
                     source_px[0] - box_size * w,
                     source_px[1] - box_size * h,
@@ -383,12 +383,23 @@ class CaptchaSolver:
                     instruction,
                     current_target,
                     history,
+                    source_description=source_desc,
+                    target_description=target_description or "matching slot",
                 )
 
                 conclusion = result.get("conclusion", "")
                 decision = result.get("decision", "accept")
                 dx = result.get("dx", 0)
                 dy = result.get("dy", 0)
+
+                # Clamp adjustment to avoid wild jumps (max 5% per step)
+                # The model often returns large values (e.g. -0.2) when it gets confused
+                # or impatient, so we strictly enforce the "small adjustment" rule.
+                max_step = 0.05
+                if abs(dx) > max_step:
+                    dx = math.copysign(max_step, dx)
+                if abs(dy) > max_step:
+                    dy = math.copysign(max_step, dy)
 
                 print(
                     f"[Solver] Iteration {i + 1}: '{conclusion}' -> {decision} (dx={dx:+.1%}, dy={dy:+.1%})",
@@ -413,7 +424,21 @@ class CaptchaSolver:
                 current_target[0] = max(0.0, min(1.0, current_target[0] + dx))
                 current_target[1] = max(0.0, min(1.0, current_target[1] + dy))
 
+            # After refinement loop, if debugging is enabled, save the final overlay image
+            if DEBUG and os.path.exists(work_path):
+                try:
+                    # Save into project-level test-results directory with a descriptive name
+                    out_dir = Path(__file__).resolve().parent.parent / "test-results"
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    base_name = Path(image_path).stem or "captcha"
+                    out_path = out_dir / f"drag_overlay_{base_name}.png"
+                    shutil.copy2(work_path, out_path)
+                    _debug_log(f"Saved final drag overlay to: {out_path}")
+                except Exception as e:
+                    _debug_log(f"Failed to save final drag overlay: {e}")
+
         finally:
+            # Cleanup work image
             if os.path.exists(work_path):
                 os.unlink(work_path)
 

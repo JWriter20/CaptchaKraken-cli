@@ -4,6 +4,48 @@ import cv2
 import numpy as np
 
 
+def to_greyscale(image_path: str, output_path: str) -> None:
+    """
+    Convert an image to greyscale and save it.
+
+    Args:
+        image_path: Path to the input image
+        output_path: Path where the greyscale image will be saved
+    """
+    img = cv2.imread(image_path)
+    if img is None:
+        raise ValueError(f"Could not read image from {image_path}")
+
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    cv2.imwrite(output_path, gray)
+
+
+def to_edge_outline(image_path: str, output_path: str, low_threshold: int = 15, high_threshold: int = 60) -> None:
+    """
+    Detect and isolate edges in an image using Canny edge detection.
+
+    Args:
+        image_path: Path to the input image
+        output_path: Path where the edge-detected image will be saved
+        low_threshold: Lower threshold for Canny edge detection (default: 50)
+        high_threshold: Upper threshold for Canny edge detection (default: 150)
+    """
+    img = cv2.imread(image_path)
+    if img is None:
+        raise ValueError(f"Could not read image from {image_path}")
+
+    # Convert to greyscale first (required for Canny)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # Apply Gaussian blur to reduce noise
+    blurred = cv2.GaussianBlur(gray, (15, 15), 0)
+
+    # Apply Canny edge detection
+    edges = cv2.Canny(blurred, low_threshold, high_threshold)
+
+    cv2.imwrite(output_path, edges)
+
+
 def get_grid_bounding_boxes(image_path: str) -> Optional[List[Tuple[int, int, int, int]]]:
     """
     Detects a grid of images separated by white spacing (e.g., 3x3 or 4x4 captchas).

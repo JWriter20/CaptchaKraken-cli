@@ -6,12 +6,13 @@ opencv-python-headless>=4.10.0
 
 # LLM backends
 ollama>=0.3.0          # Local LLM inference via Ollama
-google-generativeai>=0.8.0 # Gemini API support
+google-genai>=0.4.0    # New Gemini / Vertex AI SDK
 
-# Transformers for attention extraction
+# Vision models (GroundingDINO, CLIP, FastSAM)
 torch>=2.0.0
 transformers>=4.40.0
 accelerate>=0.27.0
+ultralytics>=8.0.0     # For FastSAM
 
 # Visualization
 matplotlib>=3.7.0

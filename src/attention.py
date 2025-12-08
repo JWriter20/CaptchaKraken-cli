@@ -259,7 +259,7 @@ class AttentionExtractor:
             else:
                 print("[AttentionExtractor] Model doesn't have detect() method", file=sys.stderr)
                 return {"objects": []}
-
+                
     def ask(
         self,
         image_path: str,
