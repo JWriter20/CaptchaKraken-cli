@@ -6,7 +6,6 @@ opencv-python-headless>=4.10.0
 
 # LLM backends
 ollama>=0.3.0          # Local LLM inference via Ollama
-openai>=1.0.0          # OpenAI API support
 google-generativeai>=0.8.0 # Gemini API support
 
 # Transformers for attention extraction
@@ -20,3 +19,6 @@ scipy>=1.10.0
 
 # Testing
 pytest>=7.0.0
+
+# Configuration
+python-dotenv>=1.0.0

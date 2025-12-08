@@ -7,8 +7,8 @@ Usage:
 
 import argparse
 import json
-import sys
 import os
+import sys
 
 from src.solver import CaptchaSolver
 
@@ -20,34 +20,23 @@ def main():
         epilog="""
 Examples:
   # Basic usage with Ollama (no API key needed)
-  python -m src.cli captcha.png llama3.2:3b ollama
-
-  # Use OpenAI
-  python -m src.cli captcha.png gpt-4o openai sk-your-api-key
+  python -m src.cli captcha.png llama3.2-vision ollama
 
   # Use Gemini
   python -m src.cli captcha.png gemini-2.0-flash-exp gemini your-gemini-key
-        """
+        """,
     )
 
+    parser.add_argument("image_path", help="Path to the captcha image")
     parser.add_argument(
-        "image_path",
-        help="Path to the captcha image"
-    )
-    parser.add_argument(
-        "model",
-        help="AI model to use for solving ie. gpt-4o, gemini-2.0-flash-exp, llama3.2-vision, deepseek-chat"
+        "model", help="AI model to use for solving ie. gemini-2.0-flash-exp, llama3.2-vision"
     )
     parser.add_argument(
         "api_provider",
-        choices=["ollama", "openai", "gemini", "deepseek"],
-        help="API provider to use one of: ollama, openai, gemini, deepseek"
+        choices=["ollama", "gemini"],
+        help="API provider to use one of: ollama, gemini",
     )
-    parser.add_argument(
-        "api_key",
-        nargs="?",
-        help="API key (not required for ollama)"
-    )
+    parser.add_argument("api_key", nargs="?", help="API key (not required for ollama)")
 
     args = parser.parse_args()
 
@@ -69,19 +58,21 @@ Examples:
             api_key=args.api_key,
         )
 
-        # Solve the captcha - use a default context since the user wants to simplify
-        action = solver.solve_step(
-            args.image_path,
-            "Solve this captcha"  # Default context
-        )
+        # Solve the captcha
+        result = solver.solve(args.image_path, "Solve this captcha")
 
         # Convert to dict for JSON output
-        action_data = action.model_dump()
+        # solve() returns either a single action or a list of ClickActions (for grids)
+        if isinstance(result, list):
+            action_data = [action.model_dump() for action in result]
+        else:
+            action_data = result.model_dump()
         print(json.dumps(action_data))
 
     except Exception as e:
         # Always print traceback for debugging purposes now
         import traceback
+
         traceback.print_exc()
         print(json.dumps({"error": str(e)}), file=sys.stderr)
         sys.exit(1)
@@ -89,4 +80,3 @@ Examples:
 
 if __name__ == "__main__":
     main()
-

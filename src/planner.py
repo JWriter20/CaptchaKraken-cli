@@ -1,19 +1,28 @@
 """
-ActionPlanner - Simplified deterministic captcha solver.
+ActionPlanner - LLM-based captcha planning with tool support.
 
-1. Classifies captcha type (checkbox, image-selection, drag-puzzle, text)
-2. Executes deterministic workflow based on type
-3. Uses only two tools: detect() and point()
+Supports:
+1. Grid selection - which numbered squares to click
+2. Tool-aware planning - can request detect() or point() calls
+3. Drag refinement - iterative adjustment with visual feedback
+4. Text reading - OCR for text captchas
 
-No complex prompts or multi-step reasoning - just clean workflows.
+Backends: ollama, gemini
 """
 
-import os
 import json
-import base64
-from typing import Optional, List, Literal, Dict, Any, Tuple
-from dataclasses import dataclass
-from enum import Enum
+import os
+import sys
+from typing import Any, Dict, List, Literal, Optional
+
+# Debug flag - set via CAPTCHA_DEBUG=1 environment variable
+DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
+
+
+def _debug_log(message: str) -> None:
+    """Print debug message if debugging is enabled."""
+    if DEBUG:
+        print(f"[Planner DEBUG] {message}", file=sys.stderr)
 
 try:
     import google.generativeai as genai
@@ -21,119 +30,136 @@ except ImportError:
     genai = None
 
 
-class CaptchaType(Enum):
-    """Simple captcha type classification."""
-    CHECKBOX = "checkbox"  # Simple "I'm not a robot" checkbox
-    IMAGE_SELECTION = "image_selection"  # Select all images with X
-    DRAG_PUZZLE = "drag_puzzle"  # Drag piece to location
-    TEXT = "text"  # Type distorted text
-    UNKNOWN = "unknown"
+# For grid selection: select numbered squares
+SELECT_GRID_PROMPT = """You are solving a visual CAPTCHA puzzle.
+
+IMPORTANT: Look at the instruction text AND the reference image at the top of the captcha.
+
+This is a {rows}x{cols} grid of images. Each cell has a red number (1-{total}) in the top-left corner.
+
+TASK: First analyze, then select. Think step by step:
+
+1. What does the instruction/header text say?
+2. What does the reference image (if any) show?
+3. What type of thing should you be looking for?
+4. Look at EACH numbered cell carefully - what does it contain?
+5. Which cells match the criteria?
+
+Respond with JSON. CRITICAL: Fill in the reasoning fields FIRST, then select numbers based on your reasoning:
+{{
+  "instruction_text": "copy the exact instruction text from the captcha header",
+  "reference_image_shows": "describe what the reference/example image shows (e.g., 'an egg in a nest')",
+  "looking_for": "what type of object/creature/thing to select (e.g., 'birds - creatures that hatch from eggs')",
+  "cell_contents": {{
+    "1": "elephant",
+    "2": "parrots (birds)",
+    "3": "pigeons (birds)"
+  }},
+  "selected_numbers": [2, 3],
+  "reasoning": "Selected cells containing birds because birds hatch from eggs like in the reference"
+}}"""
 
 
-@dataclass
-class PlannedAction:
-    """Result from the ActionPlanner - simplified."""
-    action_type: Literal["click", "drag", "type", "done"]
-    
-    # Click action
-    click_targets: Optional[List[Tuple[float, float]]] = None  # [(x, y), ...] in pixels or percentages
-    
-    # Drag action
-    drag_source: Optional[Tuple[float, float]] = None  # (x, y)
-    drag_target: Optional[Tuple[float, float]] = None  # (x, y)
-    
-    # Type action
-    text_to_type: Optional[str] = None
-    
-    # Debug info
-    reasoning: Optional[str] = None
-    captcha_type: Optional[str] = None
+# For general planning with tool support
+PLAN_WITH_TOOLS_PROMPT = """You are a captcha solver. Analyze this image and decide the next action.
 
+{instruction}
 
-# Simple classification prompt
-CLASSIFY_PROMPT = """Analyze this captcha and classify it into ONE of these types:
+You have two tools available:
+1. detect(object_class) - Find all instances of an object (e.g., "traffic light", "bus", "bicycle")
+   Use when: You need to find multiple instances of something
 
-1. "checkbox" - Simple checkbox (e.g., "I'm not a robot")
-2. "image_selection" - Select all images containing X (e.g., traffic lights, buses)
-3. "drag_puzzle" - Drag a piece to complete the puzzle
-4. "text" - Type the distorted text shown
+2. point(target) - Find a single element (e.g., "checkbox", "verify button", "slider handle")
+   Use when: You need to click/interact with one specific element
 
-Also extract any instruction text visible in the image.
+You can also return a direct action if you know exactly what to do:
+- click: Click on something (provide target_description for point() to find it)
+- drag: Drag something (provide source_description and target_description)
+- type: Type text (provide the text to type)
+- wait: Wait for loading
+- done: Captcha is already solved
 
-Respond ONLY with JSON:
-{
-  "type": "checkbox" | "image_selection" | "drag_puzzle" | "text",
-  "instruction": "the instruction text or prompt, if visible",
+Respond ONLY with JSON. Either request a tool:
+{{
+  "tool_call": {{
+    "name": "detect" | "point",
+    "args": {{"object_class": "..."}} or {{"target": "..."}}
+  }}
+}}
+
+Or return an action:
+{{
+  "action_type": "click" | "drag" | "type" | "wait" | "done",
+  "target_description": "what to click (for click)",
+  "source_description": "what to drag (for drag)",
+  "drag_target_description": "where to drag to (for drag)",
+  "text": "text to type (for type)",
+  "duration_ms": 500,
   "reasoning": "brief explanation"
-}"""
+}}"""
 
-# For image selection: what object to detect
-DETECT_TARGET_PROMPT = """The instruction says: "{instruction}"
-
-What single object class should we detect? Use 1-3 words only.
-
-Examples:
-- "Select all images with traffic lights" → "traffic light"
-- "Click on all buses" → "bus"
-- "Select motorcycles" → "motorcycle"
-
-Respond ONLY with JSON:
-{
-  "target": "object class to detect"
-}"""
-
-# For drag puzzles: where to drag
-DRAG_PROMPTS_PROMPT = """This is a drag puzzle. Create two prompts:
-1. draggable_prompt: describe the piece to drag (e.g., "puzzle piece", "slider handle")
-2. destination_prompt: describe where to drag it (e.g., "empty slot", "slider track end")
-
-Instruction: {instruction}
-
-Respond ONLY with JSON:
-{
-  "draggable_prompt": "what to drag",
-  "destination_prompt": "where to drag to"
-}"""
 
 # For text captchas: read the text
-TEXT_READ_PROMPT = """Read the distorted text in this captcha.
+TEXT_READ_PROMPT = """Read the distorted text in this captcha image.
+Look carefully at each character, accounting for distortion, rotation, and noise.
 
 Respond ONLY with JSON:
-{
+{{
   "text": "the text to type"
-}"""
+}}"""
+
+
+# For drag refinement: iterative adjustment
+DRAG_REFINE_PROMPT = """You are refining a drag action for a captcha puzzle.
+
+{instruction}
+
+The image shows:
+- RED border: The source element (what we're dragging)
+- RED arrow: The current proposed drag path
+- DASHED border: The proposed destination
+
+Current destination: ({target_x:.1%}, {target_y:.1%})
+
+{history_text}
+
+Evaluate this drag destination:
+1. Is the destination correct? Will dropping here solve the puzzle?
+2. If not, what RELATIVE adjustment is needed?
+
+Provide adjustments as percentages of image size:
+- dx: positive = move right, negative = move left (e.g., 0.05 = 5% right)
+- dy: positive = move down, negative = move up (e.g., -0.02 = 2% up)
+
+Make SMALL adjustments (typically 1-5%). We can refine iteratively.
+
+Respond ONLY with JSON:
+{{
+  "conclusion": "brief assessment of current position (e.g., 'too far right, height looks good')",
+  "decision": "accept" | "adjust",
+  "dx": 0.0,
+  "dy": 0.0
+}}"""
 
 
 class ActionPlanner:
     """
-    Simple deterministic captcha solver.
-    
-    Workflow:
-    1. Classify captcha type
-    2. Execute deterministic sequence based on type:
-       - checkbox: point("checkbox center") → click
-       - image_selection: detect(object) → click all matches
-       - drag_puzzle: point(source) + point(dest) → drag
-       - text: read_text() → type
-    
-    Supports backends: ollama, openai, gemini, deepseek
+    LLM-based captcha planner with tool support.
+
+    Supports backends: ollama, gemini
     """
-    
+
     def __init__(
         self,
-        backend: Literal["ollama", "openai", "gemini", "deepseek"] = "gemini",
+        backend: Literal["ollama", "gemini"] = "gemini",
         model: Optional[str] = None,
-        openai_api_key: Optional[str] = None,
-        openai_base_url: Optional[str] = None,
         ollama_host: Optional[str] = None,
         gemini_api_key: Optional[str] = None,
     ):
         self.backend = backend
-        self.openai_api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
-        self.openai_base_url = openai_base_url or os.getenv("OPENAI_BASE_URL")
         self.ollama_host = ollama_host or os.getenv("OLLAMA_HOST", "http://localhost:11434")
         self.gemini_api_key = gemini_api_key or os.getenv("GEMINI_API_KEY")
-        
+
         # Configure Gemini if selected
         if self.backend == "gemini":
             if not genai:
@@ -145,56 +171,33 @@ class ActionPlanner:
         if model is None:
             if backend == "ollama":
                 self.model = "llama3.2-vision"
-            elif backend == "openai":
-                self.model = "gpt-4o"
             elif backend == "gemini":
-                self.model = "gemini-2.0-flash-exp"
-            elif backend == "deepseek":
-                self.model = "deepseek-chat"
+                self.model = "gemini-2.5-flash-lite"
+            else:
+                raise ValueError(f"Unknown backend: {backend}")
         else:
             self.model = model
-    
+
     # ------------------------------------------------------------------
     # Core helper: chat with image
     # ------------------------------------------------------------------
     def _chat_with_image(self, prompt: str, image_path: str) -> str:
-        """Send a prompt + image to the LLM backend, get JSON response."""
+        """Send a prompt + image to the LLM backend, get response."""
+        _debug_log(f"Backend: {self.backend}, Model: {self.model}")
+        _debug_log(f"Image path: {image_path}")
+        _debug_log(f"=== PROMPT START ===\n{prompt}\n=== PROMPT END ===")
+        
         if self.backend == "ollama":
             import ollama
+
             response = ollama.chat(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt, "images": [image_path]}],
-                options={"temperature": 0.0}
+                options={"temperature": 0.0},
             )
-            return response["message"]["content"]
-        
-        if self.backend in ["openai", "deepseek"]:
-            from openai import OpenAI
-            
-            # Encode image as base64
-            with open(image_path, "rb") as f:
-                image_data = base64.b64encode(f.read()).decode("utf-8")
-            media_type = "image/png" if image_path.lower().endswith(".png") else "image/jpeg"
-            
-            base_url = self.openai_base_url
-            if self.backend == "deepseek" and not base_url:
-                base_url = "https://api.deepseek.com/v1"
-            
-            client = OpenAI(api_key=self.openai_api_key, base_url=base_url)
-            response = client.chat.completions.create(
-                model=self.model,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{image_data}"}},
-                    ],
-                }],
-                temperature=0.0,
-                max_tokens=500,
-                response_format={"type": "json_object"},
-            )
-            return response.choices[0].message.content
+            result = response["message"]["content"]
+            _debug_log(f"=== RAW RESPONSE ===\n{result}\n=== END RESPONSE ===")
+            return result
 
         if self.backend == "gemini":
             if not genai:
@@ -204,97 +207,172 @@ class ActionPlanner:
 
             model = genai.GenerativeModel(self.model)
             import PIL.Image
+
             img = PIL.Image.open(image_path)
-            
+
             response = model.generate_content(
                 [prompt, img],
-                generation_config=genai.types.GenerationConfig(
-                    response_mime_type="application/json",
-                    temperature=0.0
-                )
+                generation_config=genai.types.GenerationConfig(response_mime_type="application/json", temperature=0.0),
             )
-            return response.text
-            
+            result = response.text
+            _debug_log(f"=== RAW RESPONSE ===\n{result}\n=== END RESPONSE ===")
+            return result
+
         raise ValueError(f"Unknown backend: {self.backend}")
-    
+
     def _parse_json(self, text: str) -> Dict[str, Any]:
         """Extract and parse JSON from LLM response."""
         text = text.strip()
-        
+
         # Remove markdown code blocks
         if "```json" in text:
             text = text.split("```json", 1)[1].split("```", 1)[0]
         elif "```" in text:
             text = text.split("```", 1)[1].split("```", 1)[0]
-        
+
         # Find JSON object
         start = text.find("{")
         end = text.rfind("}") + 1
         if start != -1 and end > start:
             text = text[start:end]
-        
+
         try:
             return json.loads(text)
         except json.JSONDecodeError:
             return {}
-    
+
     # ------------------------------------------------------------------
-    # Main entry point: classify and solve deterministically
+    # Grid selection
     # ------------------------------------------------------------------
-    def classify(self, image_path: str) -> Dict[str, Any]:
+    def get_grid_selection(self, instruction: str, image_path: str, rows: int, cols: int) -> List[int]:
         """
-        Classify the captcha type.
-        
+        For grid-based image selection, ask which numbers to select.
+
+        Args:
+            instruction: The instruction text (e.g., "Select all crosswalks")
+            image_path: Path to image with numbered overlay
+            rows: Number of rows in grid
+            cols: Number of cols in grid
+
         Returns:
-            {
-                "type": "checkbox" | "image_selection" | "drag_puzzle" | "text",
-                "instruction": "instruction text or None",
-                "reasoning": "brief explanation"
-            }
+            List of integers (1-based indices) to select.
         """
-        response = self._chat_with_image(CLASSIFY_PROMPT, image_path)
-        result = self._parse_json(response)
+        total = rows * cols
         
-        # Ensure type is valid
-        if result.get("type") not in ["checkbox", "image_selection", "drag_puzzle", "text"]:
-            result["type"] = "checkbox"  # Default fallback
+        _debug_log(f"get_grid_selection called")
+        _debug_log(f"  context instruction: '{instruction}'")
+        _debug_log(f"  grid: {rows}x{cols} = {total} cells")
         
-        return result
-    
-    def get_detection_target(self, instruction: str, image_path: str) -> str:
-        """
-        For image_selection captchas, get the object class to detect.
-        
-        Example: "Select all traffic lights" → "traffic light"
-        """
-        prompt = DETECT_TARGET_PROMPT.format(instruction=instruction)
-        response = self._chat_with_image(prompt, image_path)
-        result = self._parse_json(response)
-        return result.get("target", instruction)  # Fallback to instruction if parsing fails
-    
-    def get_drag_prompts(self, instruction: str, image_path: str) -> Dict[str, str]:
-        """
-        For drag_puzzle captchas, get prompts for point() tool.
-        
-        Returns:
-            {
-                "draggable_prompt": "what to drag",
-                "destination_prompt": "where to drag to"
-            }
-        """
-        prompt = DRAG_PROMPTS_PROMPT.format(instruction=instruction or "complete the puzzle")
+        prompt = SELECT_GRID_PROMPT.format(rows=rows, cols=cols, total=total)
         response = self._chat_with_image(prompt, image_path)
         result = self._parse_json(response)
         
+        selected = result.get("selected_numbers", [])
+        
+        # Log all the detailed reasoning from the structured response
+        _debug_log(f"Model extracted instruction: '{result.get('instruction_text', '(not provided)')}'")
+        _debug_log(f"Reference image shows: '{result.get('reference_image_shows', '(not provided)')}'")
+        _debug_log(f"Looking for: '{result.get('looking_for', '(not provided)')}'")
+        
+        cell_contents = result.get("cell_contents", {})
+        if cell_contents:
+            _debug_log(f"Cell contents analysis:")
+            for cell_num, content in sorted(cell_contents.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 0):
+                _debug_log(f"  Cell {cell_num}: {content}")
+        
+        _debug_log(f"Selected numbers: {selected}")
+        _debug_log(f"Reasoning: {result.get('reasoning', '(not provided)')}")
+        
+        return selected
+
+    # ------------------------------------------------------------------
+    # Tool-aware planning
+    # ------------------------------------------------------------------
+    def plan_with_tools(self, image_path: str, instruction: str = "") -> Dict[str, Any]:
+        """
+        Plan the next action, potentially requesting a tool call.
+
+        Args:
+            image_path: Path to the captcha image
+            instruction: Optional instruction text
+
+        Returns:
+            Dict with either:
+            - "tool_call": {"name": "detect"|"point", "args": {...}}
+            - "action_type": "click"|"drag"|"type"|"wait"|"done" + action details
+        """
+        prompt = PLAN_WITH_TOOLS_PROMPT.format(instruction=instruction or "Solve this captcha.")
+        response = self._chat_with_image(prompt, image_path)
+        return self._parse_json(response)
+
+    # ------------------------------------------------------------------
+    # Drag refinement
+    # ------------------------------------------------------------------
+    def refine_drag(
+        self,
+        image_path: str,
+        instruction: str,
+        current_target: List[float],
+        history: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """
+        Refine a drag destination with visual feedback.
+
+        Args:
+            image_path: Path to image with drag overlay (source box, arrow, target box)
+            instruction: Original puzzle instruction
+            current_target: Current target position [x, y] as percentages (0-1)
+            history: List of previous refinements:
+                [{"destination": [x, y], "conclusion": "...", "decision": "..."}]
+
+        Returns:
+            {
+                "conclusion": "assessment of current position",
+                "decision": "accept" | "adjust",
+                "dx": float,  # relative adjustment (-1 to 1)
+                "dy": float   # relative adjustment (-1 to 1)
+            }
+        """
+        # Format history for context
+        if history:
+            history_lines = ["Previous attempts:"]
+            for i, h in enumerate(history):
+                dest = h.get("destination", [0, 0])
+                conclusion = h.get("conclusion", "")
+                decision = h.get("decision", "")
+                history_lines.append(
+                    f"  {i + 1}. destination: ({dest[0]:.1%}, {dest[1]:.1%}), "
+                    f'conclusion: "{conclusion}", decision: {decision}'
+                )
+            history_text = "\n".join(history_lines)
+        else:
+            history_text = "This is the first attempt."
+
+        prompt = DRAG_REFINE_PROMPT.format(
+            instruction=instruction or "Complete the drag puzzle.",
+            target_x=current_target[0],
+            target_y=current_target[1],
+            history_text=history_text,
+        )
+
+        response = self._chat_with_image(prompt, image_path)
+        result = self._parse_json(response)
+
+        # Ensure we have valid adjustment values
         return {
-            "draggable_prompt": result.get("draggable_prompt", "puzzle piece"),
-            "destination_prompt": result.get("destination_prompt", "empty slot"),
+            "conclusion": result.get("conclusion", ""),
+            "decision": result.get("decision", "accept"),
+            "dx": float(result.get("dx", 0)),
+            "dy": float(result.get("dy", 0)),
         }
-    
+
+    # ------------------------------------------------------------------
+    # Text reading (for text captchas)
+    # ------------------------------------------------------------------
     def read_text(self, image_path: str) -> str:
         """
-        For text captchas, read the distorted text.
-        
+        Read distorted text from a text captcha.
+
         Returns:
             The text to type
         """

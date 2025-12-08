@@ -1,63 +1,52 @@
 """
-CaptchaKraken - AI-powered captcha solver using attention-based coordinate extraction.
+CaptchaKraken - AI-powered captcha solver using LLM planning + vision tools.
 
 Usage:
     from src import CaptchaSolver
-    
-    # Ollama (default)
+
+    # Gemini (default cloud backend)
     solver = CaptchaSolver(
-        model="llama3.2:3b",
-        provider="ollama"
+        provider="gemini",
+        api_key="your-gemini-api-key"
     )
-    
-    # OpenAI
-    solver = CaptchaSolver(
-        model="gpt-4o",
-        provider="openai",
-        api_key="your-api-key"
-    )
-    
-    action = solver.solve_step("captcha.png")
+
+    # Ollama (local backend)
+    solver = CaptchaSolver(provider="ollama")
+
+    # Solve a captcha
+    actions = solver.solve("captcha.png", "Select all traffic lights")
 """
 
-from .solver import CaptchaSolver, solve_captcha
-from .planner import ActionPlanner, PlannedAction
-from .attention import AttentionExtractor
 from .action_types import (
     CaptchaAction,
     ClickAction,
     DragAction,
     TypeAction,
     WaitAction,
-    RequestUpdatedImageAction,
-    VerifyAction,
-    Solution,
 )
-from .overlay import add_overlays_to_image
+from .attention import AttentionExtractor
+from .imagePreprocessing import get_grid_bounding_boxes
+from .overlay import add_drag_overlay, add_overlays_to_image
+from .planner import ActionPlanner
+from .solver import CaptchaSolver, solve_captcha
 
 __all__ = [
     # Main solver
     "CaptchaSolver",
     "solve_captcha",
-    
     # Components
     "ActionPlanner",
-    "PlannedAction",
     "AttentionExtractor",
-    
     # Action Types
     "CaptchaAction",
     "ClickAction",
     "DragAction",
     "TypeAction",
     "WaitAction",
-    "RequestUpdatedImageAction",
-    "VerifyAction",
-    "Solution",
-    
     # Utilities
     "add_overlays_to_image",
+    "add_drag_overlay",
+    "get_grid_bounding_boxes",
 ]
 
-__version__ = "0.3.0"
-
+__version__ = "0.4.0"

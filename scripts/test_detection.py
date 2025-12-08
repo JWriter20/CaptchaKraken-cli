@@ -18,16 +18,17 @@ sys.path.insert(0, src_root)
 
 from src.attention import AttentionExtractor
 
-def test_detection(extractor: AttentionExtractor, image_path: str, object_class: str, output_path: str = None):
+def test_detection(extractor: AttentionExtractor, image_path: str, object_class: str, output_path: str = None, max_objects: int = 24):
     """Test object detection on a single image."""
     print(f"\n{'='*60}")
     print(f"Testing: {os.path.basename(image_path)}")
     print(f"Object Class: {object_class}")
+    print(f"Max Objects: {max_objects}")
     print('='*60)
     
     try:
         # Detect objects using detect() method
-        detections = extractor.detect_objects(image_path, object_class)
+        detections = extractor.detect_objects(image_path, object_class, max_objects=max_objects)
         print(f"\n✓ Found {len(detections)} detection(s)")
         
         # Print detection details
@@ -39,20 +40,20 @@ def test_detection(extractor: AttentionExtractor, image_path: str, object_class:
             print(f"    BBox: [{bbox[0]:.4f}, {bbox[1]:.4f}, {bbox[2]:.4f}, {bbox[3]:.4f}]")
             print(f"    Center: ({(bbox[0] + bbox[2])/2:.4f}, {(bbox[1] + bbox[3])/2:.4f})")
         
-        # Generate visualization    
-    if output_path is None:
-        # Create test-results directory if it doesn't exist
-        results_dir = os.path.join(project_root, "test-results")
-        os.makedirs(results_dir, exist_ok=True)
-        output_name = os.path.join(results_dir, f"test_detection_{os.path.basename(image_path)}")
-    else:
-        output_name = output_path
-        
-    vis_path = extractor.visualize_detections(
-        image_path,
-        detections,
-        output_path=output_name
-    )
+        # Generate visualization
+        if output_path is None:
+            # Create test-results directory if it doesn't exist
+            results_dir = os.path.join(project_root, "test-results")
+            os.makedirs(results_dir, exist_ok=True)
+            output_name = os.path.join(results_dir, f"test_detection_{os.path.basename(image_path)}")
+        else:
+            output_name = output_path
+            
+        vis_path = extractor.visualize_detections(
+            image_path,
+            detections,
+            output_path=output_name
+        )
         print(f"✓ Visualization saved: {vis_path}")
         
         return True, detections
@@ -81,6 +82,12 @@ def main():
         help="Device to run on (cuda, mps, cpu). Leave empty to auto-detect.",
         default=None,
     )
+    parser.add_argument(
+        "--max-objects",
+        type=int,
+        default=24,
+        help="Maximum number of objects to detect (default: 24)"
+    )
     
     args = parser.parse_args()
     
@@ -88,10 +95,9 @@ def main():
     print("Testing moondream detect() Method")
     print("="*60)
     
-    # Create extractor with moondream backend
-    print(f"\nInitializing AttentionExtractor (backend=moondream, model={args.model})...")
+    # Create extractor with moondream
+    print(f"\nInitializing AttentionExtractor (model={args.model})...")
     extractor = AttentionExtractor(
-        backend="moondream",
         model=args.model,
         device=args.device,
     )
@@ -100,7 +106,10 @@ def main():
         print(f"\n✗ Error: Image not found at {args.image_path}")
         return
     
-    success, detections = test_detection(extractor, args.image_path, args.query, args.output)
+    # We need to pass max_objects to test_detection, but test_detection needs to be updated too
+    # Actually, test_detection calls extractor.detect_objects, so we can just modify test_detection
+    # to accept max_objects
+    success, detections = test_detection(extractor, args.image_path, args.query, args.output, args.max_objects)
     
     # Summary
     print("\n" + "="*60)

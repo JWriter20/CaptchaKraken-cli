@@ -108,7 +108,7 @@ text = planner.read_text("captcha.png")
 
 ```python
 planner = ActionPlanner(
-    backend="gemini",  # or "ollama", "openai", "deepseek"
+    backend="gemini",  # or "ollama"
     model=None,  # Auto-selected based on backend
     gemini_api_key=None,  # Or set GEMINI_API_KEY env var
 )

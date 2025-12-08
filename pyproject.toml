@@ -17,7 +17,7 @@ dependencies = [
     "pillow>=10.0.0",
     "numpy>=1.24.0",
     "ollama>=0.3.0",
-    "openai>=1.0.0",
+    "google-generativeai>=0.8.0",
     "torch>=2.0.0",
     "transformers>=4.40.0",
     "accelerate>=0.27.0",
@@ -31,13 +31,55 @@ captchakraken = "src.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
 
+# Development dependencies
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "mypy>=1.0.0",
+    "ruff>=0.1.0",
+]
+
 # Development scripts (run with: hatch run <script>)
 [tool.hatch.envs.default.scripts]
 test = "pytest"
-test-detection = "python scripts/test_detection.py captchaimages/recaptchaBasic.png checkbox"
+test-detection = "python scripts/test_detection.py captchaimages/recaptchaImages2.png 'small clickable image squares'"
 test-pointing = "python scripts/test_pointing.py captchaimages/recaptchaBasic.png 'the checkbox in the center'"
 check-hw = "python scripts/check_hw.py"
 install-models = "bash scripts/install_models.sh"
-lint = "echo 'Add your linting command here'"
-format = "echo 'Add your formatting command here'"
+lint = "mypy src/ --ignore-missing-imports --no-site-packages && ruff check src/"
+format = "ruff format src/"
+typecheck = "mypy src/ --ignore-missing-imports --no-site-packages"
+
+# Mypy configuration (lenient to start - tighten over time)
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = false
+warn_unused_configs = true
+disallow_untyped_defs = false
+check_untyped_defs = false
+ignore_missing_imports = true
+no_implicit_optional = false  # Allow `arg: str = None` pattern
+exclude = ["venv/", "build/", "dist/"]
+
+# Per-module overrides for tricky patterns
+[[tool.mypy.overrides]]
+module = "src.attention"
+disable_error_code = ["attr-defined"]  # Lazy model loading uses None checks
+
+[[tool.mypy.overrides]]
+module = "src.planner"
+disable_error_code = ["attr-defined", "assignment", "arg-type"]  # Multiple API backends
+
+[[tool.mypy.overrides]]
+module = ["paddle.*", "paddleocr.*"]
+ignore_errors = true
+
+# Ruff configuration (fast Python linter)
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]  # Errors, pyflakes, warnings, isort
+ignore = ["E501"]  # Line too long (handled by formatter)
 

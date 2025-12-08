@@ -2,7 +2,7 @@
 
 # scripts/install_models.sh
 # Installs dependencies for CaptchaKraken's two-stage architecture:
-# 1. Action Planner: Uses Ollama or OpenAI for action planning
+# 1. Action Planner: Uses Ollama or Gemini for action planning
 # 2. Attention Extractor: Uses small VLMs via transformers for coordinate extraction
 
 set -e
@@ -63,8 +63,8 @@ if command_exists pip; then
         pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
     fi
     
-    # Install core dependencies
-    pip install transformers accelerate pillow pydantic numpy scipy ollama openai
+    # Install core dependencies (Ollama + Gemini backends)
+    pip install transformers accelerate pillow pydantic numpy scipy ollama google-generativeai
     echo "    ✓ Python packages installed"
 else
     echo "    Error: 'pip' not found."
@@ -141,8 +141,6 @@ echo "  solver = CaptchaSolver()"
 echo "  action = solver.solve_step('captcha.png', 'Solve this captcha')"
 echo ""
 echo "Configuration:"
-echo "  --planner ollama|openai      Backend for action planning"
+echo "  --planner ollama|gemini      Backend for action planning"
 echo "  --attention-model MODEL      HuggingFace model for coordinate extraction"
-echo ""
-echo "For OpenAI: export OPENAI_API_KEY='your-key'"
 echo ""

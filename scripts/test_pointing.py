@@ -29,20 +29,20 @@ def test_pointing(extractor: AttentionExtractor, image_path: str, target: str, o
         x_pct, y_pct = extractor.extract_coordinates(image_path, target)
         print(f"\n✓ Position: ({x_pct:.2%}, {y_pct:.2%})")
         
-        # Generate visualization    
-    if output_path is None:
-        # Create test-results directory if it doesn't exist
-        results_dir = os.path.join(project_root, "test-results")
-        os.makedirs(results_dir, exist_ok=True)
-        output_name = os.path.join(results_dir, f"test_pointing_{os.path.basename(image_path)}")
-    else:
-        output_name = output_path
-        
-    vis_path = extractor.visualize_attention(
-        image_path, 
-        target,
-        output_path=output_name
-    )
+        # Generate visualization
+        if output_path is None:
+            # Create test-results directory if it doesn't exist
+            results_dir = os.path.join(project_root, "test-results")
+            os.makedirs(results_dir, exist_ok=True)
+            output_name = os.path.join(results_dir, f"test_pointing_{os.path.basename(image_path)}")
+        else:
+            output_name = output_path
+            
+        vis_path = extractor.visualize_attention(
+            image_path, 
+            target,
+            output_path=output_name
+        )
         print(f"✓ Visualization saved: {vis_path}")
         
         return True, (x_pct, y_pct)
@@ -79,9 +79,8 @@ def main():
     print("="*60)
     
     # Create extractor with moondream backend (uses native point() method)
-    print(f"\nInitializing AttentionExtractor (backend=moondream, model={args.model})...")
+    print(f"\nInitializing AttentionExtractor (model={args.model})...")
     extractor = AttentionExtractor(
-        backend="moondream",
         model=args.model,
         device=args.device,
     )

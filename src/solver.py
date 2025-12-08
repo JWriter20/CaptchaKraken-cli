@@ -1,42 +1,35 @@
 """
-CaptchaSolver - Main entry point for solving captchas.
+CaptchaSolver - Simplified captcha solver using LLM planning + vision tools.
 
-This module orchestrates the intelligent two-stage solving process:
-1. ActionPlanner - Determines what action to take with reasoning
-2. AttentionExtractor - Finds where to perform the action using detection/focus
-
-Enhanced with:
-- Self-questioning and iterative refinement
-- Detection-based element mapping
-- Support for numbered overlay elements
-- Multi-click operations
+Flow:
+1. Grid detection - if grid found, use numbered overlay and ask planner to select
+2. General solving - let planner use detect/point tools to find targets
+3. Drag simulation - iterative refinement with visual feedback
 
 Usage:
-    # Ollama
-    solver = CaptchaSolver(
-        model="llama3.2:3b",
-        provider="ollama"
-    )
-    
-    # OpenAI
-    solver = CaptchaSolver(
-        model="gpt-4o",
-        provider="openai",
-        api_key="your-api-key"
-    )
-    
-    # Single step
-    action = solver.solve_step("captcha.png")
-    
-    # Full loop
-    for action in solver.solve_loop(get_image, max_steps=10, end_condition=is_done):
-        execute_action(action)
+    from src import CaptchaSolver
+
+    solver = CaptchaSolver(provider="gemini", api_key="...")
+    actions = solver.solve("captcha.png", "Select all traffic lights")
 """
 
+import math
 import os
+import shutil
 import sys
-from typing import List, Optional, Callable, Iterator, Union, Dict, Any
+import tempfile
 from pathlib import Path
+from typing import List, Optional, Tuple, Union
+
+# Debug flag - set via CAPTCHA_DEBUG=1 environment variable
+DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
+
+
+def _debug_log(message: str) -> None:
+    """Print debug message if debugging is enabled."""
+    if DEBUG:
+        print(f"[Solver DEBUG] {message}", file=sys.stderr)
+
 from PIL import Image
 
 from .action_types import (
@@ -45,815 +38,404 @@ from .action_types import (
     DragAction,
     TypeAction,
     WaitAction,
-    RequestUpdatedImageAction,
-    VerifyAction,
 )
-from .planner import ActionPlanner, PlannedAction
 from .attention import AttentionExtractor
-from .overlay import add_drag_overlay
+from .imagePreprocessing import get_grid_bounding_boxes
+from .overlay import add_drag_overlay, add_overlays_to_image
+from .planner import ActionPlanner
 
 
 class CaptchaSolver:
     """
-    Intelligent two-stage captcha solver using LLM planning + attention-based coordinate extraction.
-    
-    Stage 1 (ActionPlanner): Ask an LLM (via Ollama or API provider) what action is needed
-    Stage 2 (AttentionExtractor): Use Moondream for detection/focus to find precise coordinates
-    
-    Enhanced features:
-    - Detection-based element finding
-    - Self-questioning for refinement
-    - Multi-click support
-    - Numbered element mapping
-    
-    Args:
-        model: Model name for planning (default: "hf.co/unsloth/gemma-3-12b-it-GGUF:Q4_K_M" for ollama)
-        provider: API provider ("ollama", "openai", "gemini", or "deepseek"). Default: "ollama"
-        api_key: API key (required for non-ollama providers)
+    Simplified captcha solver.
+
+    Supports:
+    - Grid selection captchas (reCAPTCHA, hCaptcha image grids)
+    - Checkbox captchas
+    - Drag puzzles with iterative refinement
+    - Text captchas
     """
-    
+
     def __init__(
         self,
         model: Optional[str] = None,
-        provider: str = "ollama",
+        provider: str = "gemini",
         api_key: Optional[str] = None,
     ):
+        # Restrict providers to the supported set
+        if provider not in {"ollama", "gemini"}:
+            raise ValueError(f"Unsupported provider '{provider}'. Supported providers are: 'ollama', 'gemini'.")
+
         # Set default model based on provider
         if model is None:
             if provider == "ollama":
-                model = "hf.co/unsloth/gemma-3-12b-it-GGUF:Q4_K_M"
-            elif provider == "openai":
-                model = "gpt-4o"
+                model = "llama3.2-vision"
             elif provider == "gemini":
-                model = "gemini-2.0-flash-exp"
-            elif provider == "deepseek":
-                model = "deepseek-chat"
-            else:
-                raise ValueError(f"Unknown provider '{provider}' and no model specified")
-        
+                model = "gemini-2.5-flash-lite"
+
         # Validate required parameters
         if provider != "ollama" and not api_key:
             raise ValueError(f"api_key is required for provider '{provider}'")
-        
-        # Stage 1: Planner setup based on provider
-        planner_kwargs = {
+
+        # Setup planner
+        planner_kwargs: dict = {
             "backend": provider,
             "model": model,
         }
-        
-        if provider == "openai":
-            planner_kwargs["openai_api_key"] = api_key
-        elif provider == "gemini":
+
+        if provider == "gemini" and api_key:
             planner_kwargs["gemini_api_key"] = api_key
-        elif provider == "deepseek":
-            planner_kwargs["openai_api_key"] = api_key
-            planner_kwargs["openai_base_url"] = "https://api.deepseek.com/v1"
-        
-        self.planner = ActionPlanner(**planner_kwargs)
-        
-        # Stage 2: Attention extractor always uses Moondream
-        self.attention_extractor = AttentionExtractor(
+
+        self.planner = ActionPlanner(**planner_kwargs)  # type: ignore[arg-type]
+
+        # Setup attention extractor (Moondream for detect/point)
+        self.attention = AttentionExtractor(
             model="vikhyatk/moondream2",
             device=None,  # Auto-detect
-            backend="moondream",
         )
-        
-        # Track action history for context
-        self._action_history: List[CaptchaAction] = []
-        
-        # Cache for image information
-        self._current_image_size: Optional[tuple] = None
-    
-    def solve_step(
+
+        # Image size cache
+        self._image_size: Optional[Tuple[int, int]] = None
+
+    def solve(
         self,
         image_path: str,
-        context: str = "",
-    ) -> CaptchaAction:
+        instruction: str = "",
+    ) -> Union[CaptchaAction, List[ClickAction]]:
         """
-        Solve a single step of the captcha using the specialized flow.
-        This flow:
-        1) Classify captcha into checkbox | split-image | images | drag_puzzle | text
-        2) Use a dedicated handler for that captcha type
-        3) Fall back to the legacy planner if classification or specialized handling fails
+        Solve a captcha image.
+
+        Args:
+            image_path: Path to the captcha image
+            instruction: Optional instruction text (e.g., "Select all traffic lights")
+
+        Returns:
+            CaptchaAction or List[ClickAction] for grid selections
         """
-        # Resolve path
+        # Resolve path and get image size
         image_path = str(Path(image_path).resolve())
-        
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"Image not found: {image_path}")
-        
-        # Get image dimensions
+
         with Image.open(image_path) as img:
-            self._current_image_size = img.size
-        
-        # Step 1: classify captcha type
-        classification = self.planner.classify_captcha(image_path, context)
-        captcha_kind = (classification.get("captcha_kind") or "unknown").lower()
-        drag_variant = (classification.get("drag_variant") or "unknown").lower()
-        print(f"[Specialized] Classified as: {captcha_kind} (drag_variant={drag_variant})", file=sys.stderr)
-        
-        action: Optional[CaptchaAction] = None
-        
+            self._image_size = img.size
+
+        # 1. Check for grid structure
+        grid_boxes = get_grid_bounding_boxes(image_path)
+        if grid_boxes:
+            print(f"[Solver] Detected grid with {len(grid_boxes)} cells", file=sys.stderr)
+            return self._solve_grid(image_path, instruction, grid_boxes)
+
+        # 2. General solving with tool use
+        print("[Solver] Using general solving flow", file=sys.stderr)
+        return self._solve_general(image_path, instruction)
+
+    def _solve_grid(
+        self,
+        image_path: str,
+        instruction: str,
+        grid_boxes: List[Tuple[int, int, int, int]],
+    ) -> List[ClickAction]:
+        """
+        Solve grid selection captcha.
+
+        1. Apply numbered overlay
+        2. Ask planner which squares to select
+        3. Return ClickActions for selected squares
+        """
+        n = len(grid_boxes)
+        if n == 9:
+            rows, cols = 3, 3
+        elif n == 16:
+            rows, cols = 4, 4
+        else:
+            cols = int(math.sqrt(n))
+            rows = math.ceil(n / cols)
+
+        _debug_log(f"_solve_grid called with {n} cells ({rows}x{cols})")
+        _debug_log(f"Instruction passed to planner: '{instruction}'")
+
+        # Create temp image with numbered overlay
+        ext = os.path.splitext(image_path)[1] or ".png"
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tf:
+            overlay_path = tf.name
+
         try:
-            if captcha_kind == "checkbox":
-                action = self._solve_checkbox(image_path, context)
-            elif captcha_kind in ("split-image", "images"):
-                action = self._solve_image_selection(
-                    image_path,
-                    context,
-                    captcha_kind=captcha_kind,
-                )
-            elif captcha_kind == "drag_puzzle":
-                action = self._solve_drag_puzzle(
-                    image_path,
-                    context,
-                    drag_variant=drag_variant,
-                )
-            elif captcha_kind == "text":
-                action = self._solve_text_captcha(image_path)
-        except Exception as e:
-            print(f"[Specialized] Handler error: {e}", file=sys.stderr)
-            action = None
-        
-        # Fallback to legacy planner if needed
-        if action is None:
-            print("[Fallback] Falling back to legacy planner flow", file=sys.stderr)
-            action = self._solve_with_legacy_planner(image_path, context)
-        
-        # Track history
-        self._action_history.append(action)
-        return action
-    
-    
-    # ------------------------------------------------------------------
-    # Specialized handlers (AlgoImprovements-aligned)
-    # ------------------------------------------------------------------
-    def _solve_checkbox(self, image_path: str, prompt_text: str) -> ClickAction:
-        """Handle simple checkbox captchas with a precise focus call."""
-        target_desc = prompt_text or "the checkbox"
-        x_pct, y_pct = self.attention_extractor.focus(image_path, target_desc)
-        x_px, y_px = self._pct_to_pixels(x_pct, y_pct)
-        
-        return ClickAction(
-            action="click",
-            coordinates=[x_px, y_px],
-            point_percent=[x_pct, y_pct],
-        )
-    
-    def _solve_image_selection(
+            # Prepare overlays - bbox in [x, y, w, h] pixel format for overlay function
+            overlays = []
+            for i, (x1, y1, x2, y2) in enumerate(grid_boxes):
+                w = x2 - x1
+                h = y2 - y1
+                overlays.append({"bbox": [x1, y1, w, h], "number": i + 1, "color": "#E74C3C"})
+
+            add_overlays_to_image(image_path, overlays, output_path=overlay_path)
+            _debug_log(f"Generated overlay image at: {overlay_path}")
+
+            # Ask planner which squares to select
+            selected_numbers = self.planner.get_grid_selection(instruction, overlay_path, rows=rows, cols=cols)
+
+            print(f"[Solver] Grid selection: {selected_numbers}", file=sys.stderr)
+
+            # Convert to ClickActions
+            actions = []
+            assert self._image_size is not None
+            img_w, img_h = self._image_size
+            for num in selected_numbers:
+                idx = num - 1
+                if 0 <= idx < len(grid_boxes):
+                    x1, y1, x2, y2 = grid_boxes[idx]
+
+                    # Convert to normalized coordinates
+                    bbox_pct = [x1 / img_w, y1 / img_h, x2 / img_w, y2 / img_h]
+
+                    actions.append(
+                        ClickAction(
+                            action="click",
+                            target_number=num,
+                            target_bounding_box=bbox_pct,
+                        )
+                    )
+
+            return actions
+
+        finally:
+            if os.path.exists(overlay_path):
+                os.unlink(overlay_path)
+
+    def _solve_general(
         self,
         image_path: str,
-        prompt_text: str,
-        captcha_kind: str,
-    ) -> ClickAction:
-        """Handle split-image or images captchas via detection."""
-        target_info = self.planner.plan_detection_target(
-            image_path, prompt_text, captcha_kind=captcha_kind
-        )
-        target_label = (target_info.get("target_to_detect") or prompt_text or "target object").strip()
-        print(f"[Specialized] Detecting target: {target_label}")
-        
-        detections = self.attention_extractor.detect_objects(image_path, target_label)
-        
-        bounding_boxes_pct: List[List[float]] = []
-        bounding_boxes_px: List[List[float]] = []
-        all_coordinates: List[List[float]] = []
-        all_coordinates_pct: List[List[float]] = []
-        
-        for det in detections:
-            bbox = det.get("bbox")
-            if not bbox or len(bbox) < 4:
-                continue
-            bbox_pct = self._ensure_bbox_normalized(bbox)
-            bounding_boxes_pct.append(bbox_pct)
-            bounding_boxes_px.append(self._bbox_pct_to_px(bbox_pct))
-            center_pct = self._bbox_center_pct(bbox_pct)
-            all_coordinates.append(list(self._pct_to_pixels_tuple(center_pct)))
-            all_coordinates_pct.append(list(center_pct))
-        
-        if not bounding_boxes_pct:
-            raise ValueError(f"Detection returned no boxes for target '{target_label}'")
-        
-        print(f"[Specialized] Found {len(bounding_boxes_pct)} detections")
-        
-        return ClickAction(
-            action="click",
-            bounding_boxes=bounding_boxes_pct,
-            bounding_boxes_px=bounding_boxes_px,
-            all_coordinates=all_coordinates if len(all_coordinates) > 1 else None,
-            all_coordinates_pct=all_coordinates_pct if len(all_coordinates_pct) > 1 else None,
-            coordinates=all_coordinates[0] if all_coordinates else None,
-            point_percent=all_coordinates_pct[0] if all_coordinates_pct else None,
-        )
-    
-    def _solve_drag_puzzle(
+        instruction: str,
+    ) -> CaptchaAction:
+        """
+        General solving using planner with detect/point tools.
+
+        The planner can request tool calls (detect, point) or return a direct action.
+        """
+        max_tool_calls = 3
+
+        for _ in range(max_tool_calls):
+            result = self.planner.plan_with_tools(image_path, instruction)
+
+            # Handle tool calls
+            if result.get("tool_call"):
+                tool = result["tool_call"]["name"]
+                args = result["tool_call"]["args"]
+
+                if tool == "detect":
+                    object_class = args.get("object_class", "target")
+                    print(f"[Solver] Tool call: detect('{object_class}')", file=sys.stderr)
+                    detections = self.attention.detect_objects(image_path, object_class)
+
+                    if detections:
+                        bbox = detections[0]["bbox"]
+                        return ClickAction(
+                            action="click",
+                            target_bounding_box=bbox,
+                        )
+                    else:
+                        # No detections - try point as fallback
+                        print("[Solver] No detections, falling back to point()", file=sys.stderr)
+                        x, y = self.attention.extract_coordinates(image_path, object_class)
+                        return ClickAction(
+                            action="click",
+                            target_coordinates=[x, y],
+                        )
+
+                elif tool == "point":
+                    target = args.get("target", "target")
+                    print(f"[Solver] Tool call: point('{target}')", file=sys.stderr)
+                    x, y = self.attention.extract_coordinates(image_path, target)
+                    return ClickAction(
+                        action="click",
+                        target_coordinates=[x, y],
+                    )
+
+                continue  # Try again if tool call didn't resolve
+
+            # Handle direct actions
+            action_type = result.get("action_type", "click")
+
+            if action_type == "type":
+                return TypeAction(
+                    action="type",
+                    text=result.get("text", ""),
+                )
+
+            elif action_type == "wait":
+                return WaitAction(
+                    action="wait",
+                    duration_ms=result.get("duration_ms", 500),
+                )
+
+            elif action_type == "drag":
+                return self._solve_drag(
+                    image_path,
+                    instruction,
+                    result.get("source_description"),
+                    result.get("target_description"),
+                )
+
+            elif action_type == "click":
+                target = result.get("target_description", "target")
+                x, y = self.attention.extract_coordinates(image_path, target)
+                return ClickAction(
+                    action="click",
+                    target_coordinates=[x, y],
+                )
+
+            elif action_type == "done":
+                return WaitAction(action="wait", duration_ms=0)
+
+        # Fallback after max tool calls
+        return WaitAction(action="wait", duration_ms=0)
+
+    def _solve_drag(
         self,
         image_path: str,
-        prompt_text: str,
-        drag_variant: str = "unknown",
+        instruction: str,
+        source_description: Optional[str],
+        target_description: Optional[str],
+        max_iterations: int = 5,
     ) -> DragAction:
-        """Handle drag puzzles with iterative or logical flows."""
-        strategy = self.planner.plan_drag_strategy(image_path, prompt_text)
-        variant = (strategy.get("drag_type") or drag_variant or "logical").lower()
-        print(f"[Specialized] Drag strategy variant: {variant}")
-        
-        if variant == "template_matching":
-            # Now uses the iterative visual approach
-            return self._solve_iterative_drag(image_path, strategy, prompt_text)
-        return self._solve_logical_drag(image_path, strategy)
-    
-    def _solve_logical_drag(self, image_path: str, strategy: Dict[str, Any]) -> DragAction:
-        """Logical drag: use detection/focus for draggable and destination."""
-        draggable_prompt = strategy.get("draggable_prompt") or "movable piece"
-        destination_prompt = strategy.get("destination_prompt") or "target location"
-        
-        # 1. Find draggable
-        source_bbox = self._detect_bbox_with_fallback(image_path, draggable_prompt)
-        
-        # 2. Find destination (bee logic: finding destination and reasoning)
-        target_bbox = self._detect_bbox_with_fallback(image_path, destination_prompt)
-        
-        source_center_pct = self._bbox_center_pct(source_bbox)
-        target_center_pct = self._bbox_center_pct(target_bbox)
-        
-        source_px = self._pct_to_pixels_tuple(source_center_pct)
-        target_px = self._pct_to_pixels_tuple(target_center_pct)
-        
-        return DragAction(
-            action="drag",
-            source_coordinates=list(source_px),
-            source_coordinates_pct=list(source_center_pct),
-            target_coordinates=list(target_px),
-            target_coordinates_pct=list(target_center_pct),
-        )
-    
-    def _solve_iterative_drag(self, image_path: str, strategy: Dict[str, Any], prompt_text: str) -> DragAction:
         """
-        Iterative visual solver for drag puzzles.
-        1. Locate draggable piece
-        2. Visual loop: Propose move -> Visual Feedback -> Refine -> Repeat
+        Solve drag puzzle with iterative refinement.
+
+        Uses visual feedback loop:
+        1. Locate source element
+        2. Initial target estimate from point() or description
+        3. Draw overlay (arrow + destination box)
+        4. Ask model for adjustment (relative, e.g., "+5%, -2%")
+        5. Repeat until satisfied or max iterations reached
+
+        The model returns relative adjustments like:
+        - dx: +0.05 (5% to the right)
+        - dy: -0.02 (2% up)
         """
-        draggable_prompt = strategy.get("draggable_prompt") or "movable piece"
-        
-        # 1. Locate the draggable piece
-        print(f"[Iterative] Locating draggable: {draggable_prompt}")
-        source_bbox_pct = self._detect_bbox_with_fallback(image_path, draggable_prompt)
-        if not source_bbox_pct:
-            raise ValueError("Could not locate draggable piece for iterative solve")
-            
-        source_bbox_px = self._bbox_pct_to_px(source_bbox_pct)
-        source_center_pct = self._bbox_center_pct(source_bbox_pct)
-        
-        # Working copy for overlays
-        import shutil
-        import tempfile
-        
-        # Create a temp file that preserves the extension
+        source_desc = source_description or "draggable piece"
+
+        # 1. Find source
+        print(f"[Solver] Finding drag source: '{source_desc}'", file=sys.stderr)
+        source_x, source_y = self.attention.extract_coordinates(image_path, source_desc)
+        source_coords = [source_x, source_y]
+
+        print(f"[Solver] Drag source at: ({source_x:.2%}, {source_y:.2%})", file=sys.stderr)
+
+        # 2. Initial target estimate
+        if target_description:
+            print(f"[Solver] Finding drag target: '{target_description}'", file=sys.stderr)
+            target_x, target_y = self.attention.extract_coordinates(image_path, target_description)
+        else:
+            # Default: slightly to the right of source
+            target_x, target_y = min(source_x + 0.2, 0.9), source_y
+
+        current_target = [target_x, target_y]
+        print(f"[Solver] Initial target estimate: ({target_x:.2%}, {target_y:.2%})", file=sys.stderr)
+
+        # 3. Iterative refinement with visual feedback
+        history: List[dict] = []
+
         ext = os.path.splitext(image_path)[1] or ".png"
         with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tf:
             work_path = tf.name
-        shutil.copy2(image_path, work_path)
-        
+
+        assert self._image_size is not None
+        img_w, img_h = self._image_size
+
         try:
-            # 2. Initial Proposal
-            # Draw just the source border first so the model knows what we are moving, plus grid
-            add_drag_overlay(work_path, source_bbox_px)
-            
-            # Ask where to go (pass bbox for extra context)
-            initial_plan = self.planner.get_drag_destination(
-                work_path,
-                prompt_text or "",
-                draggable_bbox_pct=source_bbox_pct,
-            )
-            
-            target_center_pct = [
-                initial_plan.get("target_x", source_center_pct[0]),
-                initial_plan.get("target_y", source_center_pct[1]),
-            ]
-                
-            # Clamp to [0,1]
-            target_center_pct = [
-                max(0.0, min(1.0, target_center_pct[0])),
-                max(0.0, min(1.0, target_center_pct[1]))
-            ]
-            
-            # 3. Refinement Loop
-            max_iterations = 3
-            current_target_pct = target_center_pct
-            
             for i in range(max_iterations):
-                print(f"[Iterative] Iteration {i+1}: Proposed target {current_target_pct}")
-                
-                # Reset working image from original to clear previous arrows
+                # Reset working image
                 shutil.copy2(image_path, work_path)
-                
-                # Calculate target bbox (same size as source)
-                w_pct = source_bbox_pct[2] - source_bbox_pct[0]
-                h_pct = source_bbox_pct[3] - source_bbox_pct[1]
-                
-                target_bbox_pct = [
-                    current_target_pct[0] - w_pct/2,
-                    current_target_pct[1] - h_pct/2,
-                    current_target_pct[0] + w_pct/2,
-                    current_target_pct[1] + h_pct/2
+
+                # Convert to pixels for overlay
+                w, h = img_w, img_h
+                source_px = [source_x * w, source_y * h]
+                target_px = [current_target[0] * w, current_target[1] * h]
+
+                # Source bbox (small box around point)
+                box_size = 0.05
+                source_bbox_px = [
+                    source_px[0] - box_size * w,
+                    source_px[1] - box_size * h,
+                    source_px[0] + box_size * w,
+                    source_px[1] + box_size * h,
                 ]
-                
-                # Draw full overlay: Source Border + Arrow + Target Box + Grid
-                target_bbox_px = self._bbox_pct_to_px(target_bbox_pct)
-                target_center_px = self._pct_to_pixels_tuple(current_target_pct)
-                
+
+                # Target bbox (same size)
+                target_bbox_px = [
+                    target_px[0] - box_size * w,
+                    target_px[1] - box_size * h,
+                    target_px[0] + box_size * w,
+                    target_px[1] + box_size * h,
+                ]
+
+                # Draw overlay
                 add_drag_overlay(
-                    work_path, 
-                    source_bbox_px, 
-                    target_bbox=target_bbox_px, 
-                    target_center=target_center_px,
+                    work_path,
+                    source_bbox_px,
+                    target_bbox=target_bbox_px,
+                    target_center=tuple(target_px),
                 )
-                
-                # Ask for refinement
-                refinement = self.planner.refine_drag(work_path)
-                print(f"[Iterative] Feedback: {refinement.get('status')} - {refinement.get('adjustment')}")
-                
-                if refinement.get("status") == "correct":
-                    print("[Iterative] Model accepted solution")
+
+                # Ask for refinement with history
+                result = self.planner.refine_drag(
+                    work_path,
+                    instruction,
+                    current_target,
+                    history,
+                )
+
+                conclusion = result.get("conclusion", "")
+                decision = result.get("decision", "accept")
+                dx = result.get("dx", 0)
+                dy = result.get("dy", 0)
+
+                print(
+                    f"[Solver] Iteration {i + 1}: '{conclusion}' -> {decision} (dx={dx:+.1%}, dy={dy:+.1%})",
+                    file=sys.stderr,
+                )
+
+                # Record history
+                history.append(
+                    {
+                        "destination": current_target.copy(),
+                        "conclusion": conclusion,
+                        "decision": decision,
+                    }
+                )
+
+                # Check if done
+                if decision == "accept" or (abs(dx) < 0.005 and abs(dy) < 0.005):
+                    print("[Solver] Drag target accepted", file=sys.stderr)
                     break
-                
-                # Apply adjustment
-                adj = refinement.get("adjustment", {})
-                dx = adj.get("x_offset", 0) or 0
-                dy = adj.get("y_offset", 0) or 0
-                
-                # If adjustment is tiny, assume done
-                if abs(dx) < 0.01 and abs(dy) < 0.01:
-                    print("[Iterative] Adjustment too small, stopping")
-                    break
-                    
-                current_target_pct[0] += dx
-                current_target_pct[1] += dy
-                
-                # Clamp
-                current_target_pct = [
-                    max(0.0, min(1.0, current_target_pct[0])),
-                    max(0.0, min(1.0, current_target_pct[1]))
-                ]
-            
-            # Final result
-            target_px = self._pct_to_pixels_tuple(current_target_pct)
-            source_px = self._pct_to_pixels_tuple(source_center_pct)
-            
-            return DragAction(
-                action="drag",
-                source_coordinates=list(source_px),
-                source_coordinates_pct=list(source_center_pct),
-                target_coordinates=list(target_px),
-                target_coordinates_pct=list(current_target_pct),
-            )
-            
+
+                # Apply adjustment (relative)
+                current_target[0] = max(0.0, min(1.0, current_target[0] + dx))
+                current_target[1] = max(0.0, min(1.0, current_target[1] + dy))
+
         finally:
             if os.path.exists(work_path):
                 os.unlink(work_path)
 
-    def _solve_text_captcha(self, image_path: str) -> TypeAction:
-        """Handle warped-text captchas via LLM text read."""
-        text = self.planner.read_text(image_path)
-        return TypeAction(action="type", text=text or "")
-    
-    def _solve_with_legacy_planner(
-        self,
-        image_path: str,
-        context: str,
-    ) -> CaptchaAction:
-        """Preserve the previous two-stage planner flow as a fallback."""
-        full_context = context
-        if self._action_history:
-            history_str = self._format_history()
-            full_context = f"{context}\n\nPrevious actions taken:\n{history_str}"
-        
-        planned = self.planner.plan(image_path, full_context)
-        return self._create_action(image_path, planned)
-    
-    # ------------------------------------------------------------------
-    # Geometry and detection helpers
-    # ------------------------------------------------------------------
-    def _detect_bbox_with_fallback(
-        self,
-        image_path: str,
-        prompt: str,
-        allow_empty: bool = False,
-    ) -> Optional[List[float]]:
-        """Detect a bounding box via detect(); fall back to focus -> box."""
-        detections = self.attention_extractor.detect_objects(image_path, prompt)
-        if detections:
-            bbox = detections[0].get("bbox")
-            if bbox and len(bbox) >= 4:
-                return self._ensure_bbox_normalized(bbox)
-        
-        if allow_empty:
-            return None
-        
-        x_pct, y_pct = self.attention_extractor.focus(image_path, prompt)
-        return self._expand_point_to_bbox((x_pct, y_pct))
-    
-    def _expand_point_to_bbox(self, point_pct: tuple) -> List[float]:
-        """Create a small bounding box around a normalized point."""
-        x_pct, y_pct = point_pct
-        half_size = 0.06  # 12% box side
-        x1 = max(0.0, x_pct - half_size)
-        y1 = max(0.0, y_pct - half_size)
-        x2 = min(1.0, x_pct + half_size)
-        y2 = min(1.0, y_pct + half_size)
-        return [x1, y1, x2, y2]
-    
-    def _pct_to_pixels(self, x_pct: float, y_pct: float) -> tuple:
-        """Convert normalized point to pixel coordinates if size known."""
-        if not self._current_image_size:
-            return x_pct, y_pct
-        return (
-            x_pct * self._current_image_size[0],
-            y_pct * self._current_image_size[1],
-        )
-    
-    def _pct_to_pixels_tuple(self, point_pct: tuple) -> tuple:
-        return self._pct_to_pixels(point_pct[0], point_pct[1])
-    
-    def _pixels_to_pct(self, point_px: tuple) -> tuple:
-        """Convert pixel coordinates to normalized percentages."""
-        if not self._current_image_size:
-            return point_px
-        return (
-            float(point_px[0]) / self._current_image_size[0],
-            float(point_px[1]) / self._current_image_size[1],
-        )
-    
-    def _bbox_pct_to_px(self, bbox_pct: List[float]) -> List[float]:
-        """Convert normalized bbox to pixel coordinates."""
-        if not self._current_image_size:
-            return bbox_pct
-        w, h = self._current_image_size
-        x1, y1, x2, y2 = bbox_pct[:4]
-        return [x1 * w, y1 * h, x2 * w, y2 * h]
-    
-    def _bbox_px_to_pct(self, bbox_px: tuple) -> List[float]:
-        """Convert pixel bbox to normalized format."""
-        if not self._current_image_size:
-            return list(bbox_px)
-        w, h = self._current_image_size
-        x1, y1, x2, y2 = bbox_px
-        return [x1 / w, y1 / h, x2 / w, y2 / h]
-    
-    def _bbox_center_pct(self, bbox_pct: List[float]) -> tuple:
-        """Return center of normalized bbox."""
-        x1, y1, x2, y2 = bbox_pct[:4]
-        return ((x1 + x2) / 2, (y1 + y2) / 2)
-    
-    def _ensure_bbox_normalized(self, bbox: List[float]) -> List[float]:
-        """Normalize bbox to [0,1] corner format regardless of input scale."""
-        if len(bbox) < 4:
-            return bbox
-        
-        # If values already <= 1 assume normalized corner format
-        if all(v <= 1.0 for v in bbox[:4]):
-            return bbox[:4]
-        
-        # Otherwise assume pixel format [x1, y1, x2, y2] or [x, y, w, h]
-        if self._current_image_size:
-            img_w, img_h = self._current_image_size
-            x1, y1, x2, y2 = bbox[:4]
-            # If already likely in corner format, keep; otherwise treat x2/y2 as width/height
-            if not (x2 > x1 and y2 > y1 and x2 <= img_w and y2 <= img_h):
-                x2 = x1 + x2
-                y2 = y1 + y2
-            
-            return [x1 / img_w, y1 / img_h, x2 / img_w, y2 / img_h]
-        return bbox[:4]
-    
-    def _create_action(
-        self,
-        image_path: str,
-        planned: PlannedAction,
-    ) -> CaptchaAction:
-        """
-        Convert a PlannedAction to a CaptchaAction, extracting coordinates if needed.
-        """
-        if planned.action_type == "click":
-            return self._create_click_action(image_path, planned)
-        
-        elif planned.action_type == "drag":
-            return self._create_drag_action(image_path, planned)
-        
-        elif planned.action_type == "type":
-            return TypeAction(
-                action="type",
-                text=planned.text_to_type or ""
-            )
-        
-        elif planned.action_type == "wait":
-            return WaitAction(
-                action="wait",
-                duration_ms=planned.wait_duration_ms or 500
-            )
-        
-        elif planned.action_type == "request_updated_image":
-            return RequestUpdatedImageAction(action="request_updated_image")
-        
-        elif planned.action_type == "verify":
-            return self._create_verify_action(image_path, planned)
-        
-        elif planned.action_type == "done":
-            # Return a wait with 0 duration to signal completion
-            return WaitAction(action="wait", duration_ms=0)
-        
-        else:
-            raise ValueError(f"Unknown action type: {planned.action_type}")
-    
-    def _create_click_action(
-        self,
-        image_path: str,
-        planned: PlannedAction,
-    ) -> ClickAction:
-        """Create a ClickAction with coordinates."""
-        
-        # Use attention-based extraction
-        print(f"[Stage 2] Extracting click coordinates for: {planned.target_description}")
-        x_pct, y_pct = self.attention_extractor.extract_coordinates(
-            image_path,
-            planned.target_description or "the target element"
-        )
-        
-        # Convert to pixels if we have image size
-        if self._current_image_size:
-            x = x_pct * self._current_image_size[0]
-            y = y_pct * self._current_image_size[1]
-        else:
-            x, y = x_pct, y_pct
-        
-        print(f"[Stage 2] Coordinates: ({x}, {y})")
-        return ClickAction(
-            action="click",
-            coordinates=[x, y],
-            point_percent=[x_pct, y_pct]
-        )
-    
-    def _create_drag_action(
-        self,
-        image_path: str,
-        planned: PlannedAction,
-    ) -> DragAction:
-        """Create a DragAction with source and target coordinates."""
-        
-        source_coords = None
-        target_coords = None
-        
-        # Extract source using attention
-        print(f"[Stage 2] Extracting drag source: {planned.target_description}")
-        
-        # First try detect() for more accurate results
-        if planned.target_description:
-            detections = self.attention_extractor.detect_objects(
-                image_path,
-                planned.target_description
-            )
-            if detections:
-                bbox = detections[0]['bbox']
-                x_pct = (bbox[0] + bbox[2]) / 2
-                y_pct = (bbox[1] + bbox[3]) / 2
-            else:
-                # Fall back to focus/point
-                result = self.attention_extractor.focus(
-                    image_path,
-                    planned.target_description
-                )
-                x_pct, y_pct = result if result else (0.5, 0.5)
-        else:
-            x_pct, y_pct = 0.5, 0.5
-        
-        if self._current_image_size:
-            source_coords = (x_pct * self._current_image_size[0], y_pct * self._current_image_size[1])
-        else:
-            source_coords = (x_pct, y_pct)
-        
-        # Extract target using attention
-        print(f"[Stage 2] Extracting drag target: {planned.drag_target_description}")
-        
-        if planned.drag_target_description:
-            detections = self.attention_extractor.detect_objects(
-                image_path,
-                planned.drag_target_description
-            )
-            if detections:
-                bbox = detections[0]['bbox']
-                x_pct = (bbox[0] + bbox[2]) / 2
-                y_pct = (bbox[1] + bbox[3]) / 2
-            else:
-                result = self.attention_extractor.focus(
-                    image_path,
-                    planned.drag_target_description
-                )
-                x_pct, y_pct = result if result else (0.5, 0.5)
-        else:
-            x_pct, y_pct = 0.5, 0.5
-        
-        if self._current_image_size:
-            target_coords = (x_pct * self._current_image_size[0], y_pct * self._current_image_size[1])
-        else:
-            target_coords = (x_pct, y_pct)
-        
-        print(f"[Stage 2] Source: {source_coords}, Target: {target_coords}")
-        
-        # Calculate percentages for response if not already available
-        source_pct = None
-        target_pct = None
-        
-        if self._current_image_size:
-             w, h = self._current_image_size
-             source_pct = [source_coords[0]/w, source_coords[1]/h]
-             target_pct = [target_coords[0]/w, target_coords[1]/h]
-        
         return DragAction(
             action="drag",
-            source_coordinates=list(source_coords),
-            source_coordinates_pct=source_pct,
-            target_coordinates=list(target_coords),
-            target_coordinates_pct=target_pct
-        )
-    
-    def _create_verify_action(
-        self,
-        image_path: str,
-        planned: PlannedAction,
-    ) -> VerifyAction:
-        """Create a VerifyAction."""
-        return VerifyAction(action="verify")
-    def _format_history(self) -> str:
-        """Format action history for context."""
-        lines = []
-        for i, action in enumerate(self._action_history[-5:], 1):  # Last 5 actions
-            if isinstance(action, ClickAction):
-                if getattr(action, "bounding_boxes", None):
-                    lines.append(f"{i}. Clicked {len(action.bounding_boxes)} detected boxes")
-                else:
-                    lines.append(f"{i}. Clicked at {action.coordinates}")
-            elif isinstance(action, DragAction):
-                lines.append(f"{i}. Dragged from {action.source_coordinates} to {action.target_coordinates}")
-            elif isinstance(action, TypeAction):
-                lines.append(f"{i}. Typed: '{action.text}'")
-            elif isinstance(action, WaitAction):
-                lines.append(f"{i}. Waited {action.duration_ms}ms")
-            elif isinstance(action, RequestUpdatedImageAction):
-                lines.append(f"{i}. Requested updated image")
-            elif isinstance(action, VerifyAction):
-                lines.append(f"{i}. Clicked verify button")
-        return "\n".join(lines)
-    
-    def solve_loop(
-        self,
-        get_image: Callable[[], str],
-        context: str = "",
-        max_steps: int = 10,
-        end_condition: Optional[Callable[[], bool]] = None,
-    ) -> Iterator[CaptchaAction]:
-        """
-        Solve a captcha with automatic looping.
-        
-        This generator yields actions one at a time until:
-        - max_steps is reached
-        - end_condition() returns True
-        - The planner returns "done" action
-        
-        Args:
-            get_image: Callable that returns the current image path
-            context: Context string for the captcha
-            max_steps: Maximum number of steps before giving up
-            end_condition: Optional callable that returns True when captcha is solved
-        
-        Yields:
-            CaptchaAction objects to execute
-        """
-        # Reset history for new solve session
-        self._action_history = []
-        
-        for step in range(max_steps):
-            print(f"\n{'='*50}")
-            print(f"Step {step + 1}/{max_steps}")
-            print(f"{'='*50}")
-            
-            # Check end condition first
-            if end_condition is not None and end_condition():
-                print("End condition met - captcha solved!")
-                return
-            
-            # Get current image
-            image_path = get_image()
-            
-            # Get next action
-            action = self.solve_step(image_path, context)
-            
-            # Check for "done" signal (wait with 0 duration)
-            if isinstance(action, WaitAction) and action.duration_ms == 0:
-                print("Planner indicates captcha is done")
-                return
-            
-            # Yield the action for execution
-            yield action
-        
-        print(f"Reached max steps ({max_steps}) without solving")
-    
-    def solve_with_refinement(
-        self,
-        image_path: str,
-        context: str = "",
-        max_questions: int = 3,
-    ) -> CaptchaAction:
-        """
-        Solve with self-questioning refinement.
-        
-        This method:
-        1. Gets initial plan
-        2. Asks clarifying questions about uncertain elements
-        3. Refines the plan based on answers
-        4. Returns the refined action
-        
-        Args:
-            image_path: Path to the captcha image
-            context: Additional context
-            max_questions: Maximum number of clarifying questions to ask
-        
-        Returns:
-            Refined CaptchaAction
-        """
-        image_path = str(Path(image_path).resolve())
-        
-        # Get initial plan
-        planned = self.planner.plan(image_path, context)
-        
-        print(f"[Initial Plan] {planned.action_type}")
-        print(f"[Initial Plan] Reasoning: {planned.reasoning}")
-        
-        # Create and return action
-        if self._current_image_size is None:
-            with Image.open(image_path) as img:
-                self._current_image_size = img.size
-        
-        action = self._create_action(image_path, planned)
-        self._action_history.append(action)
-        
-        return action
-    
-    def reset_history(self):
-        """Clear the action history."""
-        self._action_history = []
-        self._current_image_size = None
-    
-    def visualize_attention(
-        self,
-        image_path: str,
-        target_description: str,
-        output_path: Optional[str] = None
-    ):
-        """
-        Visualize where the attention extractor focuses for a given target.
-        
-        Useful for debugging and understanding the model's behavior.
-        """
-        return self.attention_extractor.visualize_attention(
-            image_path,
-            target_description,
-            output_path or "attention_visualization.png"
-        )
-    
-    def visualize_detections(
-        self,
-        image_path: str,
-        object_class: str,
-        output_path: Optional[str] = None,
-    ):
-        """
-        Visualize object detections.
-        """
-        detections = self.attention_extractor.detect_objects(image_path, object_class)
-        
-        return self.attention_extractor.visualize_detections(
-            image_path,
-            detections,
-            output_path or "detections_visualization.png"
+            source_coordinates=source_coords,
+            target_coordinates=current_target,
         )
 
 
-# Convenience function for simple usage
-def solve_captcha(
-    image_path: str,
-    context: str = "Solve this captcha",
-    **kwargs
-) -> CaptchaAction:
+# Convenience function
+def solve_captcha(image_path: str, instruction: str = "", **kwargs) -> Union[CaptchaAction, List[ClickAction]]:
     """
-    Convenience function to solve a single step of a captcha.
-    
+    Convenience function to solve a captcha.
+
     Args:
         image_path: Path to the captcha image
-        context: Context/instructions for solving
+        instruction: Instruction text for solving
         **kwargs: Additional arguments passed to CaptchaSolver
-    
+
     Returns:
-        The next CaptchaAction to perform
+        CaptchaAction or List[ClickAction] for grid selections
     """
     solver = CaptchaSolver(**kwargs)
-    return solver.solve_step(image_path, context)
+    return solver.solve(image_path, instruction)
