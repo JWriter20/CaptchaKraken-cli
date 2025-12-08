@@ -69,16 +69,29 @@ PLAN_WITH_TOOLS_PROMPT = """You are a captcha solver. Analyze this image and dec
 
 {instruction}
 
-First, briefly identify what kind of puzzle this is and the *goal* in concrete visual terms
-(e.g., \"drag the missing piece into the exact slot where its shape and orientation match\", \"drag the slider handle to the gap\", \"click the checkbox\").
-Keep this goal consistent for all later steps.
+Step 1: VISUAL ANALYSIS
+Briefly describe the objects you see in the image.
+If the goal involves "similar objects", "matching shapes", or "odd one out", explicitly IDENTIFY the specific shape or object class.
+Example: "I see three wireframe cubes and one solid cube." or "I see multiple traffic lights."
+
+Step 2: GOAL IDENTIFICATION
+Identify the *goal* in concrete visual terms.
+(e.g., "click all open-frame cubes", "drag the slider handle to the gap", "click the checkbox").
+
+Step 3: ACTION PLANNING
+Decide on the best tool or action.
 
 You have two tools available:
-1. detect(object_class) - Find all instances of an object (e.g., "traffic light", "bus", "bicycle")
-   Use when: You need to find multiple instances of something
+1. detect(object_class) - Find all instances of an object (e.g., "traffic light", "bus", "open-frame cube")
+   Use when: You need to find/click multiple instances of a specific object class.
 
-2. point(target) - Find a single element (e.g., "checkbox", "verify button", "slider handle")
-   Use when: You need to click/interact with one specific element
+2. point(target) - Find a single element (e.g., "checkbox", "verify button", "slider handle", "wireframe cube on the left")
+   Use when: You need to click/interact with one specific element.
+
+If you need to interact with multiple specific items (e.g., "click the two similar shapes"), PREFER using multiple point() calls to ensure all targets are hit.
+Example: instead of detect("wireframe cube"), use:
+  point("wireframe cube on the left"),
+  point("wireframe cube on the right")
 
 You can also return a direct action if you know exactly what to do:
 - click: Click on something (provide target_description for point() to find it)
@@ -88,22 +101,28 @@ You can also return a direct action if you know exactly what to do:
   "missing jigsaw piece slot that completes the animal",
   "gap in the broken line that this segment fits into",
   "matching socket the plug should connect to").
-  In these drag puzzles, you are almost always dragging \"missing piece(s)\" into the place it belongs.
+  In these drag puzzles, you are almost always dragging "missing piece(s)" into the place it belongs.
   Do NOT invent new words or shapes that are not already implied by the puzzle; instead, focus on exact alignment with the existing slot/outline.
 - type: Type text (provide the text to type, maintain casing, typically 6 characters, ignore reflections, noise, etc.)
 - wait: Wait for loading
 - done: Captcha is already solved
 
-Respond ONLY with JSON. Either request a tool:
+Respond ONLY with JSON. Either request tool(s):
 {{
-  "tool_call": {{
-    "name": "detect" | "point",
-    "args": {{"object_class": "..."}} or {{"target": "..."}}
-  }}
+  "analysis": "Your visual analysis of the objects and the puzzle type",
+  "goal": "The specific goal you identified",
+  "tool_calls": [
+    {{
+      "name": "detect" | "point",
+      "args": {{"object_class": "..."}} or {{"target": "..."}}
+    }}
+  ]
 }}
 
 Or return an action:
 {{
+  "analysis": "Your visual analysis...",
+  "goal": "The specific goal...",
   "action_type": "click" | "drag" | "type" | "wait" | "done",
   "target_description": "what to click (for click)",
   "source_description": "what to drag (for drag)",
@@ -412,6 +431,7 @@ class ActionPlanner:
                     f"  {i + 1}. destination: ({dest[0]:.1%}, {dest[1]:.1%}), "
                     f'conclusion: "{conclusion}", decision: {decision}'
                 )
+            history_lines.append(f"  {len(history) + 1}. destination: ({current_target[0]:.1%}, {current_target[1]:.1%}) (CURRENT)")
             history_text = "\n".join(history_lines)
         else:
             history_text = "This is the first attempt."

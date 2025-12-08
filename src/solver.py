@@ -205,7 +205,7 @@ class CaptchaSolver:
         self,
         image_path: str,
         instruction: str,
-    ) -> CaptchaAction:
+    ) -> Union[CaptchaAction, List[ClickAction]]:
         """
         General solving using planner with detect/point tools.
 
@@ -216,41 +216,64 @@ class CaptchaSolver:
         for _ in range(max_tool_calls):
             result = self.planner.plan_with_tools(image_path, instruction)
 
-            # Handle tool calls
-            if result.get("tool_call"):
-                tool = result["tool_call"]["name"]
-                args = result["tool_call"]["args"]
+            # Collect actions from all tool calls
+            collected_actions: List[ClickAction] = []
+            
+            # Normalize single tool_call to list format for processing
+            tool_calls = result.get("tool_calls", [])
+            if not tool_calls and result.get("tool_call"):
+                tool_calls = [result["tool_call"]]
+            
+            # Process all requested tools
+            if tool_calls:
+                for call in tool_calls:
+                    tool = call["name"]
+                    args = call["args"]
+                    
+                    if tool == "detect":
+                        object_class = args.get("object_class", "target")
+                        print(f"[Solver] Tool call: detect('{object_class}')", file=sys.stderr)
+                        detections = self.attention.detect_objects(image_path, object_class)
 
-                if tool == "detect":
-                    object_class = args.get("object_class", "target")
-                    print(f"[Solver] Tool call: detect('{object_class}')", file=sys.stderr)
-                    detections = self.attention.detect_objects(image_path, object_class)
-
-                    if detections:
-                        bbox = detections[0]["bbox"]
-                        return ClickAction(
-                            action="click",
-                            target_bounding_box=bbox,
+                        if detections:
+                            for det in detections:
+                                bbox = det["bbox"]
+                                collected_actions.append(
+                                    ClickAction(
+                                        action="click",
+                                        target_bounding_box=bbox,
+                                    )
+                                )
+                        else:
+                            # Fallback to point
+                            print("[Solver] No detections, falling back to point()", file=sys.stderr)
+                            x, y = self.attention.extract_coordinates(image_path, object_class)
+                            collected_actions.append(
+                                ClickAction(
+                                    action="click",
+                                    target_coordinates=[x, y],
+                                )
+                            )
+                            
+                    elif tool == "point":
+                        target = args.get("target", "target")
+                        print(f"[Solver] Tool call: point('{target}')", file=sys.stderr)
+                        x, y = self.attention.extract_coordinates(image_path, target)
+                        collected_actions.append(
+                            ClickAction(
+                                action="click",
+                                target_coordinates=[x, y],
+                            )
                         )
-                    else:
-                        # No detections - try point as fallback
-                        print("[Solver] No detections, falling back to point()", file=sys.stderr)
-                        x, y = self.attention.extract_coordinates(image_path, object_class)
-                        return ClickAction(
-                            action="click",
-                            target_coordinates=[x, y],
-                        )
 
-                elif tool == "point":
-                    target = args.get("target", "target")
-                    print(f"[Solver] Tool call: point('{target}')", file=sys.stderr)
-                    x, y = self.attention.extract_coordinates(image_path, target)
-                    return ClickAction(
-                        action="click",
-                        target_coordinates=[x, y],
-                    )
-
-                continue  # Try again if tool call didn't resolve
+                # Return collected actions if any
+                if collected_actions:
+                    if len(collected_actions) == 1:
+                        return collected_actions[0]
+                    return collected_actions
+                
+                # If tool calls produced nothing, try next iteration
+                continue
 
             # Handle direct actions
             action_type = result.get("action_type", "click")
@@ -268,11 +291,7 @@ class CaptchaSolver:
                 )
 
             elif action_type == "drag":
-                # The planner may return either "drag_target_description" (as specified
-                # in the prompt) or a generic "target_description". Prefer the
-                # drag-specific key but keep backwards-compatible behaviour.
                 target_description = result.get("drag_target_description") or result.get("target_description")
-
                 return self._solve_drag(
                     image_path,
                     instruction,
