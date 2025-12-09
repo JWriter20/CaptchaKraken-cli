@@ -46,6 +46,74 @@ def to_edge_outline(image_path: str, output_path: str, low_threshold: int = 15, 
     cv2.imwrite(output_path, edges)
 
 
+def sharpen_image(image_path: str, output_path: str) -> None:
+    """
+    Sharpen an image using a kernel.
+
+    Args:
+        image_path: Path to the input image
+        output_path: Path where the sharpened image will be saved
+    """
+    img = cv2.imread(image_path)
+    if img is None:
+        raise ValueError(f"Could not read image from {image_path}")
+
+    # Sharpening kernel (stronger)
+    kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
+    sharpened = cv2.filter2D(img, -1, kernel)
+
+    cv2.imwrite(output_path, sharpened)
+
+
+def apply_clahe(image_path: str, output_path: str, clip_limit: float = 2.0, tile_grid_size: Tuple[int, int] = (8, 8)) -> None:
+    """
+    Apply CLAHE (Contrast Limited Adaptive Histogram Equalization) to an image.
+    This helps to improve local contrast and enhance definitions of edges.
+
+    Args:
+        image_path: Path to the input image
+        output_path: Path where the enhanced image will be saved
+        clip_limit: Threshold for contrast limiting (default: 2.0)
+        tile_grid_size: Size of grid for histogram equalization (default: (8, 8))
+    """
+    img = cv2.imread(image_path)
+    if img is None:
+        raise ValueError(f"Could not read image from {image_path}")
+
+    # CLAHE works on luminance channel of LAB color space (or just grayscale)
+    # Using LAB is better to preserve color info if needed, but for letters Grayscale is often enough.
+    # Let's use LAB to keep it color if the output is expected to be color, though SAM handles B&W fine.
+    
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+
+    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
+    cl = clahe.apply(l)
+
+    limg = cv2.merge((cl, a, b))
+    final = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
+
+    cv2.imwrite(output_path, final)
+
+
+def apply_gaussian_blur(image_path: str, output_path: str, kernel_size: Tuple[int, int] = (5, 5), sigma_x: float = 0) -> None:
+    """
+    Apply Gaussian Blur to an image.
+    
+    Args:
+        image_path: Path to the input image
+        output_path: Path where the blurred image will be saved
+        kernel_size: Gaussian kernel size. Width and height must be odd and positive.
+        sigma_x: Gaussian kernel standard deviation in X direction.
+    """
+    img = cv2.imread(image_path)
+    if img is None:
+        raise ValueError(f"Could not read image from {image_path}")
+        
+    blurred = cv2.GaussianBlur(img, kernel_size, sigma_x)
+    cv2.imwrite(output_path, blurred)
+
+
 def get_grid_bounding_boxes(image_path: str) -> Optional[List[Tuple[int, int, int, int]]]:
     """
     Detects a grid of images separated by white spacing (e.g., 3x3 or 4x4 captchas).

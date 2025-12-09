@@ -19,8 +19,9 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union, Dict, Any
 
+import numpy as np
 from PIL import Image
 
 from .action_types import (
@@ -31,7 +32,7 @@ from .action_types import (
     WaitAction,
 )
 from .attention import AttentionExtractor
-from .imagePreprocessing import get_grid_bounding_boxes
+from .imagePreprocessing import get_grid_bounding_boxes, sharpen_image
 from .overlay import add_drag_overlay, add_overlays_to_image
 from .planner import ActionPlanner
 
@@ -95,6 +96,16 @@ class CaptchaSolver:
 
         # Image size cache
         self._image_size: Optional[Tuple[int, int]] = None
+        self._temp_files: List[str] = []
+
+    def __del__(self):
+        # Cleanup temp files
+        for f in self._temp_files:
+            if os.path.exists(f):
+                try:
+                    os.unlink(f)
+                except Exception:
+                    pass
 
     def solve(
         self,
@@ -158,6 +169,7 @@ class CaptchaSolver:
         ext = os.path.splitext(image_path)[1] or ".png"
         with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tf:
             overlay_path = tf.name
+        self._temp_files.append(overlay_path)
 
         try:
             # Prepare overlays - bbox in [x, y, w, h] pixel format for overlay function
@@ -201,6 +213,84 @@ class CaptchaSolver:
             if os.path.exists(overlay_path):
                 os.unlink(overlay_path)
 
+    def _handle_segmentation(self, image_path: str) -> Tuple[str, List[Dict[str, Any]]]:
+        """
+        Sharpen image, segment with SAM2 via detectInteractable, and create numbered overlay.
+        Returns (path to new image, list of objects found).
+        """
+        print("[Solver] Running segmentation and labeling...", file=sys.stderr)
+        
+        ext = os.path.splitext(image_path)[1] or ".png"
+        
+        # 1. Sharpen image
+        with tempfile.NamedTemporaryFile(suffix=f"_sharp{ext}", delete=False) as tf:
+            sharp_path = tf.name
+        self._temp_files.append(sharp_path)
+        
+        try:
+            sharpen_image(image_path, sharp_path)
+        except Exception as e:
+            print(f"[Solver] Sharpening failed: {e}", file=sys.stderr)
+            shutil.copy2(image_path, sharp_path)
+
+        # 2. Segment with SAM2 using detectInteractable (better sensitivity/filtering)
+        # detectInteractable returns objects with pixel bboxes [x, y, w, h]
+        # We increase points_per_side to 8 (done by default in detectInteractable) for better coverage
+        result = self.attention.detectInteractable(sharp_path)
+        objects = result.get("objects", [])
+        
+        if not objects:
+            print("[Solver] No objects found during segmentation.", file=sys.stderr)
+            return image_path, []
+
+        # 3. Create overlays
+        overlays = []
+        # Use high-contrast colors
+        colors = ["#E74C3C", "#3498DB", "#2ECC71", "#F1C40F", "#9B59B6", "#E67E22"]
+        
+        # Keep track of objects with ID for later lookup
+        labeled_objects = []
+        
+        for i, obj in enumerate(objects):
+            bbox = obj["bbox"] # [x, y, w, h]
+            
+            # Create overlay item
+            overlays.append({
+                "bbox": bbox,
+                "number": i + 1,
+                "color": colors[i % len(colors)]
+            })
+            
+            # Store with ID
+            obj_with_id = obj.copy()
+            obj_with_id["id"] = i + 1
+            labeled_objects.append(obj_with_id)
+
+        # 4. Save overlay image
+        with tempfile.NamedTemporaryFile(suffix=f"_labeled{ext}", delete=False) as tf:
+            labeled_path = tf.name
+        self._temp_files.append(labeled_path)
+        
+        add_overlays_to_image(image_path, overlays, output_path=labeled_path)
+        print(f"[Solver] Segmented {len(overlays)} objects. Labeled image: {labeled_path}", file=sys.stderr)
+        
+        return labeled_path, labeled_objects
+
+    def _get_object_by_id(self, target: str, objects: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Try to find an object by ID in the target string (e.g. "item 5")."""
+        import re
+        # Look for "item N", "number N", "#N", or just "N" if it's the whole string
+        match = re.search(r"(?:item|number|#)?\s*(\d+)", target, re.IGNORECASE)
+        if match:
+            try:
+                idx = int(match.group(1))
+                for obj in objects:
+                    if obj.get("id") == idx:
+                        return obj
+            except ValueError:
+                pass
+        return None
+
     def _solve_general(
         self,
         image_path: str,
@@ -212,9 +302,12 @@ class CaptchaSolver:
         The planner can request tool calls (detect, point) or return a direct action.
         """
         max_tool_calls = 3
+        
+        # Run initial segmentation immediately
+        current_image_path, current_objects = self._handle_segmentation(image_path)
 
         for _ in range(max_tool_calls):
-            result = self.planner.plan_with_tools(image_path, instruction)
+            result = self.planner.plan_with_tools(current_image_path, instruction)
 
             # Collect actions from all tool calls
             collected_actions: List[ClickAction] = []
@@ -226,14 +319,25 @@ class CaptchaSolver:
             
             # Process all requested tools
             if tool_calls:
+                segmentation_requested = False
+                
                 for call in tool_calls:
                     tool = call["name"]
-                    args = call["args"]
+                    args = call.get("args", {})
                     
+                    if tool == "segment_and_label":
+                        # Handle segmentation
+                        new_image_path, new_objects = self._handle_segmentation(current_image_path)
+                        if new_image_path != current_image_path:
+                            current_image_path = new_image_path
+                            current_objects = new_objects
+                            segmentation_requested = True
+                        continue
+
                     if tool == "detect":
                         object_class = args.get("object_class", "target")
                         print(f"[Solver] Tool call: detect('{object_class}')", file=sys.stderr)
-                        detections = self.attention.detect_objects(image_path, object_class)
+                        detections = self.attention.detect_objects(current_image_path, object_class)
 
                         if detections:
                             for det in detections:
@@ -247,7 +351,7 @@ class CaptchaSolver:
                         else:
                             # Fallback to point
                             print("[Solver] No detections, falling back to point()", file=sys.stderr)
-                            x, y = self.attention.extract_coordinates(image_path, object_class)
+                            x, y = self.attention.extract_coordinates(current_image_path, object_class)
                             collected_actions.append(
                                 ClickAction(
                                     action="click",
@@ -258,13 +362,37 @@ class CaptchaSolver:
                     elif tool == "point":
                         target = args.get("target", "target")
                         print(f"[Solver] Tool call: point('{target}')", file=sys.stderr)
-                        x, y = self.attention.extract_coordinates(image_path, target)
-                        collected_actions.append(
-                            ClickAction(
-                                action="click",
-                                target_coordinates=[x, y],
+                        
+                        # Check if target is an object ID
+                        obj = self._get_object_by_id(target, current_objects)
+                        if obj:
+                            img_w, img_h = self._image_size if self._image_size else Image.open(image_path).size
+                            bbox = obj["bbox"] # [x, y, w, h]
+                            # Normalize to [x1, y1, x2, y2]
+                            bbox_pct = [
+                                bbox[0] / img_w,
+                                bbox[1] / img_h,
+                                (bbox[0] + bbox[2]) / img_w,
+                                (bbox[1] + bbox[3]) / img_h
+                            ]
+                            collected_actions.append(
+                                ClickAction(
+                                    action="click",
+                                    target_bounding_box=bbox_pct,
+                                )
                             )
-                        )
+                        else:
+                            x, y = self.attention.extract_coordinates(current_image_path, target)
+                            collected_actions.append(
+                                ClickAction(
+                                    action="click",
+                                    target_coordinates=[x, y],
+                                )
+                            )
+
+                # If segmentation was performed, loop again to let planner see the labeled image
+                if segmentation_requested:
+                    continue
 
                 # Return collected actions if any
                 if collected_actions:
@@ -272,7 +400,7 @@ class CaptchaSolver:
                         return collected_actions[0]
                     return collected_actions
                 
-                # If tool calls produced nothing, try next iteration
+                # If tool calls produced nothing (and no segmentation), try next iteration
                 continue
 
             # Handle direct actions
@@ -293,7 +421,7 @@ class CaptchaSolver:
             elif action_type == "drag":
                 target_description = result.get("drag_target_description") or result.get("target_description")
                 return self._solve_drag(
-                    image_path,
+                    current_image_path, # Use current image path (might be segmented)
                     instruction,
                     result.get("source_description"),
                     target_description,
@@ -301,11 +429,29 @@ class CaptchaSolver:
 
             elif action_type == "click":
                 target = result.get("target_description", "target")
-                x, y = self.attention.extract_coordinates(image_path, target)
-                return ClickAction(
-                    action="click",
-                    target_coordinates=[x, y],
-                )
+                
+                # Check if target is an object ID
+                obj = self._get_object_by_id(target, current_objects)
+                if obj:
+                    img_w, img_h = self._image_size if self._image_size else Image.open(image_path).size
+                    bbox = obj["bbox"] # [x, y, w, h]
+                    # Normalize to [x1, y1, x2, y2]
+                    bbox_pct = [
+                        bbox[0] / img_w,
+                        bbox[1] / img_h,
+                        (bbox[0] + bbox[2]) / img_w,
+                        (bbox[1] + bbox[3]) / img_h
+                    ]
+                    return ClickAction(
+                        action="click",
+                        target_bounding_box=bbox_pct,
+                    )
+                else:
+                    x, y = self.attention.extract_coordinates(current_image_path, target)
+                    return ClickAction(
+                        action="click",
+                        target_coordinates=[x, y],
+                    )
 
             elif action_type == "done":
                 return WaitAction(action="wait", duration_ms=0)
@@ -356,6 +502,7 @@ class CaptchaSolver:
         work_ext = os.path.splitext(image_path)[1] or ".png"
         with tempfile.NamedTemporaryFile(suffix=work_ext, delete=False) as tf:
             work_path = tf.name
+        self._temp_files.append(work_path)
 
         assert self._image_size is not None
         img_w, img_h = self._image_size

@@ -81,14 +81,22 @@ Identify the *goal* in concrete visual terms.
 Step 3: ACTION PLANNING
 Decide on the best tool or action.
 
-You have two tools available:
+You have three tools available:
 1. detect(object_class) - Find all instances of an object (e.g., "traffic light", "bus", "open-frame cube")
    Use when: You need to find/click multiple instances of a specific object class.
 
 2. point(target) - Find a single element (e.g., "checkbox", "verify button", "slider handle", "wireframe cube on the left")
    Use when: You need to click/interact with one specific element.
 
-If you need to interact with multiple specific items (e.g., "click the two similar shapes"), PREFER using multiple point() calls to ensure all targets are hit.
+3. segment_and_label() - Segment all objects in the image using SAM2, label them with numbers, and return the labeled image.
+   Use when: You need to distinguish between multiple complex shapes (e.g. "drag the W to the W slot") or when standard detection fails due to warping/distortion.
+   This tool will:
+   - Sharpen the image to improve edge detection
+   - Segment all distinct foreground objects
+   - Draw numbered boxes around them
+   - Return the list of numbered items so you can refer to them by ID (e.g. "Drag item 1 to item 3")
+
+If you need to interact with multiple specific items (e.g., "click the two similar shapes"), PREFER using multiple point() or detect() calls to ensure all targets are hit.
 Example: instead of detect("wireframe cube"), use:
   point("wireframe cube on the left"),
   point("wireframe cube on the right")
@@ -113,8 +121,8 @@ Respond ONLY with JSON. Either request tool(s):
   "goal": "The specific goal you identified",
   "tool_calls": [
     {{
-      "name": "detect" | "point",
-      "args": {{"object_class": "..."}} or {{"target": "..."}}
+      "name": "detect" | "point" | "segment_and_label",
+      "args": {{"object_class": "..."}} or {{"target": "..."}} or {{}}
     }}
   ]
 }}
