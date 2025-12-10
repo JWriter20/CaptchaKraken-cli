@@ -8,7 +8,7 @@ import numpy as np
 sys.path.append(os.path.join(os.getcwd(), "src"))
 
 from attention import AttentionExtractor
-from imagePreprocessing import merge_similar_colors
+from image_processor import ImageProcessor
 
 def test_label_positioning():
     extractor = AttentionExtractor()
@@ -19,7 +19,7 @@ def test_label_positioning():
     # Re-run the segmentation parameters that worked well for separating W and BG
     k_val = 3
     preprocessed_path = "temp_quantized_w_labels.png"
-    merge_similar_colors(image_path, preprocessed_path, k=k_val)
+    ImageProcessor.merge_similar_colors(image_path, preprocessed_path, k=k_val)
     
     min_area = 0.01 
     

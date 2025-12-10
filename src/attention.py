@@ -255,7 +255,7 @@ class AttentionExtractor:
         # 11x11 grid = 121 points. Getting all masks (score_threshold=0.0)
         sam_result = self.segment_with_sam2(
             image_path, 
-            points_per_side=10, 
+            points_per_side=9, 
             score_threshold=0.0
         )
         masks = sam_result.get("masks", [])
@@ -342,7 +342,7 @@ class AttentionExtractor:
     def detectInteractable(
         self,
         image_path: str,
-        points_per_side: int = 8,
+        points_per_side: int = 9,
         score_threshold: float = 0.3,
         max_area_ratio: float = 0.2,
         aspect_ratio_threshold: float = 2.5,
@@ -352,7 +352,7 @@ class AttentionExtractor:
         
         Args:
             image_path: Path to image
-            points_per_side: Density of point grid for SAM 2 (default: 8, high sensitivity)
+            points_per_side: Density of point grid for SAM 2 (default: 9, high sensitivity)
             score_threshold: Minimum IoU score for SAM 2 masks (default: 0.3, high sensitivity)
             max_area_ratio: Maximum fraction of image area a mask can cover
             aspect_ratio_threshold: Maximum allowed aspect ratio (longer side / shorter side)

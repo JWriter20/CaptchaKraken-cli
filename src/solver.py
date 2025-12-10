@@ -33,9 +33,9 @@ from .action_types import (
     WaitAction,
 )
 from .attention import AttentionExtractor
-from .imagePreprocessing import get_grid_bounding_boxes, sharpen_image, apply_contrast_enhancement, merge_similar_colors
 from .overlay import add_drag_overlay, add_overlays_to_image
 from .planner import ActionPlanner
+from .image_processor import ImageProcessor
 
 # Debug flag - set via CAPTCHA_DEBUG=1 environment variable
 DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
@@ -138,12 +138,17 @@ class CaptchaSolver:
         if provider == "gemini" and api_key:
             planner_kwargs["gemini_api_key"] = api_key
 
+        planner_kwargs["debug_callback"] = self.debug.log
+
         self.planner = ActionPlanner(**planner_kwargs)  # type: ignore[arg-type]
 
         # Setup attention extractor (GroundingDINO + CLIP + FastSAM for detect/point)
         self.attention = AttentionExtractor(
             device=None,  # Auto-detect
         )
+
+        # specialized tools
+        self.image_processor = ImageProcessor(self.attention, self.planner, self.debug)
 
         # Image size cache
         self._image_size: Optional[Tuple[int, int]] = None
@@ -185,7 +190,7 @@ class CaptchaSolver:
         self.debug.save_image(image_path, "00_base_image.png")
 
         # 1. Check for grid structure
-        grid_boxes = get_grid_bounding_boxes(image_path)
+        grid_boxes = self.image_processor.get_grid_bounding_boxes(image_path)
         if grid_boxes:
             self.debug.log(f"Detected grid with {len(grid_boxes)} cells")
             return self._solve_grid(image_path, instruction, grid_boxes)
@@ -272,16 +277,41 @@ class CaptchaSolver:
         
         ext = os.path.splitext(image_path)[1] or ".png"
         
-        # 1. Sharpen image
+        # 1. Pre-process: Merge similar colors
+        with tempfile.NamedTemporaryFile(suffix=f"_merged{ext}", delete=False) as tf:
+            merged_path = tf.name
+        self._temp_files.append(merged_path)
+        
+        sharpen_input = image_path
+        try:
+            self.debug.log("Merging similar colors...")
+            self.image_processor.merge_similar_colors(image_path, merged_path, k=12)
+        except Exception as e:
+            self.debug.log(f"Color merging failed: {e}")
+
+        # 2. Greyscale image
+        with tempfile.NamedTemporaryFile(suffix=f"_greyscale{ext}", delete=False) as tf:
+            greyscale_path = tf.name
+        self._temp_files.append(greyscale_path)
+        try:
+            self.image_processor.to_greyscale(merged_path, greyscale_path)
+        except Exception as e:
+            self.debug.log(f"Greyscale conversion failed: {e}")
+            shutil.copy2(merged_path, greyscale_path)
+            sharpen_input = greyscale_path
+        else:
+            sharpen_input = merged_path
+
+        # 3. Sharpen image
         with tempfile.NamedTemporaryFile(suffix=f"_sharp{ext}", delete=False) as tf:
             sharp_path = tf.name
         self._temp_files.append(sharp_path)
         
         try:
-            sharpen_image(image_path, sharp_path)
+            self.image_processor.sharpen_image(sharpen_input, sharp_path)
         except Exception as e:
             self.debug.log(f"Sharpening failed: {e}")
-            shutil.copy2(image_path, sharp_path)
+            shutil.copy2(sharpen_input, sharp_path)
 
         # 2. Segment with SAM2 using detectInteractable (better sensitivity/filtering)
         # detectInteractable returns objects with pixel bboxes [x, y, w, h]
@@ -415,11 +445,14 @@ class CaptchaSolver:
                     elif tool == "simulate_drag":
                         source = args.get("source", "movable item")
                         target_hint = args.get("target_hint", "matching slot")
+                        target_object_id = args.get("target_object_id")
                         source_quality = args.get("source_quality")
                         refined_source = args.get("refined_source")
                         location_hint = args.get("location_hint")
 
                         self.debug.log(f"Tool call: simulate_drag('{source}', '{target_hint}')")
+                        if target_object_id:
+                            self.debug.log(f"  Target Object ID: {target_object_id}")
                         if source_quality:
                             self.debug.log(f"  Quality: {source_quality}, Refined: {refined_source}")
                         if location_hint:
@@ -427,6 +460,24 @@ class CaptchaSolver:
                         
                         source_bbox = None
                         
+                        # 0. Adjust location_hint if target_object_id is provided
+                        if target_object_id:
+                            # Try to treat as int, or string "Object N"
+                            tgt_obj = self._get_object_by_id(str(target_object_id), current_objects)
+                            if tgt_obj:
+                                # Use center of target object as the starting location hint
+                                t_bbox = tgt_obj["bbox"] # [x, y, w, h]
+                                img_w, img_h = self._image_size
+                                
+                                # Calculate center in normalized coords
+                                t_cx = (t_bbox[0] + t_bbox[2] / 2) / img_w
+                                t_cy = (t_bbox[1] + t_bbox[3] / 2) / img_h
+                                
+                                location_hint = [t_cx, t_cy]
+                                self.debug.log(f"Using center of Target Object {tgt_obj['id']} as start: {location_hint}")
+                            else:
+                                self.debug.log(f"Target object ID '{target_object_id}' not found.")
+
                         # 1. Check if source is an object ID
                         obj = self._get_object_by_id(source, current_objects)
                         
@@ -668,91 +719,14 @@ class CaptchaSolver:
         Remove background from an image (crop) by selecting the segment matching the prompt.
         Returns RGBA image with transparent background.
         """
-        self.debug.log(f"Removing background for '{prompt}' using color segmentation...")
-        
-        masks = []
-        
-        # 1. Color-based segmentation workflow
-        # Preprocess: Quantize colors (k=5 to level out distortions but keep detail)
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-            quant_path = tf.name
-        self._temp_files.append(quant_path)
-        
-        try:
-            # Level out visual distortions by merging similar colors
-            merge_similar_colors(image_path, quant_path, k=5)
-            
-            # 2. Segment (k=5, min_area_ratio=0.005 for finer details)
-            res = self.attention.segment_by_color(
-                quant_path, 
-                k=5, 
-                merge_components=False, 
-                min_area_ratio=0.005
-            )
-            masks = res.get("masks", [])
-            
-        except Exception as e:
-            self.debug.log(f"Color segmentation failed: {e}")
-            return None
-                
-        if not masks:
-            self.debug.log("Background removal: No masks found.")
-            return None
-            
-        # 3. Visualize masks with IDs
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-            candidates_path = tf.name
-        self._temp_files.append(candidates_path)
-        
-        self.attention.visualize_masks(image_path, masks, output_path=candidates_path, draw_ids=True)
-        self.debug.save_image(candidates_path, f"bg_removal_candidates_{os.path.basename(image_path)}")
-        
-        # 4. Ask planner to select
-        selected_ids = self.planner.select_items(candidates_path, prompt, len(masks))
-        self.debug.log(f"Background removal: Planner selected masks {selected_ids}")
-        
-        if selected_ids:
-            # 5. Create RGBA image with combined masks
-            # Initialize empty mask
-            if len(masks) > 0:
-                base_shape = masks[0].shape
-                if len(base_shape) == 3: base_shape = base_shape[:2] # Handle (1, H, W) if implicit
-                combined_mask = np.zeros(base_shape, dtype=bool)
-                
-                for idx in selected_ids:
-                    if 0 <= idx < len(masks):
-                        m = masks[idx]
-                        if len(m.shape) == 3: m = m[0]
-                        combined_mask = np.logical_or(combined_mask, m)
-                
-                try:
-                    with Image.open(image_path) as img:
-                        img = img.convert("RGBA")
-                        
-                        # Create alpha layer: 255 where mask is True, 0 otherwise
-                        # Ensure mask is uint8
-                        alpha_mask = (combined_mask * 255).astype(np.uint8)
-                        
-                        # Create image from alpha mask
-                        alpha_img = Image.fromarray(alpha_mask, mode='L')
-                        
-                        # Resize if needed
-                        if alpha_img.size != img.size:
-                            alpha_img = alpha_img.resize(img.size, resample=Image.NEAREST)
-                        
-                        out_img = img.copy()
-                        out_img.putalpha(alpha_img)
-                        
-                        # Save for debug
-                        debug_out = candidates_path.replace(".png", "_result.png")
-                        out_img.save(debug_out)
-                        self.debug.save_image(debug_out, f"bg_removal_result_{os.path.basename(image_path)}")
-                        
-                        return out_img
-                except Exception as e:
-                    self.debug.log(f"Background removal error: {e}")
-                
-        return None
+        return self.image_processor.remove_background(
+            image_path,
+            prompt,
+            k=5,
+            merge_components=False,
+            min_area_ratio=0.005,
+            pre_merge_colors=True
+        )
 
     def _solve_drag(
         self,
@@ -826,103 +800,38 @@ class CaptchaSolver:
                     self._temp_files.append(crop_path)
                     source_crop.save(crop_path)
                     
-                    # Use our optimized color segmentation logic (K=3, merge=True)
-                    # This works well for simple shapes like letters on backgrounds
-                    # We pass 'merge_components=True' because we want the whole letter 'W' even if it's multiple parts
-                    self.debug.log(f"Segmenting source crop for '{source_desc}'...")
-                    
-                    res = self.attention.segment_by_color(
+                    # Use ImageProcessor
+                    # Settings from original code: k=3, merge=True, min_area=0.01
+                    foreground_image = self.image_processor.remove_background(
                         crop_path, 
-                        k=3, 
+                        prompt=source_desc,
+                        k=3,
                         merge_components=True,
-                        min_area_ratio=0.01 # Require at least 1% area
+                        min_area_ratio=0.01
                     )
-                    masks = res.get("masks", [])
                     
-                    if masks:
-                        # Visualize and ask planner to select
-                        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                            candidates_path = tf.name
-                        self._temp_files.append(candidates_path)
-                        
-                        self.attention.visualize_masks(crop_path, masks, output_path=candidates_path, draw_ids=True)
-                        self.debug.save_image(candidates_path, f"drag_source_candidates_initial.png")
-                        
-                        # Ask planner
-                        selected_ids = self.planner.select_items(candidates_path, source_desc, len(masks))
-                        self.debug.log(f"Planner selected IDs: {selected_ids}")
-                        
-                        # Fallback: if no selection, pick the mask closest to center
-                        if not selected_ids:
-                            self.debug.log("Planner selected no masks. Fallback: Selecting center-most mask.")
-                            import cv2
-                            
-                            best_idx = -1
-                            min_dist = float('inf')
-                            cw, ch = source_crop.size
-                            center = (cw // 2, ch // 2)
-                            
-                            for idx, m in enumerate(masks):
-                                if len(m.shape) == 3: m = m[0]
-                                # Calculate centroid
-                                M = cv2.moments(m.astype(np.uint8))
-                                if M["m00"] != 0:
-                                    cX = int(M["m10"] / M["m00"])
-                                    cY = int(M["m01"] / M["m00"])
-                                    dist = (cX - center[0])**2 + (cY - center[1])**2
-                                    if dist < min_dist:
-                                        min_dist = dist
-                                        best_idx = idx
-                            
-                            if best_idx != -1:
-                                selected_ids = [best_idx]
-                                self.debug.log(f"Fallback selected ID: {best_idx}")
-                        
-                        if selected_ids:
-                            # The IDs returned by the planner correspond to the ORIGINAL indices in the 'masks' list
-                            # because visualize_masks labels them using their original index.
-                            # So we do NOT need to sort 'masks' to look them up.
-                            
-                            # Combine selected masks
-                            combined_mask = np.zeros(masks[0].shape, dtype=bool)
-                            for s_id in selected_ids:
-                                if s_id < len(masks):
-                                    m = masks[s_id]
-                                    if len(m.shape) == 3: m = m[0]
-                                    combined_mask = np.logical_or(combined_mask, m)
-                            
-                            # Create foreground image
-                            fg_img = source_crop.convert("RGBA")
-                            fg_arr = np.array(fg_img)
-                            
-                            # Apply alpha
-                            alpha = (combined_mask * 255).astype(np.uint8)
-                            fg_arr[:, :, 3] = alpha
-                            
-                            foreground_image = Image.fromarray(fg_arr)
-                            self.debug.log("Successfully created foreground image for drag source.")
-                            
-                            # Debug save
-                            debug_fg_path = crop_path + "_fg.png"
-                            foreground_image.save(debug_fg_path)
-                            self.debug.save_image(debug_fg_path, "drag_source_foreground.png")
-                        else:
-                            self.debug.log("Planner selected no masks for foreground.")
+                    if foreground_image:
+                         self.debug.log("Successfully created foreground image for drag source.")
                     else:
-                        self.debug.log("No masks found in source crop.")
-
+                         self.debug.log("Background removal failed or returned no image.")
         except Exception as e:
             self.debug.log(f"Failed to prepare foreground image: {e}")
         # --- NEW LOGIC END ---
 
         # 2. Initial target estimate
         # Force start at center (0.5, 0.5) to ensure the model actively looks for the target
+        # Update: If initial_location_hint is provided (e.g. from target object ID), use it
         target_x, target_y = 0.5, 0.5
         
-        # Ignored: initial_location_hint (user requested to start in the middle)
+        target_found_via_hint = False
+        if initial_location_hint:
+            target_x, target_y = initial_location_hint
+            target_found_via_hint = True
+            self.debug.log(f"Using provided initial location hint: ({target_x:.2%}, {target_y:.2%})")
+        
         # We only override if we have a robust detection of the target already
         
-        if target_description and target_description != "matching slot":
+        if not target_found_via_hint and target_description and target_description != "matching slot":
              self.debug.log(f"Searching for drag target based on description: '{target_description}'")
              # Try detect first
              detections = self.attention.detect_objects(image_path, target_description, max_objects=1)

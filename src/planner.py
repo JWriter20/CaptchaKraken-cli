@@ -19,11 +19,6 @@ from typing import Any, Dict, List, Literal, Optional
 DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
 
 
-def _debug_log(message: str) -> None:
-    """Print debug message if debugging is enabled."""
-    if DEBUG:
-        print(f"[Planner DEBUG] {message}", file=sys.stderr)
-
 try:
     # New Gemini SDK (direct Gemini API, no Vertex AI dependency)
     from google import genai  # type: ignore[import-not-found]
@@ -94,10 +89,11 @@ You have three tools available:
 2. point(target) - Find a single element (e.g., "checkbox", "verify button", "slider handle", "wireframe cube on the left")
    Use when: You need to click/interact with one specific element.
 
-    3. simulate_drag(source, target_hint, source_quality, refined_source, location_hint) - Simulate a drag operation with visual feedback.
+    3. simulate_drag(source, target_hint, target_object_id, source_quality, refined_source, location_hint) - Simulate a drag operation with visual feedback.
        Use when: You need to drag an item to a target that requires precise visual alignment (e.g., "fit the puzzle piece", "complete the line") and you don't have exact coordinates yet.
        - source: The ID of the object to drag (e.g. "Object 4") OR a description if not found.
-       - target_hint: description of where it roughly should go (e.g., "matching slot")
+       - target_hint: description of where it roughly should go (e.g., "matching slot", "center of Object 1")
+       - target_object_id: (Optional) The ID of the object that acts as the target base (e.g. if dragging a hat to a head (Object 5), set this to 5).
        - source_quality: "properly-cropped" (if the Object ID is a tight crop of the item), "includes-source" (if the Object ID contains the item but also extra background), or "not-bounded" (if source is not an ID).
        - refined_source: If "includes-source", provide a visual description of the inner item (e.g. "white letter W").
        - location_hint: A 2-element list [x, y] (0.0-1.0) indicating the rough center of the target destination. E.g. [0.8, 0.2] is top-right.
@@ -111,11 +107,17 @@ You have three tools available:
       point("wireframe cube on the right")
 
     You can also return a direct action if you know exactly what to do:
-    - click: Click on something (provide target_description for point() to find it)
+    - click: Click on something (provide target_description for point() to find it). Do NOT click "Skip" or "Reload" unless you are 100% certain the puzzle is unsolvable.
     - drag: Drag something. Use this ONLY if you know the exact source and destination (e.g. "drag slider to the end"). For puzzle alignment, use simulate_drag() instead.
     - type: Type text (provide the text to type, maintain casing, typically 6 characters, ignore reflections, noise, etc.)
     - wait: Wait for loading
     - done: Captcha is already solved
+
+    IMPORTANT:
+    1. Do not give up easily. If the target is abstract or unclear, look for the BEST MATCHING shape or outline.
+    2. For drag puzzles, if you see a movable piece, there IS a target. It might be a faint outline, a shadow, or a matching background pattern.
+    3. If there is a MAIN BODY or BASE object (like a puzzle frame or a body needing a head), IDENTIFY IT and use it as 'target_object_id'.
+    4. If you are unsure of the exact coordinates, use 'simulate_drag' with a descriptive target_hint so the vision system can find it.
 
     Respond ONLY with JSON. Either request tool(s):
     {{
@@ -124,7 +126,7 @@ You have three tools available:
       "tool_calls": [
         {{
           "name": "detect" | "point" | "simulate_drag",
-          "args": {{"object_class": "..."}} or {{"target": "..."}} or {{"source": "...", "target_hint": "...", "source_quality": "...", "refined_source": "...", "location_hint": [x, y]}}
+          "args": {{"object_class": "..."}} or {{"target": "..."}} or {{"source": "...", "target_hint": "...", "target_object_id": 1, "source_quality": "...", "refined_source": "...", "location_hint": [x, y]}}
         }}
       ]
     }}
@@ -168,12 +170,16 @@ Object to Move: "{source_desc}"
 Target Destination: "{target_desc}"
 
 CRITICAL: The destination must be DISTINCT from the source. You are never dragging something to itself.
-The draggable item is marked with a LIGHT GREEN box and has been moved to the current destination.
-If it is not clearly aligned with a matching slot or gap, you need to adjust its position.
+The draggable item is marked with a LIGHT GREEN box (drawn with padding around the item).
+
+EVALUATION CRITERIA:
+1. **Vertical Position**: Is the object too high or too low? (e.g. Is the head on the stomach? It should be on the neck.)
+2. **Horizontal Position**: Is it too far left or right?
+3. **Connectivity**: Do the lines of the object flow smoothly into the target?
 
 Evaluate this drag destination:
-1. Is the destination correct? Will dropping here solve the Primary Goal?
-2. If not, what RELATIVE adjustment is needed?
+1. Describe the specific visual alignment. (e.g. "The neck lines are misaligned by...", "The head is overlapping the torso...")
+2. If not perfect, what RELATIVE adjustment is needed?
 
 The image shows:
 - LIGHT GREEN box: The draggable item at its current location.
@@ -190,7 +196,7 @@ Make SMALL adjustments (typically 1-5%). We can refine iteratively.
 
 Respond ONLY with JSON:
 {{
-  "conclusion": "brief assessment of current position in terms of the Primary Goal",
+  "conclusion": "Specific critique of vertical/horizontal alignment and edge connectivity",
   "decision": "accept" | "adjust",
   "dx": 0.0,
   "dy": 0.0
@@ -231,10 +237,12 @@ class ActionPlanner:
         model: Optional[str] = None,
         ollama_host: Optional[str] = None,
         gemini_api_key: Optional[str] = None,
+        debug_callback: Optional[Any] = None,
     ):
         self.backend = backend
         self.ollama_host = ollama_host or os.getenv("OLLAMA_HOST", "http://localhost:11434")
         self.gemini_api_key = gemini_api_key or os.getenv("GEMINI_API_KEY")
+        self.debug_callback = debug_callback
         self._genai_client = None
 
         # Configure Gemini if selected
@@ -260,14 +268,24 @@ class ActionPlanner:
         else:
             self.model = model
 
+    def _log(self, message: str) -> None:
+        """Log message to callback and/or stderr."""
+        # Always print to stderr if global DEBUG is set
+        if DEBUG:
+            print(f"[Planner DEBUG] {message}", file=sys.stderr)
+        
+        # Also use callback if provided (for file logging)
+        if self.debug_callback:
+            self.debug_callback(f"[Planner] {message}")
+
     # ------------------------------------------------------------------
     # Core helper: chat with image
     # ------------------------------------------------------------------
     def _chat_with_image(self, prompt: str, image_path: str) -> str:
         """Send a prompt + image to the LLM backend, get response."""
-        _debug_log(f"Backend: {self.backend}, Model: {self.model}")
-        _debug_log(f"Image path: {image_path}")
-        _debug_log(f"=== PROMPT START ===\n{prompt}\n=== PROMPT END ===")
+        self._log(f"Backend: {self.backend}, Model: {self.model}")
+        self._log(f"Image path: {image_path}")
+        self._log(f"=== PROMPT START ===\n{prompt}\n=== PROMPT END ===")
 
         if self.backend == "ollama":
             import ollama
@@ -278,7 +296,7 @@ class ActionPlanner:
                 options={"temperature": 0.0},
             )
             result = response["message"]["content"]
-            _debug_log(f"=== RAW RESPONSE ===\n{result}\n=== END RESPONSE ===")
+            self._log(f"=== RAW RESPONSE ===\n{result}\n=== END RESPONSE ===")
             return result
 
         if self.backend == "gemini":
@@ -317,7 +335,7 @@ class ActionPlanner:
                 config=config,
             )
             result = response.text
-            _debug_log(f"=== RAW RESPONSE ===\n{result}\n=== END RESPONSE ===")
+            self._log(f"=== RAW RESPONSE ===\n{result}\n=== END RESPONSE ===")
             return result
 
         raise ValueError(f"Unknown backend: {self.backend}")
@@ -361,9 +379,9 @@ class ActionPlanner:
         """
         total = rows * cols
 
-        _debug_log("get_grid_selection called")
-        _debug_log(f"  context instruction: '{instruction}'")
-        _debug_log(f"  grid: {rows}x{cols} = {total} cells")
+        self._log("get_grid_selection called")
+        self._log(f"  context instruction: '{instruction}'")
+        self._log(f"  grid: {rows}x{cols} = {total} cells")
 
         prompt = SELECT_GRID_PROMPT.format(rows=rows, cols=cols, total=total)
         response = self._chat_with_image(prompt, image_path)
@@ -372,18 +390,18 @@ class ActionPlanner:
         selected = result.get("selected_numbers", [])
 
         # Log all the detailed reasoning from the structured response
-        _debug_log(f"Model extracted instruction: '{result.get('instruction_text', '(not provided)')}'")
-        _debug_log(f"Reference image shows: '{result.get('reference_image_shows', '(not provided)')}'")
-        _debug_log(f"Looking for: '{result.get('looking_for', '(not provided)')}'")
+        self._log(f"Model extracted instruction: '{result.get('instruction_text', '(not provided)')}'")
+        self._log(f"Reference image shows: '{result.get('reference_image_shows', '(not provided)')}'")
+        self._log(f"Looking for: '{result.get('looking_for', '(not provided)')}'")
 
         cell_contents = result.get("cell_contents", {})
         if cell_contents:
-            _debug_log("Cell contents analysis:")
+            self._log("Cell contents analysis:")
             for cell_num, content in sorted(cell_contents.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 0):
-                _debug_log(f"  Cell {cell_num}: {content}")
+                self._log(f"  Cell {cell_num}: {content}")
 
-        _debug_log(f"Selected numbers: {selected}")
-        _debug_log(f"Reasoning: {result.get('reasoning', '(not provided)')}")
+        self._log(f"Selected numbers: {selected}")
+        self._log(f"Reasoning: {result.get('reasoning', '(not provided)')}")
 
         return selected
 
@@ -577,7 +595,7 @@ Respond ONLY with JSON:
         response = self._chat_with_image(prompt, image_path)
         result = self._parse_json(response)
         
-        _debug_log(f"Selection reasoning: {result.get('reasoning')}")
+        self._log(f"Selection reasoning: {result.get('reasoning')}")
         
         selected_ids = result.get("selected_ids")
         valid_ids = []

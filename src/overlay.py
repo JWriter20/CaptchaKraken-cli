@@ -2,7 +2,6 @@ import argparse
 import json
 import math
 import sys
-import cv2
 import numpy as np
 from typing import Any, Dict
 
@@ -269,9 +268,9 @@ def add_drag_overlay(
 ):
     """
     Add drag-and-drop visualization.
-    If foreground_image (BEN2 result) is provided, it uses that for the object.
+    If foreground_image is provided, it uses that for the object.
     It also fills the source location in the background with a surrounding color.
-    Otherwise, it falls back to GrabCut.
+    Otherwise, it uses a simple crop.
     """
     try:
         # Load image with PIL
@@ -318,30 +317,8 @@ def add_drag_overlay(
             # Use provided foreground image
             object_crop = foreground_image.resize((x2-x1, y2-y1)) # Ensure size matches just in case
         else:
-            # Fallback to GrabCut (Legacy)
-            img_np = np.array(img)
-            img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR)
-            mask = np.zeros(img_bgr.shape[:2], np.uint8)
-            rect_w = x2 - x1
-            rect_h = y2 - y1
-            
-            if rect_w > 0 and rect_h > 0:
-                rect = (x1, y1, rect_w, rect_h)
-                bgdModel = np.zeros((1, 65), np.float64)
-                fgdModel = np.zeros((1, 65), np.float64)
-                try:
-                    cv2.grabCut(img_bgr, mask, rect, bgdModel, fgdModel, 3, cv2.GC_INIT_WITH_RECT)
-                    mask2 = np.where((mask == 2) | (mask == 0), 0, 1).astype("uint8")
-                except Exception:
-                    mask2 = np.zeros_like(mask, dtype="uint8")
-                    mask2[y1:y2, x1:x2] = 1
-            else:
-                 mask2 = np.zeros_like(mask, dtype="uint8")
-
-            mask_pil = Image.fromarray((mask2 * 255).astype('uint8'), mode='L')
-            object_layer = img.copy()
-            object_layer.putalpha(mask_pil)
-            object_crop = object_layer.crop((x1, y1, x2, y2))
+            # Fallback to simple crop
+            object_crop = img.crop((x1, y1, x2, y2))
 
         # 4. Paste Object at Target
         if target_center:
@@ -357,10 +334,11 @@ def add_drag_overlay(
         # Composite object_crop onto background
         background.alpha_composite(object_crop, (paste_x, paste_y))
         
-        # 5. Highlight border
+        # 5. Highlight border (Draw with padding to avoid obscuring edges)
         draw = ImageDraw.Draw(background)
+        padding = 4
         draw.rectangle(
-            [paste_x, paste_y, paste_x + cw, paste_y + ch],
+            [paste_x - padding, paste_y - padding, paste_x + cw + padding, paste_y + ch + padding],
             outline="#00FF00",
             width=2
         )
