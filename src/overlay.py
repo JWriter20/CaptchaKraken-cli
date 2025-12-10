@@ -2,9 +2,11 @@ import argparse
 import json
 import math
 import sys
+import cv2
+import numpy as np
 from typing import Any, Dict
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 # Font cache to prevent repeated font loading
 _FONT_CACHE: Dict[tuple, Any] = {}
@@ -263,36 +265,108 @@ def add_drag_overlay(
     target_bbox: list[float] = None,
     target_center: tuple = None,
     show_grid: bool = False,
+    foreground_image: Image.Image = None,
 ):
     """
-    Add drag-and-drop visualization:
-    - Red border around source
-    - Arrow to target
-    - Dashed border around target
-    - Optional: 10% grid overlay
+    Add drag-and-drop visualization.
+    If foreground_image (BEN2 result) is provided, it uses that for the object.
+    It also fills the source location in the background with a surrounding color.
+    Otherwise, it falls back to GrabCut.
     """
     try:
+        # Load image with PIL
         with Image.open(image_path) as img:
             img = img.convert("RGBA")
-            draw = ImageDraw.Draw(img)
+            
+        x1, y1, x2, y2 = map(int, source_bbox)
+        # Clamp
+        w, h = img.size
+        x1 = max(0, x1); y1 = max(0, y1)
+        x2 = min(w, x2); y2 = min(h, y2)
+        
+        # 1. Prepare Background
+        background = img.copy()
+        
+        # "Remove the cropped out source image"
+        # We'll simple average the color of a 5px border around the bbox and fill the rect.
+        # This acts as inpainting the "hole" left by the dragged object.
+        border = 5
+        bx1 = max(0, x1 - border)
+        by1 = max(0, y1 - border)
+        bx2 = min(w, x2 + border)
+        by2 = min(h, y2 + border)
+        
+        # Crop the border area
+        region = img.crop((bx1, by1, bx2, by2))
+        region_np = np.array(region)
+        # Average color (ignoring alpha for now, assuming opaque bg)
+        avg_color = np.mean(region_np, axis=(0, 1)).astype(int)
+        fill_color = tuple(avg_color)
+        
+        # Draw filled rect over source
+        draw_bg = ImageDraw.Draw(background)
+        draw_bg.rectangle([x1, y1, x2, y2], fill=fill_color)
+        
+        # 2. Dim the background
+        # "make it only a tad darker than the original" -> lighter dimming
+        # Previously 80 alpha (approx 30%), now let's try 40 alpha (approx 15%)
+        dim_overlay = Image.new("RGBA", img.size, (0, 0, 0, 40)) 
+        background = Image.alpha_composite(background, dim_overlay)
+        
+        # 3. Prepare Object
+        if foreground_image:
+            # Use provided foreground image
+            object_crop = foreground_image.resize((x2-x1, y2-y1)) # Ensure size matches just in case
+        else:
+            # Fallback to GrabCut (Legacy)
+            img_np = np.array(img)
+            img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR)
+            mask = np.zeros(img_bgr.shape[:2], np.uint8)
+            rect_w = x2 - x1
+            rect_h = y2 - y1
+            
+            if rect_w > 0 and rect_h > 0:
+                rect = (x1, y1, rect_w, rect_h)
+                bgdModel = np.zeros((1, 65), np.float64)
+                fgdModel = np.zeros((1, 65), np.float64)
+                try:
+                    cv2.grabCut(img_bgr, mask, rect, bgdModel, fgdModel, 3, cv2.GC_INIT_WITH_RECT)
+                    mask2 = np.where((mask == 2) | (mask == 0), 0, 1).astype("uint8")
+                except Exception:
+                    mask2 = np.zeros_like(mask, dtype="uint8")
+                    mask2[y1:y2, x1:x2] = 1
+            else:
+                 mask2 = np.zeros_like(mask, dtype="uint8")
 
-            # Draw source border
-            # source_bbox is [x1, y1, x2, y2]
-            draw_red_border(draw, source_bbox)
+            mask_pil = Image.fromarray((mask2 * 255).astype('uint8'), mode='L')
+            object_layer = img.copy()
+            object_layer.putalpha(mask_pil)
+            object_crop = object_layer.crop((x1, y1, x2, y2))
 
-            if target_center:
-                # Calculate source center
-                source_center = ((source_bbox[0] + source_bbox[2]) / 2, (source_bbox[1] + source_bbox[3]) / 2)
+        # 4. Paste Object at Target
+        if target_center:
+            tx, ty = target_center
+        else:
+            tx = (x1 + x2) / 2
+            ty = (y1 + y2) / 2
+            
+        cw, ch = object_crop.size
+        paste_x = int(tx - cw / 2)
+        paste_y = int(ty - ch / 2)
+        
+        # Composite object_crop onto background
+        background.alpha_composite(object_crop, (paste_x, paste_y))
+        
+        # 5. Highlight border
+        draw = ImageDraw.Draw(background)
+        draw.rectangle(
+            [paste_x, paste_y, paste_x + cw, paste_y + ch],
+            outline="#00FF00",
+            width=2
+        )
 
-                # Draw arrow
-                draw_arrow(draw, source_center, target_center)
-
-            if target_bbox:
-                # Draw target dashed box (using None as text to skip label)
-                draw_enhanced_bounding_box(draw, target_bbox, None, img.size)
-
-            img = img.convert("RGB")
-            img.save(image_path)
+        background = background.convert("RGB")
+        background.save(image_path)
 
     except Exception as e:
         print(f"Error adding drag overlays: {e}", file=sys.stderr)

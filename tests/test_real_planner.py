@@ -59,7 +59,17 @@ class TestPlanWithTools:
         print(f"  Result: {result}")
         
         # Check if we got a tool call
-        if result.get("tool_call"):
+        if result.get("tool_calls"):
+            # Handle list of tool calls, take the first one for this test
+            tool_call = result["tool_calls"][0]
+            tool_name = tool_call["name"]
+            expected_tools = expectations.get("expect_tool", [])
+            if expected_tools:
+                assert tool_name in expected_tools, \
+                    f"Expected tool in {expected_tools}, got '{tool_name}'"
+            print(f"  Tool call: {tool_name}")
+        elif result.get("tool_call"):
+            # Legacy support
             tool_name = result["tool_call"]["name"]
             expected_tools = expectations.get("expect_tool", [])
             if expected_tools:

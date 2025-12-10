@@ -96,6 +96,24 @@ def apply_clahe(image_path: str, output_path: str, clip_limit: float = 2.0, tile
     cv2.imwrite(output_path, final)
 
 
+def apply_contrast_enhancement(image_path: str, output_path: str, alpha: float = 1.5, beta: int = 0) -> None:
+    """
+    Apply contrast enhancement using linear stretching: new_img = alpha * img + beta
+    
+    Args:
+        image_path: Path to the input image
+        output_path: Path where the enhanced image will be saved
+        alpha: Contrast control (1.0-3.0)
+        beta: Brightness control (0-100)
+    """
+    img = cv2.imread(image_path)
+    if img is None:
+        raise ValueError(f"Could not read image from {image_path}")
+        
+    enhanced = cv2.convertScaleAbs(img, alpha=alpha, beta=beta)
+    cv2.imwrite(output_path, enhanced)
+
+
 def apply_gaussian_blur(image_path: str, output_path: str, kernel_size: Tuple[int, int] = (5, 5), sigma_x: float = 0) -> None:
     """
     Apply Gaussian Blur to an image.
@@ -114,7 +132,44 @@ def apply_gaussian_blur(image_path: str, output_path: str, kernel_size: Tuple[in
     cv2.imwrite(output_path, blurred)
 
 
+def merge_similar_colors(image_path: str, output_path: str, k: int = 8) -> None:
+    """
+    Quantize image colors to K clusters using K-Means to merge similar colored regions.
+    
+    Args:
+        image_path: Path to the input image
+        output_path: Path where the quantized image will be saved
+        k: Number of color clusters
+    """
+    img = cv2.imread(image_path)
+    if img is None:
+        raise ValueError(f"Could not read image from {image_path}")
+        
+    # Convert to RGB
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    
+    # Reshape to list of pixels
+    pixels = img_rgb.reshape((-1, 3))
+    pixels = np.float32(pixels)
+    
+    # Define criteria and apply kmeans
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
+    _, labels, centers = cv2.kmeans(pixels, k, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
+    
+    # Convert back to uint8
+    centers = np.uint8(centers)
+    
+    # Map labels to center colors
+    quantized = centers[labels.flatten()]
+    quantized_img = quantized.reshape(img.shape)
+    
+    # Convert back to BGR for saving
+    quantized_bgr = cv2.cvtColor(quantized_img, cv2.COLOR_RGB2BGR)
+    cv2.imwrite(output_path, quantized_bgr)
+
+
 def get_grid_bounding_boxes(image_path: str) -> Optional[List[Tuple[int, int, int, int]]]:
+
     """
     Detects a grid of images separated by white spacing (e.g., 3x3 or 4x4 captchas).
     Returns a list of bounding boxes (x1, y1, x2, y2) for the grid cells.

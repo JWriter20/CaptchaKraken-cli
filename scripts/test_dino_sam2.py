@@ -37,8 +37,8 @@ def test_dino_sam2_hybrid():
     # Prompt: "letter" or "character" or "shape"
     # We lower the threshold to increase sensitivity as requested.
     prompt = "letter . character"
-    box_threshold = 0.25 # Lower than default 0.35
-    text_threshold = 0.25
+    box_threshold = 0.2 # Lower than default 0.35
+    text_threshold = 0.2
     
     print(f"Running GroundingDINO with prompt='{prompt}', box_thresh={box_threshold}...")
     dino_result = attention.detect_with_grounding_dino(

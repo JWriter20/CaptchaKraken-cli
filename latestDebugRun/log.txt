@@ -1,0 +1,7 @@
+Debug Run Started: 2025-12-10 13:18:55.141931
+[13:18:55] Saved image: 00_base_image.png
+[13:18:55] Using general solving flow
+[13:18:55] Running segmentation and labeling...
+[13:19:05] Segmented 3 objects.
+[13:19:05] Saved image: 02_segmented_overlay.png
+[13:19:05] Planning step 1/5
