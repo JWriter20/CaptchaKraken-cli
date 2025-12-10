@@ -290,7 +290,9 @@ class ActionPlanner:
         if self.backend == "ollama":
             import ollama
 
-            response = ollama.chat(
+            self._log("Waiting for Ollama response...")
+            client = ollama.Client(host=self.ollama_host)
+            response = client.chat(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt, "images": [image_path]}],
                 options={"temperature": 0.0},

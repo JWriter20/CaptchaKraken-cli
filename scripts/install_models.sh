@@ -85,8 +85,8 @@ if command_exists ollama; then
         # Pull recommended models
         echo "    Pulling recommended models (this may take a while)..."
         
-        echo "    → Pulling gemma-3 (action planning)..."
-        ollama pull hf.co/unsloth/gemma-3-12b-it-GGUF:Q4_K_M 2>/dev/null || echo "      ⚠ Could not pull gemma-3, you can do this manually"
+        echo "    → Pulling qwen3-vl:4b (action planning)..."
+        ollama pull qwen3-vl:4b 2>/dev/null || echo "      ⚠ Could not pull qwen3-vl:4b, you can do this manually"
     else
         echo "    ⚠ Ollama is installed but not running."
         echo "      Start it with: ollama serve"
