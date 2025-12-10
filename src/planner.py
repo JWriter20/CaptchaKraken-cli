@@ -295,7 +295,10 @@ class ActionPlanner:
             response = client.chat(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt, "images": [image_path]}],
-                options={"temperature": 0.0},
+                options={
+                    "temperature": 0.0,
+                    "num_predict": 1024,  # Limit generation length to avoid infinite loops
+                },
             )
             result = response["message"]["content"]
             self._log(f"=== RAW RESPONSE ===\n{result}\n=== END RESPONSE ===")
