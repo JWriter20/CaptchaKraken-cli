@@ -502,10 +502,13 @@ class CaptchaSolver:
                                     
                                     search_term = refined_source or source
                                     # Run detect on the crop
-                                    detections = self.attention.detect_robust(crop_path, [search_term], max_objects=1)
+                                    detect_result = self.attention.detect(crop_path, search_term, max_objects=1)
+                                    detections = detect_result.get("objects", [])
                                     
                                     if detections:
-                                        d = detections[0]["bbox"] # [x1, y1, x2, y2] normalized to CROP
+                                        # Convert from {x_min, y_min, x_max, y_max} to [x1, y1, x2, y2]
+                                        obj = detections[0]
+                                        d = [obj["x_min"], obj["y_min"], obj["x_max"], obj["y_max"]] # [x1, y1, x2, y2] normalized to CROP
                                         cw, ch = crop_img.size
                                         
                                         # Convert to pixel coords in CROP
@@ -539,37 +542,44 @@ class CaptchaSolver:
                             source_bbox = [b[0], b[1], b[0] + b[2], b[1] + b[3]]
                         
                         if not source_bbox:
-                            # 2. Run detect_robust (either not found, or explicit "not-bounded")
+                            # 2. Run detect (either not found, or explicit "not-bounded")
                             search_term = refined_source or source
-                            self.debug.log(f"Running detect_robust for '{search_term}'...")
+                            self.debug.log(f"Running detect for '{search_term}'...")
                             
-                            # Run detect_robust on CLEAN image
-                            detections = self.attention.detect_robust(image_path, [search_term], max_objects=1)
+                            # Run detect on CLEAN image
+                            detect_result = self.attention.detect(image_path, search_term, max_objects=1)
+                            detections = detect_result.get("objects", [])
                             
                             if detections:
-                                det = detections[0]
-                                self.debug.log(f"detect_robust found: {det}")
+                                obj = detections[0]
+                                self.debug.log(f"detect found: {obj}")
+                                
+                                # Convert to visualization format (bbox as [x_min, y_min, x_max, y_max])
+                                vis_detections = [{
+                                    "bbox": [obj["x_min"], obj["y_min"], obj["x_max"], obj["y_max"]],
+                                    "label": obj.get("label", search_term),
+                                    "score": obj.get("score", 0.0)
+                                }]
                                 
                                 # Visualize this detection
                                 debug_det_path = str(self.debug.base_dir / "03_detected_source.png")
                                 self.attention.visualize_detections(
                                     image_path, 
-                                    detections, 
+                                    vis_detections, 
                                     output_path=debug_det_path
                                 )
                                 self.debug.log(f"Saved detection visualization to {debug_det_path}")
                                 
                                 # Convert normalized bbox to pixels [x1, y1, x2, y2]
-                                n_bbox = det["bbox"]
                                 img_w, img_h = self._image_size
                                 source_bbox = [
-                                    n_bbox[0] * img_w,
-                                    n_bbox[1] * img_h,
-                                    n_bbox[2] * img_w,
-                                    n_bbox[3] * img_h
+                                    obj["x_min"] * img_w,
+                                    obj["y_min"] * img_h,
+                                    obj["x_max"] * img_w,
+                                    obj["y_max"] * img_h
                                 ]
                             else:
-                                self.debug.log("detect_robust failed to find source.")
+                                self.debug.log("detect failed to find source.")
                         
                         # Execute drag simulation immediately and return result
                         # NOTE: Use image_path (clean) for drag simulation to avoid artifacts from labels
