@@ -247,15 +247,31 @@ class CaptchaSolver:
                 h = y2 - y1
                 overlays.append({"bbox": [x1, y1, w, h], "number": i + 1, "color": "#E74C3C"})
 
-            add_overlays_to_image(image_path, overlays, output_path=overlay_path)
+            add_overlays_to_image(image_path, overlays, output_path=overlay_path, label_position="bottom-right")
             self.debug.save_image(overlay_path, "01_grid_overlay.png")
 
             # Ask planner which squares to select
             selected_numbers, should_wait = self.planner.get_grid_selection(instruction, overlay_path, rows=rows, cols=cols)
 
+            # --- HARD FILTER: Detect already selected cells via Computer Vision ---
+            # This is a fail-safe because the model sometimes misses checkmarks in the image
+            try:
+                cv_detected_selected = self.image_processor.detect_selected_cells(image_path, grid_boxes)
+                if cv_detected_selected:
+                    self.debug.log(f"CV Detected already selected cells: {cv_detected_selected}")
+                    
+                    original_count = len(selected_numbers)
+                    selected_numbers = [n for n in selected_numbers if n not in cv_detected_selected]
+                    
+                    if len(selected_numbers) < original_count:
+                        self.debug.log(f"CV Filter removed {original_count - len(selected_numbers)} items that were already checked.")
+            except Exception as e:
+                self.debug.log(f"Error in CV check for selected cells: {e}")
+            # ----------------------------------------------------------------------
+
             if should_wait:
                 self.debug.log("Planner detected loading/fading cells. Returning WaitAction.")
-                return WaitAction(action="wait", duration_ms=500)
+                return WaitAction(action="wait", duration_ms=1000)
 
             self.debug.log(f"Grid selection: {selected_numbers}")
 

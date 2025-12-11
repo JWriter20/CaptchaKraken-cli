@@ -36,14 +36,25 @@ IMPORTANT: Look at the instruction text AND the reference image at the top of th
 
 This is a {rows}x{cols} grid of images. Each cell has a red number (1-{total}) in the top-left corner.
 
+{grid_hint}
+
 TASK: First analyze, then select. Think step by step:
 
 1. What does the instruction/header text say?
 2. What does the reference image (if any) show?
 3. What type of thing should you be looking for?
+   - NOTE: The grid often splits a SINGLE LARGE IMAGE into tiles.
+   - If looking for a large object (e.g. "bus", "hydrant", "motorcycle") that spans multiple cells:
+     - You MUST select EVERY cell that contains ANY part of the object.
+     - Select edges, wheels, bumpers, etc.
+     - Even if a cell only contains a small, unrecognizable piece (like a tire edge or pipe), if it connects to the main object, SELECT IT.
+     
 4. Look at EACH numbered cell carefully - what does it contain?
    - NOTE: If any cell is BLANK, SOLID WHITE, FADING IN, or shows a LOADING SPINNER, mark it as "loading".
-   - NOTE: Check if the cell is ALREADY SELECTED (has a checkmark, is smaller/padded, or has a blue/grey border).
+   - CRITICAL: Check if the cell is ALREADY SELECTED. Look for:
+     - A checkmark icon overlay (often green or white).
+     - The image being smaller with padding around it.
+     - A highlighted border (blue, grey, or green).
 5. Which cells match the criteria?
    - If NO cells match the criteria, that is perfectly fine. Simply return an empty list for "selected_numbers". Do NOT guess.
 
@@ -52,19 +63,20 @@ Respond with JSON. CRITICAL: Fill in the reasoning fields FIRST, then select num
   "instruction_text": "copy the exact instruction text from the captcha header",
   "reference_image_shows": "describe what the reference/example image shows (e.g., 'an egg in a nest')",
   "looking_for": "what type of object/creature/thing to select (e.g., 'birds - creatures that hatch from eggs')",
+  "is_single_large_image": true | false,
   "cell_contents": {{
     "1": "elephant",
-    "2": "parrots (birds) - CHECKED",
-    "3": "pigeons (birds)",
+    "2": "part of fire hydrant (top) - CHECKED/SELECTED",
+    "3": "part of fire hydrant (middle)",
     "4": "white/blank (loading)"
   }},
   "loading_cells": [4],
   "already_selected": [2],
   "selected_numbers": [3],
-  "reasoning": "Selected cells containing birds. Cell 2 is a bird but is ALREADY CHECKED, so we skip it. Cell 3 is a bird and unchecked, so we select it. Cell 4 is loading. We do not re-select 2 because it is already done."
+  "reasoning": "Instruction is 'fire hydrants'. The grid shows one large hydrant. Cell 2 is the top (already checked). Cell 3 is the middle body (unchecked). Cell 4 is loading. We select 3 because it is part of the hydrant."
 }}
 
-CRITICAL: Do NOT include numbers in 'selected_numbers' if they are already selected/checked. Only include NEW selections."""
+CRITICAL: Do NOT include numbers in 'selected_numbers' if they are already selected/checked. Clicking them will deselect them, which is WRONG. Only include NEW selections."""
 
 
 # For general planning with tool support
@@ -396,16 +408,19 @@ class ActionPlanner:
         self._log(f"  context instruction: '{instruction}'")
         self._log(f"  grid: {rows}x{cols} = {total} cells")
 
-        prompt = SELECT_GRID_PROMPT.format(rows=rows, cols=cols, total=total)
+        grid_hint = ""
+        if rows == 4 and cols == 4:
+            grid_hint = "HINT: This is a 4x4 grid. It usually contains a SINGLE LARGE IMAGE split into 16 tiles. You likely need to select multiple adjacent tiles that form the object."
+        elif rows == 3 and cols == 3:
+            grid_hint = "HINT: This is a 3x3 grid. It usually contains 9 SEPARATE IMAGES (but sometimes one large image). Evaluate carefully if it is a single image or multiple images."
+
+        prompt = SELECT_GRID_PROMPT.format(rows=rows, cols=cols, total=total, grid_hint=grid_hint)
         response = self._chat_with_image(prompt, image_path)
         result = self._parse_json(response)
 
         selected = result.get("selected_numbers", [])
+        already_selected = result.get("already_selected", [])
         loading_cells = result.get("loading_cells", [])
-        
-        # Only wait if we have loading cells AND no valid selections
-        # If we have valid selections, we should click them first
-        should_wait = len(loading_cells) > 0 and len(selected) == 0
 
         # Log all the detailed reasoning from the structured response
         self._log(f"Model extracted instruction: '{result.get('instruction_text', '(not provided)')}'")
@@ -413,10 +428,37 @@ class ActionPlanner:
         self._log(f"Looking for: '{result.get('looking_for', '(not provided)')}'")
 
         cell_contents = result.get("cell_contents", {})
+        
+        # Double-check already_selected based on cell_contents text
+        # Sometimes model marks reasoning as "CHECKED" but forgets to put in already_selected list
+        inferred_selected = []
         if cell_contents:
             self._log("Cell contents analysis:")
             for cell_num, content in sorted(cell_contents.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 0):
                 self._log(f"  Cell {cell_num}: {content}")
+                content_upper = str(content).upper()
+                if "CHECKED" in content_upper or "SELECTED" in content_upper or "CHECKMARK" in content_upper:
+                    try:
+                        cid = int(cell_num)
+                        if cid not in already_selected:
+                            inferred_selected.append(cid)
+                    except ValueError:
+                        pass
+        
+        if inferred_selected:
+            self._log(f"Inferred additional already_selected cells from descriptions: {inferred_selected}")
+            already_selected.extend(inferred_selected)
+
+        # Filter out already selected items to prevent deselection
+        if already_selected:
+            original_count = len(selected)
+            selected = [s for s in selected if s not in already_selected]
+            if len(selected) < original_count:
+                self._log(f"Filtered out {original_count - len(selected)} already selected items from selection list.")
+        
+        # Only wait if we have loading cells AND no valid selections
+        # If we have valid selections, we should click them first
+        should_wait = len(loading_cells) > 0 and len(selected) == 0
 
         if should_wait:
             self._log(f"Loading cells detected: {loading_cells}. Suggesting wait.")

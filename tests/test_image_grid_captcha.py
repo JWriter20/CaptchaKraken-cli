@@ -56,7 +56,7 @@ def check_containment(inner, outer, threshold=0.9):
 @pytest.fixture(scope="module")
 def extractor():
     """Initialize extractor once for all tests."""
-    return AttentionExtractor(model="vikhyatk/moondream2")
+    return AttentionExtractor()
 
 # Format: (filename, prompt, valid_region_keys)
 GRID_CASES = [

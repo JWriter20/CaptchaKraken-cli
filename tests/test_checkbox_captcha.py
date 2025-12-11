@@ -37,7 +37,7 @@ def is_point_in_box(point, box):
 @pytest.fixture(scope="module")
 def extractor():
     """Initialize extractor once for all tests."""
-    return AttentionExtractor(model="vikhyatk/moondream2")
+    return AttentionExtractor()
 
 # Define checkbox test cases
 # Format: (filename, prompt, key)

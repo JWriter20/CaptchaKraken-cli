@@ -272,6 +272,84 @@ class ImageProcessor:
         return boxes
 
     @staticmethod
+    def detect_selected_cells(image_path: str, grid_boxes: List[Tuple[int, int, int, int]]) -> List[int]:
+        """
+        Detects which grid cells are already selected (checkmark overlay).
+        Returns a list of 1-based indices (e.g. [1, 5, 9]).
+        """
+        img = cv2.imread(image_path)
+        if img is None:
+            return []
+
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        selected_indices = []
+
+        # Color ranges for overlays
+        # ReCaptcha Blue: ~215 deg Hue -> ~107 OpenCV Hue
+        # Range: [95, 50, 50] to [125, 255, 255]
+        lower_blue = np.array([95, 60, 60])
+        upper_blue = np.array([130, 255, 255])
+
+        # hCaptcha Green: ~130 deg Hue -> ~65 OpenCV Hue
+        # Range: [40, 50, 50] to [85, 255, 255]
+        lower_green = np.array([35, 50, 50])
+        upper_green = np.array([85, 255, 255]) # hCaptcha green is sometimes greyish/cyan, need to be careful
+
+        # hCaptcha Dark Grey/Black checkmark container? 
+        # hCaptcha usually has a checkmark that appears. Sometimes it's just a fade.
+        # But ReCaptcha is the main one causing issues with deselection.
+
+        for i, box in enumerate(grid_boxes):
+            x1, y1, x2, y2 = box
+            w = x2 - x1
+            h = y2 - y1
+            
+            # Checkmark is usually in top-left
+            # Look at top-left quadrant (30% of size)
+            roi_w = int(w * 0.35)
+            roi_h = int(h * 0.35)
+            
+            roi_x2 = min(x1 + roi_w, img.shape[1])
+            roi_y2 = min(y1 + roi_h, img.shape[0])
+            
+            roi = hsv[y1:roi_y2, x1:roi_x2]
+            
+            if roi.size == 0:
+                continue
+            
+            total_pixels = roi.shape[0] * roi.shape[1]
+
+            # Check for Blue (ReCaptcha)
+            mask_blue = cv2.inRange(roi, lower_blue, upper_blue)
+            blue_pixels = cv2.countNonZero(mask_blue)
+            
+            is_blue_selected = False
+            if blue_pixels > total_pixels * 0.05:
+                # Refine with shape analysis for Blue (Recaptcha Badge)
+                # Badges are circular/compact. Sky/Background is irregular.
+                contours, _ = cv2.findContours(mask_blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if contours:
+                    max_cnt = max(contours, key=cv2.contourArea)
+                    area = cv2.contourArea(max_cnt)
+                    perimeter = cv2.arcLength(max_cnt, True)
+                    if perimeter > 0:
+                        circularity = 4 * np.pi * area / (perimeter * perimeter)
+                        # Circle ~ 1.0, Square ~ 0.785. Irregular shapes < 0.5.
+                        if circularity > 0.5: 
+                            is_blue_selected = True
+            
+            # Check for Green (hCaptcha/other)
+            mask_green = cv2.inRange(roi, lower_green, upper_green)
+            green_pixels = cv2.countNonZero(mask_green)
+            
+            # Threshold: if > 5% of the ROI is the target color, it's likely a badge
+            # ReCaptcha badge is a solid circle, quite large in the corner.
+            if is_blue_selected or green_pixels > total_pixels * 0.05:
+                selected_indices.append(i + 1)
+                
+        return selected_indices
+
+    @staticmethod
     def detect_checkbox(image_path: str) -> Optional[Tuple[int, int, int, int]]:
         """
         Detects a checkbox in the image using lightweight computer vision techniques.

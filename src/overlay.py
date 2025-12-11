@@ -38,7 +38,7 @@ def get_cross_platform_font(font_size: int):
     return font
 
 
-def draw_enhanced_bounding_box(draw, bbox, text=None, number=None, image_size=None, color="#C0392B"):
+def draw_enhanced_bounding_box(draw, bbox, text=None, number=None, image_size=None, color="#C0392B", label_position="top-left"):
     x1, y1, x2, y2 = bbox
     # color is passed as argument
 
@@ -99,18 +99,35 @@ def draw_enhanced_bounding_box(draw, bbox, text=None, number=None, image_size=No
         container_width = text_width + padding * 2
         container_height = text_height + padding * 2
 
-        # Position logic - Top Left
-        bg_x1 = x1 + 4
-        bg_y1 = y1 + 4
-
-        bg_x2 = bg_x1 + container_width
-        bg_y2 = bg_y1 + container_height
+        # Position logic
+        if label_position == "center":
+            # Center of the box
+            box_cx = (x1 + x2) / 2
+            box_cy = (y1 + y2) / 2
+            
+            bg_x1 = box_cx - container_width / 2
+            bg_y1 = box_cy - container_height / 2
+            bg_x2 = box_cx + container_width / 2
+            bg_y2 = box_cy + container_height / 2
+            
+        elif label_position == "bottom-right":
+            # Bottom Right of the box (inside)
+            bg_x2 = x2 - 4
+            bg_y2 = y2 - 4
+            bg_x1 = bg_x2 - container_width
+            bg_y1 = bg_y2 - container_height
+            
+        else: # Default to top-left
+            bg_x1 = x1 + 4
+            bg_y1 = y1 + 4
+            bg_x2 = bg_x1 + container_width
+            bg_y2 = bg_y1 + container_height
 
         # Text position
         text_x = bg_x1 + (container_width - text_width) // 2
         text_y = bg_y1 + (container_height - text_height) // 2 - bbox_text[1]
 
-        # Boundary checks
+        # Boundary checks (keep label inside image)
         if bg_x1 < 0:
             offset = -bg_x1
             bg_x1 += offset
@@ -162,7 +179,7 @@ def draw_arrow(draw, start, end, color="#FF0000", width=4):
     draw.polygon([end, p1, p2], fill=color)
 
 
-def add_overlays_to_image(image_path: str, boxes: list[dict], output_path: str = None):
+def add_overlays_to_image(image_path: str, boxes: list[dict], output_path: str = None, label_position="top-left"):
     """
     Load an image, draw bounding boxes and numbered labels, and save it.
 
@@ -174,6 +191,7 @@ def add_overlays_to_image(image_path: str, boxes: list[dict], output_path: str =
                'number': int/str (optional)
                'color': str (optional)
         output_path: Path to save result (defaults to overwriting image_path)
+        label_position: "top-left", "bottom-right", "center"
     """
     try:
         with Image.open(image_path) as img:
@@ -206,7 +224,7 @@ def add_overlays_to_image(image_path: str, boxes: list[dict], output_path: str =
                 color = box.get("color", "#FF6B6B")
 
                 draw_enhanced_bounding_box(
-                    draw, bbox_coords, text=text, number=number, image_size=img.size, color=color
+                    draw, bbox_coords, text=text, number=number, image_size=img.size, color=color, label_position=label_position
                 )
 
             img = img.convert("RGB")
