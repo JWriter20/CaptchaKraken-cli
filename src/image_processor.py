@@ -312,15 +312,16 @@ class ImageProcessor:
             roi_x2 = min(x1 + roi_w, img.shape[1])
             roi_y2 = min(y1 + roi_h, img.shape[0])
             
-            roi = hsv[y1:roi_y2, x1:roi_x2]
+            roi_hsv = hsv[y1:roi_y2, x1:roi_x2]
+            roi_bgr = img[y1:roi_y2, x1:roi_x2]
             
-            if roi.size == 0:
+            if roi_hsv.size == 0:
                 continue
             
-            total_pixels = roi.shape[0] * roi.shape[1]
+            total_pixels = roi_hsv.shape[0] * roi_hsv.shape[1]
 
             # Check for Blue (ReCaptcha)
-            mask_blue = cv2.inRange(roi, lower_blue, upper_blue)
+            mask_blue = cv2.inRange(roi_hsv, lower_blue, upper_blue)
             blue_pixels = cv2.countNonZero(mask_blue)
             
             is_blue_selected = False
@@ -335,16 +336,45 @@ class ImageProcessor:
                     if perimeter > 0:
                         circularity = 4 * np.pi * area / (perimeter * perimeter)
                         # Circle ~ 1.0, Square ~ 0.785. Irregular shapes < 0.5.
-                        if circularity > 0.5: 
+                        
+                        # Check for white checkmark inside the blue badge
+                        # Use BGR ROI for correct color conversion
+                        blue_parts = cv2.bitwise_and(roi_bgr, roi_bgr, mask=mask_blue)
+                        gray_blue = cv2.cvtColor(blue_parts, cv2.COLOR_BGR2GRAY)
+                        # White checkmark is very bright (usually pure white)
+                        _, white_mask = cv2.threshold(gray_blue, 200, 255, cv2.THRESH_BINARY)
+                        white_pixels = cv2.countNonZero(white_mask)
+                        
+                        # Requirement: High circularity AND contains white pixels (checkmark)
+                        if circularity > 0.5 and white_pixels > 5: 
                             is_blue_selected = True
             
             # Check for Green (hCaptcha/other)
-            mask_green = cv2.inRange(roi, lower_green, upper_green)
+            mask_green = cv2.inRange(roi_hsv, lower_green, upper_green)
             green_pixels = cv2.countNonZero(mask_green)
             
+            is_green_selected = False
+            if green_pixels > total_pixels * 0.05:
+                # Refine with shape analysis for Green (hCaptcha Badge)
+                contours, _ = cv2.findContours(mask_green, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if contours:
+                    max_cnt = max(contours, key=cv2.contourArea)
+                    area = cv2.contourArea(max_cnt)
+                    perimeter = cv2.arcLength(max_cnt, True)
+                    if perimeter > 0:
+                        circularity = 4 * np.pi * area / (perimeter * perimeter)
+                        
+                        # Check for white checkmark inside the green badge
+                        green_parts = cv2.bitwise_and(roi_bgr, roi_bgr, mask=mask_green)
+                        gray_green = cv2.cvtColor(green_parts, cv2.COLOR_BGR2GRAY)
+                        _, white_mask = cv2.threshold(gray_green, 200, 255, cv2.THRESH_BINARY)
+                        white_pixels = cv2.countNonZero(white_mask)
+                        
+                        if circularity > 0.5 and white_pixels > 5:
+                            is_green_selected = True
+            
             # Threshold: if > 5% of the ROI is the target color, it's likely a badge
-            # ReCaptcha badge is a solid circle, quite large in the corner.
-            if is_blue_selected or green_pixels > total_pixels * 0.05:
+            if is_blue_selected or is_green_selected:
                 selected_indices.append(i + 1)
                 
         return selected_indices
