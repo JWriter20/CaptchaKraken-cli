@@ -43,7 +43,6 @@ TASK: First analyze, then select. Think step by step:
 3. What type of thing should you be looking for?
 4. Look at EACH numbered cell carefully - what does it contain?
    - NOTE: If any cell is BLANK, SOLID WHITE, FADING IN, or shows a LOADING SPINNER, mark it as "loading".
-   - Captcha grids often fade in new images slowly. We must WAIT if images are not fully loaded.
 5. Which cells match the criteria?
    - If NO cells match the criteria, that is perfectly fine. Simply return an empty list for "selected_numbers". Do NOT guess.
 
@@ -60,7 +59,7 @@ Respond with JSON. CRITICAL: Fill in the reasoning fields FIRST, then select num
   }},
   "loading_cells": [4],
   "selected_numbers": [2, 3],
-  "reasoning": "Selected cells containing birds because birds hatch from eggs like in the reference. Cell 4 is loading, so we note that. If no cells matched, I would have returned [] for selected_numbers."
+  "reasoning": "Selected cells containing birds because birds hatch from eggs like in the reference. Cell 4 is loading, but since we found valid birds (2, 3), we select them first. If no valid options existed, we would wait."
 }}"""
 
 
@@ -399,7 +398,10 @@ class ActionPlanner:
 
         selected = result.get("selected_numbers", [])
         loading_cells = result.get("loading_cells", [])
-        should_wait = len(loading_cells) > 0
+        
+        # Only wait if we have loading cells AND no valid selections
+        # If we have valid selections, we should click them first
+        should_wait = len(loading_cells) > 0 and len(selected) == 0
 
         # Log all the detailed reasoning from the structured response
         self._log(f"Model extracted instruction: '{result.get('instruction_text', '(not provided)')}'")
