@@ -66,14 +66,24 @@ class GridPlanner(ActionPlanner):
         result = self._parse_json(response)
 
         selected = result.get("selected_numbers", [])
-        already_selected = result.get("already_selected", [])
+        already_selected = set(result.get("already_selected", []))
         loading_cells = result.get("loading_cells", [])
+        cell_states = result.get("cell_states", {})
+
+        # Robustness: Check cell_states for 'selected' or 'checked' and add to already_selected
+        for cell_num_str, state_desc in cell_states.items():
+            if "selected" in state_desc.lower() or "checked" in state_desc.lower():
+                try:
+                    already_selected.add(int(cell_num_str))
+                except ValueError:
+                    pass
 
         # Log reasoning
         self._log(f"Analysis: {result.get('instruction_analysis', 'N/A')}")
         
         # Double check "already selected" logic
-        # If the model put a number in 'selected_numbers' but also in 'already_selected', remove it from selected
+        # If the model put a number in 'selected_numbers' but it is actually already selected, remove it
+        # This prevents accidental deselection (toggling off)
         selected = [s for s in selected if s not in already_selected]
         
         # Only wait if we have loading cells AND no valid selections

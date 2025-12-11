@@ -271,8 +271,7 @@ class ImageProcessor:
 
         return boxes
 
-    @staticmethod
-    def detect_selected_cells(image_path: str, grid_boxes: List[Tuple[int, int, int, int]]) -> List[int]:
+    def detect_selected_cells(self, image_path: str, grid_boxes: List[Tuple[int, int, int, int]]) -> List[int]:
         """
         Detects which grid cells are already selected (checkmark overlay).
         Returns a list of 1-based indices (e.g. [1, 5, 9]).
@@ -286,18 +285,14 @@ class ImageProcessor:
 
         # Color ranges for overlays
         # ReCaptcha Blue: ~215 deg Hue -> ~107 OpenCV Hue
-        # Range: [95, 50, 50] to [125, 255, 255]
+        # Range: [95, 50, 50] to [130, 255, 255]
         lower_blue = np.array([95, 60, 60])
         upper_blue = np.array([130, 255, 255])
 
         # hCaptcha Green: ~130 deg Hue -> ~65 OpenCV Hue
-        # Range: [40, 50, 50] to [85, 255, 255]
+        # Range: [35, 50, 50] to [85, 255, 255]
         lower_green = np.array([35, 50, 50])
-        upper_green = np.array([85, 255, 255]) # hCaptcha green is sometimes greyish/cyan, need to be careful
-
-        # hCaptcha Dark Grey/Black checkmark container? 
-        # hCaptcha usually has a checkmark that appears. Sometimes it's just a fade.
-        # But ReCaptcha is the main one causing issues with deselection.
+        upper_green = np.array([85, 255, 255]) 
 
         for i, box in enumerate(grid_boxes):
             x1, y1, x2, y2 = box
@@ -305,7 +300,7 @@ class ImageProcessor:
             h = y2 - y1
             
             # Checkmark is usually in top-left
-            # Look at top-left quadrant (30% of size)
+            # Look at top-left quadrant (35% of size)
             roi_w = int(w * 0.35)
             roi_h = int(h * 0.35)
             
@@ -327,7 +322,6 @@ class ImageProcessor:
             is_blue_selected = False
             if blue_pixels > total_pixels * 0.05:
                 # Refine with shape analysis for Blue (Recaptcha Badge)
-                # Badges are circular/compact. Sky/Background is irregular.
                 contours, _ = cv2.findContours(mask_blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 if contours:
                     max_cnt = max(contours, key=cv2.contourArea)
@@ -335,19 +329,19 @@ class ImageProcessor:
                     perimeter = cv2.arcLength(max_cnt, True)
                     if perimeter > 0:
                         circularity = 4 * np.pi * area / (perimeter * perimeter)
-                        # Circle ~ 1.0, Square ~ 0.785. Irregular shapes < 0.5.
                         
                         # Check for white checkmark inside the blue badge
-                        # Use BGR ROI for correct color conversion
                         blue_parts = cv2.bitwise_and(roi_bgr, roi_bgr, mask=mask_blue)
                         gray_blue = cv2.cvtColor(blue_parts, cv2.COLOR_BGR2GRAY)
-                        # White checkmark is very bright (usually pure white)
-                        _, white_mask = cv2.threshold(gray_blue, 200, 255, cv2.THRESH_BINARY)
+                        # Relaxed threshold for white checkmark (was 200)
+                        _, white_mask = cv2.threshold(gray_blue, 180, 255, cv2.THRESH_BINARY)
                         white_pixels = cv2.countNonZero(white_mask)
                         
-                        # Requirement: High circularity AND contains white pixels (checkmark)
-                        if circularity > 0.5 and white_pixels > 5: 
+                        # Relaxed circularity (was 0.5) and pixel count
+                        if circularity > 0.4 and white_pixels > 3: 
                             is_blue_selected = True
+                            if self.debug:
+                                self.debug.log(f"Cell {i+1}: Blue selected (Circ={circularity:.2f}, WhitePx={white_pixels})")
             
             # Check for Green (hCaptcha/other)
             mask_green = cv2.inRange(roi_hsv, lower_green, upper_green)
@@ -355,7 +349,6 @@ class ImageProcessor:
             
             is_green_selected = False
             if green_pixels > total_pixels * 0.05:
-                # Refine with shape analysis for Green (hCaptcha Badge)
                 contours, _ = cv2.findContours(mask_green, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 if contours:
                     max_cnt = max(contours, key=cv2.contourArea)
@@ -364,16 +357,16 @@ class ImageProcessor:
                     if perimeter > 0:
                         circularity = 4 * np.pi * area / (perimeter * perimeter)
                         
-                        # Check for white checkmark inside the green badge
                         green_parts = cv2.bitwise_and(roi_bgr, roi_bgr, mask=mask_green)
                         gray_green = cv2.cvtColor(green_parts, cv2.COLOR_BGR2GRAY)
-                        _, white_mask = cv2.threshold(gray_green, 200, 255, cv2.THRESH_BINARY)
+                        _, white_mask = cv2.threshold(gray_green, 180, 255, cv2.THRESH_BINARY)
                         white_pixels = cv2.countNonZero(white_mask)
                         
-                        if circularity > 0.5 and white_pixels > 5:
+                        if circularity > 0.4 and white_pixels > 3:
                             is_green_selected = True
+                            if self.debug:
+                                self.debug.log(f"Cell {i+1}: Green selected (Circ={circularity:.2f}, WhitePx={white_pixels})")
             
-            # Threshold: if > 5% of the ROI is the target color, it's likely a badge
             if is_blue_selected or is_green_selected:
                 selected_indices.append(i + 1)
                 

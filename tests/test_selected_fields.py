@@ -39,7 +39,9 @@ def test_selected_fields_all_images():
             continue
             
         # 2. Detect Selections
-        selected_indices = ImageProcessor.detect_selected_cells(image_path, grid_boxes)
+        # Initialize ImageProcessor (mock dependencies as they are not needed for this method)
+        processor = ImageProcessor(attention_extractor=None, planner=None, debug_manager=None)
+        selected_indices = processor.detect_selected_cells(image_path, grid_boxes)
         selected_indices.sort()
         
         print(f"  Detected: {selected_indices}")
