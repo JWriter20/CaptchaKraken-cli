@@ -255,7 +255,7 @@ class CaptchaSolver:
 
             if should_wait:
                 self.debug.log("Planner detected loading/fading cells. Returning WaitAction.")
-                return WaitAction(action="wait", duration_ms=2000)
+                return WaitAction(action="wait", duration_ms=500)
 
             self.debug.log(f"Grid selection: {selected_numbers}")
 

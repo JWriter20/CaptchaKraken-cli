@@ -45,6 +45,7 @@ TASK: First analyze, then select. Think step by step:
    - NOTE: If any cell is BLANK, SOLID WHITE, FADING IN, or shows a LOADING SPINNER, mark it as "loading".
    - Captcha grids often fade in new images slowly. We must WAIT if images are not fully loaded.
 5. Which cells match the criteria?
+   - If NO cells match the criteria, that is perfectly fine. Simply return an empty list for "selected_numbers". Do NOT guess.
 
 Respond with JSON. CRITICAL: Fill in the reasoning fields FIRST, then select numbers based on your reasoning:
 {{
@@ -59,7 +60,7 @@ Respond with JSON. CRITICAL: Fill in the reasoning fields FIRST, then select num
   }},
   "loading_cells": [4],
   "selected_numbers": [2, 3],
-  "reasoning": "Selected cells containing birds because birds hatch from eggs like in the reference. Cell 4 is loading, so we note that."
+  "reasoning": "Selected cells containing birds because birds hatch from eggs like in the reference. Cell 4 is loading, so we note that. If no cells matched, I would have returned [] for selected_numbers."
 }}"""
 
 
