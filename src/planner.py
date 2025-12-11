@@ -42,6 +42,8 @@ TASK: First analyze, then select. Think step by step:
 2. What does the reference image (if any) show?
 3. What type of thing should you be looking for?
 4. Look at EACH numbered cell carefully - what does it contain?
+   - NOTE: If any cell is BLANK, SOLID WHITE, FADING IN, or shows a LOADING SPINNER, mark it as "loading".
+   - Captcha grids often fade in new images slowly. We must WAIT if images are not fully loaded.
 5. Which cells match the criteria?
 
 Respond with JSON. CRITICAL: Fill in the reasoning fields FIRST, then select numbers based on your reasoning:
@@ -52,10 +54,12 @@ Respond with JSON. CRITICAL: Fill in the reasoning fields FIRST, then select num
   "cell_contents": {{
     "1": "elephant",
     "2": "parrots (birds)",
-    "3": "pigeons (birds)"
+    "3": "pigeons (birds)",
+    "4": "white/blank (loading)"
   }},
+  "loading_cells": [4],
   "selected_numbers": [2, 3],
-  "reasoning": "Selected cells containing birds because birds hatch from eggs like in the reference"
+  "reasoning": "Selected cells containing birds because birds hatch from eggs like in the reference. Cell 4 is loading, so we note that."
 }}"""
 
 
@@ -369,7 +373,7 @@ class ActionPlanner:
     # ------------------------------------------------------------------
     # Grid selection
     # ------------------------------------------------------------------
-    def get_grid_selection(self, instruction: str, image_path: str, rows: int, cols: int) -> List[int]:
+    def get_grid_selection(self, instruction: str, image_path: str, rows: int, cols: int) -> Tuple[List[int], bool]:
         """
         For grid-based image selection, ask which numbers to select.
 
@@ -380,7 +384,7 @@ class ActionPlanner:
             cols: Number of cols in grid
 
         Returns:
-            List of integers (1-based indices) to select.
+            Tuple of (selected_indices, should_wait)
         """
         total = rows * cols
 
@@ -393,6 +397,8 @@ class ActionPlanner:
         result = self._parse_json(response)
 
         selected = result.get("selected_numbers", [])
+        loading_cells = result.get("loading_cells", [])
+        should_wait = len(loading_cells) > 0
 
         # Log all the detailed reasoning from the structured response
         self._log(f"Model extracted instruction: '{result.get('instruction_text', '(not provided)')}'")
@@ -405,10 +411,13 @@ class ActionPlanner:
             for cell_num, content in sorted(cell_contents.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 0):
                 self._log(f"  Cell {cell_num}: {content}")
 
+        if should_wait:
+            self._log(f"Loading cells detected: {loading_cells}. Suggesting wait.")
+
         self._log(f"Selected numbers: {selected}")
         self._log(f"Reasoning: {result.get('reasoning', '(not provided)')}")
 
-        return selected
+        return selected, should_wait
 
     # ------------------------------------------------------------------
     # Tool-aware planning

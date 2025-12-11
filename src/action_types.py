@@ -40,4 +40,10 @@ class WaitAction(Action):
     duration_ms: int
 
 
-CaptchaAction = Union[ClickAction, DragAction, TypeAction, WaitAction]
+class DoneAction(Action):
+    """Signal that the captcha is solved or no further actions are needed."""
+
+    action: Literal["done"]
+
+
+CaptchaAction = Union[ClickAction, DragAction, TypeAction, WaitAction, DoneAction]

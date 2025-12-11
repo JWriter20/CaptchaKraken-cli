@@ -31,6 +31,7 @@ from .action_types import (
     DragAction,
     TypeAction,
     WaitAction,
+    DoneAction,
 )
 from .attention import AttentionExtractor
 from .overlay import add_drag_overlay, add_overlays_to_image
@@ -216,7 +217,7 @@ class CaptchaSolver:
         image_path: str,
         instruction: str,
         grid_boxes: List[Tuple[int, int, int, int]],
-    ) -> List[ClickAction]:
+    ) -> Union[List[ClickAction], DoneAction, WaitAction]:
         """
         Solve grid selection captcha.
         """
@@ -250,7 +251,11 @@ class CaptchaSolver:
             self.debug.save_image(overlay_path, "01_grid_overlay.png")
 
             # Ask planner which squares to select
-            selected_numbers = self.planner.get_grid_selection(instruction, overlay_path, rows=rows, cols=cols)
+            selected_numbers, should_wait = self.planner.get_grid_selection(instruction, overlay_path, rows=rows, cols=cols)
+
+            if should_wait:
+                self.debug.log("Planner detected loading/fading cells. Returning WaitAction.")
+                return WaitAction(action="wait", duration_ms=2000)
 
             self.debug.log(f"Grid selection: {selected_numbers}")
 
@@ -273,6 +278,9 @@ class CaptchaSolver:
                             target_bounding_box=bbox_pct,
                         )
                     )
+
+            if not actions:
+                return DoneAction(action="done")
 
             return actions
 
@@ -731,10 +739,10 @@ class CaptchaSolver:
                     )
 
             elif action_type == "done":
-                return WaitAction(action="wait", duration_ms=0)
+                return DoneAction(action="done")
 
         # Fallback after max tool calls
-        return WaitAction(action="wait", duration_ms=0)
+        return DoneAction(action="done")
 
     def _remove_background(self, image_path: str, prompt: str) -> Optional[Image.Image]:
         """
