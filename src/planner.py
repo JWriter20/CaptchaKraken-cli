@@ -57,6 +57,10 @@ TASK: First analyze, then select. Think step by step:
      - A highlighted border (blue, grey, or green).
 5. Which cells match the criteria?
    - If NO cells match the criteria, that is perfectly fine. Simply return an empty list for "selected_numbers". Do NOT guess.
+   - CONFIDENCE CHECK:
+     - If the images are separate (usually 3x3), only select cells where the object is CLEARLY visible.
+     - Do NOT select if you describe it as "possibly", "looks like", "might be", or "could include".
+     - If you are unsure, DO NOT SELECT. It is better to miss a target than to click a wrong one.
 
 Respond with JSON. CRITICAL: Fill in the reasoning fields FIRST, then select numbers based on your reasoning:
 {{
