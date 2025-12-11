@@ -19,11 +19,6 @@ from typing import Any, Dict, List, Literal, Optional
 DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
 
 
-def _debug_log(message: str) -> None:
-    """Print debug message if debugging is enabled."""
-    if DEBUG:
-        print(f"[Planner DEBUG] {message}", file=sys.stderr)
-
 try:
     # New Gemini SDK (direct Gemini API, no Vertex AI dependency)
     from google import genai  # type: ignore[import-not-found]
@@ -69,6 +64,10 @@ PLAN_WITH_TOOLS_PROMPT = """You are a captcha solver. Analyze this image and dec
 
 {instruction}
 
+{object_list_section}
+
+{history_section}
+
 Step 1: VISUAL ANALYSIS
 Briefly describe the objects you see in the image.
 If the goal involves "similar objects", "matching shapes", or "odd one out", explicitly IDENTIFY the specific shape or object class.
@@ -76,7 +75,9 @@ Example: "I see three wireframe cubes and one solid cube." or "I see multiple tr
 
 Step 2: GOAL IDENTIFICATION
 Identify the *goal* in concrete visual terms.
-(e.g., "click all open-frame cubes", "drag the slider handle to the gap", "click the checkbox").
+BE SPECIFIC about locations and explicitly state where exactly any action should take place (e.g. "top right", "center left").
+Explain WHY this is the correct target (matching rotation, shape, color, etc).
+(e.g., "drag the moveable letter 'W' in the top right to the center-right 'W' shaped outline because it matches the rotation and shape of the draggable W").
 
 Step 3: ACTION PLANNING
 Decide on the best tool or action.
@@ -88,44 +89,47 @@ You have three tools available:
 2. point(target) - Find a single element (e.g., "checkbox", "verify button", "slider handle", "wireframe cube on the left")
    Use when: You need to click/interact with one specific element.
 
-3. segment_and_label() - Segment all objects in the image using SAM2, label them with numbers, and return the labeled image.
-   Use when: You need to distinguish between multiple complex shapes (e.g. "drag the W to the W slot") or when standard detection fails due to warping/distortion.
-   This tool will:
-   - Sharpen the image to improve edge detection
-   - Segment all distinct foreground objects
-   - Draw numbered boxes around them
-   - Return the list of numbered items so you can refer to them by ID (e.g. "Drag item 1 to item 3")
+    3. simulate_drag(source, target_hint, target_object_id, source_quality, refined_source, location_hint) - Simulate a drag operation with visual feedback.
+       Use when: You need to drag an item to a target that requires precise visual alignment (e.g., "fit the puzzle piece", "complete the line") and you don't have exact coordinates yet.
+       - source: The ID of the object to drag (e.g. "Object 4") OR a description if not found.
+       - target_hint: description of where it roughly should go (e.g., "matching slot", "center of Object 1")
+       - target_object_id: (Optional) The ID of the object that acts as the target base (e.g. if dragging a hat to a head (Object 5), set this to 5).
+       - source_quality: "properly-cropped" (if the Object ID is a tight crop of the item), "includes-source" (if the Object ID contains the item but also extra background), or "not-bounded" (if source is not an ID).
+       - refined_source: If "includes-source", provide a visual description of the inner item (e.g. "white letter W").
+       - location_hint: A 2-element list [x, y] (0.0-1.0) indicating the rough center of the target destination. E.g. [0.8, 0.2] is top-right.
 
-If you need to interact with multiple specific items (e.g., "click the two similar shapes"), PREFER using multiple point() or detect() calls to ensure all targets are hit.
-Example: instead of detect("wireframe cube"), use:
-  point("wireframe cube on the left"),
-  point("wireframe cube on the right")
+    NOTE: The image has already been segmented and objects are labeled with red boxes and IDs (if any were found).
+    Use the "Detected Objects" list above to refer to specific items by their ID (e.g., "Object 1").
 
-You can also return a direct action if you know exactly what to do:
-- click: Click on something (provide target_description for point() to find it)
-- drag: Drag something. For source_description, describe the specific movable piece in natural language, not a generic UI label. Good examples: "top segment movable square", "bottom right movable bee", "movable W square". BAD examples: "Move", "button", "drag handle".
-  For drag_target_description, describe where that piece should end up, also in concrete visual terms (e.g.,
-  "matching W outline slot that has the same shape and orientation",
-  "missing jigsaw piece slot that completes the animal",
-  "gap in the broken line that this segment fits into",
-  "matching socket the plug should connect to").
-  In these drag puzzles, you are almost always dragging "missing piece(s)" into the place it belongs.
-  Do NOT invent new words or shapes that are not already implied by the puzzle; instead, focus on exact alignment with the existing slot/outline.
-- type: Type text (provide the text to type, maintain casing, typically 6 characters, ignore reflections, noise, etc.)
-- wait: Wait for loading
-- done: Captcha is already solved
+    If you need to interact with multiple specific items (e.g., "click the two similar shapes"), PREFER using multiple point() or detect() calls to ensure all targets are hit.
+    Example: instead of detect("wireframe cube"), use:
+      point("wireframe cube on the left"),
+      point("wireframe cube on the right")
 
-Respond ONLY with JSON. Either request tool(s):
-{{
-  "analysis": "Your visual analysis of the objects and the puzzle type",
-  "goal": "The specific goal you identified",
-  "tool_calls": [
+    You can also return a direct action if you know exactly what to do:
+    - click: Click on something (provide target_description for point() to find it). Do NOT click "Skip" or "Reload" unless you are 100% certain the puzzle is unsolvable.
+    - drag: Drag something. Use this ONLY if you know the exact source and destination (e.g. "drag slider to the end"). For puzzle alignment, use simulate_drag() instead.
+    - type: Type text (provide the text to type, maintain casing, typically 6 characters, ignore reflections, noise, etc.)
+    - wait: Wait for loading
+    - done: Captcha is already solved
+
+    IMPORTANT:
+    1. Do not give up easily. If the target is abstract or unclear, look for the BEST MATCHING shape or outline.
+    2. For drag puzzles, if you see a movable piece, there IS a target. It might be a faint outline, a shadow, or a matching background pattern.
+    3. If there is a MAIN BODY or BASE object (like a puzzle frame or a body needing a head), IDENTIFY IT and use it as 'target_object_id'.
+    4. If you are unsure of the exact coordinates, use 'simulate_drag' with a descriptive target_hint so the vision system can find it.
+
+    Respond ONLY with JSON. Either request tool(s):
     {{
-      "name": "detect" | "point" | "segment_and_label",
-      "args": {{"object_class": "..."}} or {{"target": "..."}} or {{}}
+      "analysis": "Your visual analysis of the objects and the puzzle type",
+      "goal": "The specific goal you identified. MUST SPECIFY LOCATION (e.g. 'drag Object 4 to the W-shaped outline in the top-right')",
+      "tool_calls": [
+        {{
+          "name": "detect" | "point" | "simulate_drag",
+          "args": {{"object_class": "..."}} or {{"target": "..."}} or {{"source": "...", "target_hint": "...", "target_object_id": 1, "source_quality": "...", "refined_source": "...", "location_hint": [x, y]}}
+        }}
+      ]
     }}
-  ]
-}}
 
 Or return an action:
 {{
@@ -159,38 +163,30 @@ DRAG_REFINE_PROMPT = """You are refining a drag action for a captcha puzzle.
 
 {instruction}
 
-Goal: Drag the "{source_desc}" to the "{target_desc}".
-Keep this goal strict. Do not invent new goals like "forming words" or "aligning text" unless explicitly stated.
-Focus on visual alignment: shapes, cutouts, slots, or completing a pattern.
+Primary Goal: {primary_goal}
+(Use this goal to judge success. Do NOT change this goal.)
+
+Object to Move: "{source_desc}"
+Target Destination: "{target_desc}"
 
 CRITICAL: The destination must be DISTINCT from the source. You are never dragging something to itself.
-The source (RED border) and destination (DASHED border) should be in different locations.
-If they appear to overlap or be very close, you need to make larger adjustments to find the correct distinct target location.
+The draggable item is marked with a LIGHT GREEN box (drawn with padding around the item).
 
-Most of these puzzles involve dragging a SINGLE movable piece into the ONE slot where it belongs.
-Common patterns include:
-- completing a picture by dropping a missing jigsaw-like piece into its matching cut-out
-- sliding a missing segment into a gap to complete a line or track
-- dragging a letter or symbol so it exactly overlaps the matching outline/slot (same shape and orientation)
-- dragging one item directly onto the counterpart it is visually connected to
+EVALUATION CRITERIA:
+1. **Vertical Position**: Is the object too high or too low? (e.g. Is the head on the stomach? It should be on the neck.)
+2. **Horizontal Position**: Is it too far left or right?
+3. **Connectivity**: Do the lines of the object flow smoothly into the target?
 
-Before judging the current destination, silently decide:
-- what is the visual goal of THIS puzzle?
-- what specific slot/outline/gap does the dragged piece clearly belong to?
-Use that same goal consistently for all adjustments; do NOT change the goal between iterations.
+Evaluate this drag destination:
+1. Describe the specific visual alignment. (e.g. "The neck lines are misaligned by...", "The head is overlapping the torso...")
+2. If not perfect, what RELATIVE adjustment is needed?
 
 The image shows:
-- RED border: The source element (what we're dragging)
-- RED arrow: The current proposed drag path
-- DASHED border: The proposed destination
+- LIGHT GREEN box: The draggable item at its current location.
 
 Current destination: ({target_x:.1%}, {target_y:.1%})
 
 {history_text}
-
-Evaluate this drag destination:
-1. Is the destination correct? Will dropping here solve the puzzle according to the goal you identified?
-2. If not, what RELATIVE adjustment is needed?
 
 Provide adjustments as percentages of image size:
 - dx: positive = move right, negative = move left (e.g., 0.05 = 5% right)
@@ -200,10 +196,31 @@ Make SMALL adjustments (typically 1-5%). We can refine iteratively.
 
 Respond ONLY with JSON:
 {{
-  "conclusion": "brief assessment of current position in terms of that goal (e.g., 'slightly too far right, height matches the W-shaped slot')",
+  "conclusion": "Specific critique of vertical/horizontal alignment and edge connectivity",
   "decision": "accept" | "adjust",
   "dx": 0.0,
   "dy": 0.0
+}}"""
+
+# For verifying source crop tightness
+VERIFY_CROP_PROMPT = """You are refining a selection for a drag-and-drop task.
+Instruction: {instruction}
+
+The system detected "Object {id}" as the item to drag.
+Look at the RED box labeled "{id}" in the image.
+
+Does this box represent a TIGHT isolation of the movable piece?
+OR does it include a lot of background, other slots, or empty space that should be excluded?
+
+For example:
+- If the movable piece is a "white W" but the box covers a large black column containing the W, that is BAD (not tight).
+- If the box tightly hugs the shape of the item, that is GOOD (tight).
+
+Respond ONLY with JSON:
+{{
+  "analysis": "Describe what Object {id} contains vs what the actual movable piece is",
+  "is_tight": true | false,
+  "refined_prompt": "If false, provide a visual description to find the tight item (e.g. 'white letter W')"
 }}"""
 
 
@@ -220,10 +237,12 @@ class ActionPlanner:
         model: Optional[str] = None,
         ollama_host: Optional[str] = None,
         gemini_api_key: Optional[str] = None,
+        debug_callback: Optional[Any] = None,
     ):
         self.backend = backend
         self.ollama_host = ollama_host or os.getenv("OLLAMA_HOST", "http://localhost:11434")
         self.gemini_api_key = gemini_api_key or os.getenv("GEMINI_API_KEY")
+        self.debug_callback = debug_callback
         self._genai_client = None
 
         # Configure Gemini if selected
@@ -240,7 +259,7 @@ class ActionPlanner:
         # Default models per backend
         if model is None:
             if backend == "ollama":
-                self.model = "llama3.2-vision"
+                self.model = "qwen3-vl:4b"
             elif backend == "gemini":
                 # Default Gemini model; can be overridden by caller
                 self.model = "gemini-2.5-flash-lite"
@@ -249,25 +268,40 @@ class ActionPlanner:
         else:
             self.model = model
 
+    def _log(self, message: str) -> None:
+        """Log message to callback and/or stderr."""
+        # Always print to stderr if global DEBUG is set
+        if DEBUG:
+            print(f"[Planner DEBUG] {message}", file=sys.stderr)
+        
+        # Also use callback if provided (for file logging)
+        if self.debug_callback:
+            self.debug_callback(f"[Planner] {message}")
+
     # ------------------------------------------------------------------
     # Core helper: chat with image
     # ------------------------------------------------------------------
     def _chat_with_image(self, prompt: str, image_path: str) -> str:
         """Send a prompt + image to the LLM backend, get response."""
-        _debug_log(f"Backend: {self.backend}, Model: {self.model}")
-        _debug_log(f"Image path: {image_path}")
-        _debug_log(f"=== PROMPT START ===\n{prompt}\n=== PROMPT END ===")
+        self._log(f"Backend: {self.backend}, Model: {self.model}")
+        self._log(f"Image path: {image_path}")
+        self._log(f"=== PROMPT START ===\n{prompt}\n=== PROMPT END ===")
 
         if self.backend == "ollama":
             import ollama
 
-            response = ollama.chat(
+            self._log("Waiting for Ollama response...")
+            client = ollama.Client(host=self.ollama_host)
+            response = client.chat(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt, "images": [image_path]}],
-                options={"temperature": 0.0},
+                options={
+                    "temperature": 0.0,
+                    "num_predict": 1024,  # Limit generation length to avoid infinite loops
+                },
             )
             result = response["message"]["content"]
-            _debug_log(f"=== RAW RESPONSE ===\n{result}\n=== END RESPONSE ===")
+            self._log(f"=== RAW RESPONSE ===\n{result}\n=== END RESPONSE ===")
             return result
 
         if self.backend == "gemini":
@@ -306,7 +340,7 @@ class ActionPlanner:
                 config=config,
             )
             result = response.text
-            _debug_log(f"=== RAW RESPONSE ===\n{result}\n=== END RESPONSE ===")
+            self._log(f"=== RAW RESPONSE ===\n{result}\n=== END RESPONSE ===")
             return result
 
         raise ValueError(f"Unknown backend: {self.backend}")
@@ -350,9 +384,9 @@ class ActionPlanner:
         """
         total = rows * cols
 
-        _debug_log("get_grid_selection called")
-        _debug_log(f"  context instruction: '{instruction}'")
-        _debug_log(f"  grid: {rows}x{cols} = {total} cells")
+        self._log("get_grid_selection called")
+        self._log(f"  context instruction: '{instruction}'")
+        self._log(f"  grid: {rows}x{cols} = {total} cells")
 
         prompt = SELECT_GRID_PROMPT.format(rows=rows, cols=cols, total=total)
         response = self._chat_with_image(prompt, image_path)
@@ -361,38 +395,66 @@ class ActionPlanner:
         selected = result.get("selected_numbers", [])
 
         # Log all the detailed reasoning from the structured response
-        _debug_log(f"Model extracted instruction: '{result.get('instruction_text', '(not provided)')}'")
-        _debug_log(f"Reference image shows: '{result.get('reference_image_shows', '(not provided)')}'")
-        _debug_log(f"Looking for: '{result.get('looking_for', '(not provided)')}'")
+        self._log(f"Model extracted instruction: '{result.get('instruction_text', '(not provided)')}'")
+        self._log(f"Reference image shows: '{result.get('reference_image_shows', '(not provided)')}'")
+        self._log(f"Looking for: '{result.get('looking_for', '(not provided)')}'")
 
         cell_contents = result.get("cell_contents", {})
         if cell_contents:
-            _debug_log("Cell contents analysis:")
+            self._log("Cell contents analysis:")
             for cell_num, content in sorted(cell_contents.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 0):
-                _debug_log(f"  Cell {cell_num}: {content}")
+                self._log(f"  Cell {cell_num}: {content}")
 
-        _debug_log(f"Selected numbers: {selected}")
-        _debug_log(f"Reasoning: {result.get('reasoning', '(not provided)')}")
+        self._log(f"Selected numbers: {selected}")
+        self._log(f"Reasoning: {result.get('reasoning', '(not provided)')}")
 
         return selected
 
     # ------------------------------------------------------------------
     # Tool-aware planning
     # ------------------------------------------------------------------
-    def plan_with_tools(self, image_path: str, instruction: str = "") -> Dict[str, Any]:
+    def plan_with_tools(
+        self,
+        image_path: str,
+        instruction: str = "",
+        objects: Optional[List[Dict[str, Any]]] = None,
+        history: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         """
         Plan the next action, potentially requesting a tool call.
 
         Args:
             image_path: Path to the captcha image
             instruction: Optional instruction text
+            objects: Optional list of detected objects
+            history: Optional list of previous actions
 
         Returns:
             Dict with either:
             - "tool_call": {"name": "detect"|"point", "args": {...}}
             - "action_type": "click"|"drag"|"type"|"wait"|"done" + action details
         """
-        prompt = PLAN_WITH_TOOLS_PROMPT.format(instruction=instruction or "Solve this captcha.")
+        object_list_section = ""
+        if objects:
+            lines = ["Detected Objects (ID: box [x, y, w, h]):"]
+            for obj in sorted(objects, key=lambda x: x.get("id", 0)):
+                lines.append(f"- Object {obj.get('id')}: {obj.get('bbox')}")
+            lines.append("\\nUse these Object IDs in your reasoning.")
+            object_list_section = "\\n".join(lines)
+
+        history_section = ""
+        if history:
+            lines = ["Action History (most recent last):"]
+            for i, h in enumerate(history):
+                lines.append(f"{i+1}. {h}")
+            lines.append("\\nAVOID repeating failed actions.")
+            history_section = "\\n".join(lines)
+
+        prompt = PLAN_WITH_TOOLS_PROMPT.format(
+            instruction=instruction or "Solve this captcha.",
+            object_list_section=object_list_section,
+            history_section=history_section,
+        )
         response = self._chat_with_image(prompt, image_path)
         return self._parse_json(response)
 
@@ -407,6 +469,7 @@ class ActionPlanner:
         history: List[Dict[str, Any]],
         source_description: str = "movable item",
         target_description: str = "matching slot",
+        primary_goal: str = "Complete the puzzle",
     ) -> Dict[str, Any]:
         """
         Refine a drag destination with visual feedback.
@@ -419,6 +482,7 @@ class ActionPlanner:
                 [{"destination": [x, y], "conclusion": "...", "decision": "..."}]
             source_description: Description of the item being dragged
             target_description: Description of where it should go
+            primary_goal: The specific goal identified by the planner
 
         Returns:
             {
@@ -446,6 +510,7 @@ class ActionPlanner:
 
         prompt = DRAG_REFINE_PROMPT.format(
             instruction=instruction or "Complete the drag puzzle.",
+            primary_goal=primary_goal,
             source_desc=source_description,
             target_desc=target_description,
             target_x=current_target[0],
@@ -465,6 +530,25 @@ class ActionPlanner:
         }
 
     # ------------------------------------------------------------------
+    # Source Verification
+    # ------------------------------------------------------------------
+    def verify_source_crop(
+        self,
+        image_path: str,
+        source_object: Dict[str, Any],
+        instruction: str
+    ) -> Dict[str, Any]:
+        """
+        Verify if the selected source object is a tight crop or needs refinement.
+        """
+        prompt = VERIFY_CROP_PROMPT.format(
+            id=source_object.get("id"),
+            instruction=instruction
+        )
+        response = self._chat_with_image(prompt, image_path)
+        return self._parse_json(response)
+
+    # ------------------------------------------------------------------
     # Text reading (for text captchas)
     # ------------------------------------------------------------------
     def read_text(self, image_path: str) -> str:
@@ -477,3 +561,56 @@ class ActionPlanner:
         response = self._chat_with_image(TEXT_READ_PROMPT, image_path)
         result = self._parse_json(response)
         return result.get("text", "")
+
+    # ------------------------------------------------------------------
+    # Item Selection (for SAM2 candidate filtering)
+    # ------------------------------------------------------------------
+    def select_items(self, image_path: str, instruction: str, candidates_count: int) -> List[int]:
+        """
+        Select items from a set of labeled candidates based on instruction.
+        
+        Args:
+            image_path: Path to image with labeled candidates (numbers on objects)
+            instruction: Description of what to select (e.g. "the letter W")
+            candidates_count: Number of candidates available (for validation)
+            
+        Returns:
+            List of Selected IDs (int)
+        """
+        prompt = f"""You are a vision system selecting objects.
+The image shows {candidates_count} objects detected by a segmentation system.
+Each important object is overlaid with a SEMI-TRANSPARENT colored mask and a numeric label (ID).
+
+Task: We want to identify the segments that match this description: "{instruction}"
+
+CRITICAL INSTRUCTIONS:
+1. Ignore the color of the mask. Focus on the SHAPE and CONTEXT.
+2. Each mask is a different color, and each mask is numbered with an ID.
+3. It is possible that our target object is fragmented into multiple masks. If so, select all relevant IDs.
+4. ONLY select the mask IDs that directly match the description, DO NOT include any backgrounds or other objects
+
+Respond ONLY with JSON:
+{{
+  "analysis": "Describe the candidates that look relevant, noting their shape matches despite mask color",
+  "selected_ids": [id1, id2, ...], // often only one id, don't feel the need to select multiple ids always
+  "confidence": "high" | "medium" | "low",
+  "reasoning": "Why these IDs match the description"
+}}"""
+        
+        response = self._chat_with_image(prompt, image_path)
+        result = self._parse_json(response)
+        
+        self._log(f"Selection reasoning: {result.get('reasoning')}")
+        
+        selected_ids = result.get("selected_ids")
+        valid_ids = []
+        
+        if isinstance(selected_ids, int):
+            selected_ids = [selected_ids]
+            
+        if isinstance(selected_ids, list):
+            for pid in selected_ids:
+                if isinstance(pid, int) and 0 <= pid < candidates_count:
+                    valid_ids.append(pid)
+                    
+        return valid_ids

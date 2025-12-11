@@ -10,7 +10,7 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from imagePreprocessing import to_greyscale, to_edge_outline
+from image_processor import ImageProcessor
 
 
 def main():
@@ -44,12 +44,13 @@ def main():
     print(f"Output directory: {args.output_dir}")
     
     print(f"\n1. Converting to greyscale...")
-    to_greyscale(args.image_path, greyscale_output)
+    ImageProcessor.to_greyscale(args.image_path, greyscale_output)
     print(f"   Saved: {greyscale_output}")
     
     print(f"\n2. Detecting edges...")
-    to_edge_outline(args.image_path, edges_output)
+    ImageProcessor.to_edge_outline(args.image_path, edges_output)
     print(f"   Saved: {edges_output}")
+
     
     print(f"\n✓ Processing complete!")
 

@@ -192,17 +192,17 @@ class AttentionExtractor:
     def detectInteractable(
         self,
         image_path: str,
-        points_per_side: int = 8,
+        points_per_side: int = 9,
         score_threshold: float = 0.3,
-        max_area_ratio: float = 0.4,
-        aspect_ratio_threshold: float = 4.0,
+        max_area_ratio: float = 0.2,
+        aspect_ratio_threshold: float = 2.5,
     ) -> Dict[str, Any]:
         """
         Detect interactable objects using SAM 2 segmentation and heuristic filtering.
         
         Args:
             image_path: Path to image
-            points_per_side: Density of point grid for SAM 2 (default: 8, high sensitivity)
+            points_per_side: Density of point grid for SAM 2 (default: 9, high sensitivity)
             score_threshold: Minimum IoU score for SAM 2 masks (default: 0.3, high sensitivity)
             max_area_ratio: Maximum fraction of image area a mask can cover
             aspect_ratio_threshold: Maximum allowed aspect ratio (longer side / shorter side)
@@ -332,21 +332,38 @@ class AttentionExtractor:
         image_path: str,
         object_class: str,
         max_objects: int = 24,
+        box_threshold: Optional[float] = None,
+        text_threshold: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Detect all instances of object class using GroundingDINO.
         
-        Automatically adjusts sensitivity (thresholds) if no objects are found.
+        Automatically adjusts sensitivity (thresholds) if no objects are found,
+        UNLESS specific thresholds are provided.
 
         Args:
             image_path: Path to image
             object_class: What to detect (e.g., "bird", "car")
             max_objects: Maximum objects to detect
+            box_threshold: Override box threshold
+            text_threshold: Override text threshold
 
         Returns:
             {'objects': [{'x_min': float, 'y_min': float, 'x_max': float, 'y_max': float}, ...]}
             Coordinates are percentages in [0.0, 1.0]
         """
+        # If explicit thresholds provided, use them directly
+        if box_threshold is not None and text_threshold is not None:
+            result = self.detect_with_grounding_dino(
+                image_path, 
+                object_class, 
+                box_threshold=box_threshold, 
+                text_threshold=text_threshold
+            )
+            # Sort by score descending
+            objects = sorted(result["objects"], key=lambda x: x.get("score", 0), reverse=True)
+            return {"objects": objects[:max_objects]}
+
         # Sensitivity loop: try progressively lower thresholds
         thresholds = [
             (0.35, 0.25),  # Default
@@ -465,17 +482,123 @@ class AttentionExtractor:
                 "label": label
             })
             
+        
         t1 = time.time()
         # print(f"[AttentionExtractor] GroundingDINO detect('{text_prompt}') took {t1 - t0:.2f}s", file=sys.stderr)
         return {"objects": objects}
+
+    def segment_by_color(
+        self,
+        image_path: str,
+        k: int = 8,
+        min_area_ratio: float = 0.005,
+        merge_components: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Segment image using K-Means color clustering.
+        Useful for distinct simple shapes where SAM 2 might over-segment texture.
+        
+        Args:
+            image_path: Path to image
+            k: Number of color clusters
+            min_area_ratio: Minimum area fraction to keep a mask
+            merge_components: If True, keep all regions of same color as one mask.
+                            If False, split disjoint regions into separate masks.
+        """
+        import cv2
+        
+        t0 = time.time()
+        
+        # Load image
+        img = cv2.imread(image_path)
+        if img is None:
+            print(f"[AttentionExtractor] Could not load {image_path}", file=sys.stderr)
+            return {"masks": []}
+            
+        # Blur slightly to reduce noise
+        # img_blur = cv2.GaussianBlur(img, (5, 5), 0)
+        
+        # Use Mean Shift Filtering for better segmentation (cartoon effect)
+        # This helps flatten textures and merge similar colors before K-Means
+        img_blur = cv2.pyrMeanShiftFiltering(img, sp=15, sr=30)
+        
+        # Convert to LAB for better color perceptual distance
+        img_lab = cv2.cvtColor(img_blur, cv2.COLOR_BGR2LAB)
+        
+        # Reshape to list of pixels
+        pixels = img_lab.reshape((-1, 3))
+        pixels = np.float32(pixels)
+        
+        # Define criteria = ( type, max_iter, epsilon )
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
+        
+        # K-Means
+        # k clusters
+        _, labels, centers = cv2.kmeans(pixels, k, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
+        
+        # Convert centers back to RGB for consistency (output uses RGB)
+        centers_lab = np.uint8(centers).reshape(1, k, 3)
+        centers_rgb = cv2.cvtColor(centers_lab, cv2.COLOR_LAB2RGB).reshape(k, 3)
+        
+        # Convert back to image shape
+        height, width = img.shape[:2]
+        labels_img = labels.reshape((height, width))
+        
+        masks = []
+        mask_colors = []
+        total_area = height * width
+        
+        for i in range(k):
+            # Create binary mask for this cluster
+            # labels_img is (H, W), mask is boolean
+            cluster_mask = (labels_img == i).astype(np.uint8) * 255
+            color = centers_rgb[i].tolist() # [R, G, B]
+            
+            if merge_components:
+                # Still filter tiny specks even if merging
+                if np.sum(cluster_mask > 0) < (total_area * min_area_ratio):
+                    continue
+                masks.append(cluster_mask > 0)
+                mask_colors.append(color)
+            else:
+                # Split connected components
+                num_labels, labels_cc, stats, centroids = cv2.connectedComponentsWithStats(cluster_mask, connectivity=8)
+                
+                # label 0 is background (which is 0 in cluster_mask)
+                # We want the foreground components (labels 1..N)
+                
+                for j in range(1, num_labels):
+                    area = stats[j, cv2.CC_STAT_AREA]
+                    # INCREASED filtering: skip small noise
+                    # min_area_ratio default was 0.005 (0.5%).
+                    # For "larger continuous segments", let's use the passed param, 
+                    # but caller should likely increase it.
+                    if area < (total_area * min_area_ratio):
+                        continue
+                        
+                    component_mask = (labels_cc == j)
+                    masks.append(component_mask)
+                    mask_colors.append(color)
+        
+        # Sort masks by size (area) to ensure smaller contained items (like text) are drawn/labeled AFTER/ON TOP of larger backgrounds
+        # This helps with "W doesn't appear to be labelled" if it was covered by background label?
+        # Actually visualize_masks sorts by size reversed (largest first) to draw small on top.
+        # But for labeling, if centers are close, they might overlap.
+        
+        t1 = time.time()
+        print(f"[AttentionExtractor] Color segmentation (k={k}) took {t1 - t0:.2f}s, found {len(masks)} masks", file=sys.stderr)
+        
+        return {"masks": masks, "colors": mask_colors}
 
     def segment_with_sam2(
         self,
         image_path: str,
         input_boxes: Optional[List[List[float]]] = None,
         input_points: Optional[List[List[float]]] = None,
+        input_labels: Optional[List[int]] = None,
         points_per_side: Optional[int] = None,
         score_threshold: float = 0.0,
+        group_points: bool = False,
     ) -> Dict[str, Any]:
         """
         Segment objects using SAM 2.
@@ -508,6 +631,52 @@ class AttentionExtractor:
             
             inputs_kwargs["input_boxes"] = [pixel_boxes]
 
+        if input_points:
+            # Handle input_points directly
+            # Shape: (batch_size=1, num_prompts=N, num_points_per_prompt=1, 2)
+            # input_points is List[List[float]] -> [[x, y], [x, y], ...]
+            # We treat each point as a separate prompt.
+            points_np = np.array(input_points) # (N, 2) normalized?
+            
+            # Check if normalized
+            if np.all(points_np <= 1.0):
+                # Scale to pixels
+                points_px = points_np * np.array([width, height])
+            else:
+                # Already pixels
+                points_px = points_np
+                
+            if group_points:
+                # Create a single prompt with all points
+                # Shape: (batch_size=1, num_prompts=1, num_points=N, 2)
+                reshaped_points = points_px.reshape(1, len(points_px), 2)
+                inputs_kwargs["input_points"] = [reshaped_points.tolist()]
+                
+                if input_labels:
+                    labels = np.array(input_labels)
+                    reshaped_labels = labels.reshape(1, len(labels))
+                    inputs_kwargs["input_labels"] = [reshaped_labels.tolist()]
+                else:
+                    # Default all to 1
+                    inputs_kwargs["input_labels"] = [[[1] * len(points_px)]]
+                    
+                print(f"[AttentionExtractor] Using {len(points_px)} input points as SINGLE prompt.", file=sys.stderr)
+            else:
+                # Existing grid behavior (N prompts, 1 point each)
+                reshaped_points = points_px.reshape(len(points_px), 1, 2)
+                inputs_kwargs["input_points"] = [reshaped_points.tolist()]
+                
+                if input_labels:
+                    # Not really supported for separate prompts unless list of lists passed?
+                    # Assuming default 1 for now if not grouped, or repeat labels if len matches?
+                    # The current API expects input_labels as simple list.
+                    # We'll just default to 1 for separate prompts as before.
+                    inputs_kwargs["input_labels"] = [[[1]] * len(points_px)]
+                else:
+                    inputs_kwargs["input_labels"] = [[[1]] * len(points_px)]
+                
+                print(f"[AttentionExtractor] Using {len(points_px)} input points as SEPARATE prompts.", file=sys.stderr)
+
         if not inputs_kwargs:
              # If no prompts provided, generate grid of points for automatic segmentation
              print("[AttentionExtractor] No prompts provided, generating grid of points...", file=sys.stderr)
@@ -528,6 +697,9 @@ class AttentionExtractor:
              inputs_kwargs["input_labels"] = [[[1]] * len(points)]
              
              print(f"[AttentionExtractor] Generated {len(points)} point prompts ({n_points}x{n_points}).", file=sys.stderr)
+             
+             # Keep track of points for debugging/return
+             generated_points = points
 
         try:
             # Clear cache before heavy operation
@@ -579,7 +751,6 @@ class AttentionExtractor:
                 masks = masks > 0.0
 
             scores = outputs.iou_scores.cpu() # (batch, num_boxes, num_masks)
-            best_mask_indices = torch.argmax(scores, dim=2) # (batch, num_boxes)
             
             final_masks = []
             batch_idx = 0 
@@ -587,21 +758,28 @@ class AttentionExtractor:
             num_queries = masks.shape[0]
             
             for i in range(num_queries):
-                if i < best_mask_indices.shape[1]:
-                    best_idx = best_mask_indices[batch_idx, i].item()
+                # Iterate over all 3 masks returned for each prompt (multi-mask output)
+                # SAM 2 usually predicts 3 masks (whole, part, sub-part)
+                # We keep all valid ones to ensure we don't miss small objects
+                # even if the larger container has a higher score.
+                num_masks_per_query = scores.shape[2]
+                
+                for m_idx in range(num_masks_per_query):
+                    score = scores[batch_idx, i, m_idx].item()
                     
-                    if score_threshold > 0:
-                        score = scores[batch_idx, i, best_idx].item()
-                        if score < score_threshold:
-                            continue
-                            
-                    mask = masks[i][best_idx].cpu().numpy() # (H, W) boolean
+                    if score < score_threshold:
+                        continue
+                        
+                    mask = masks[i][m_idx].cpu().numpy() # (H, W) boolean
                     final_masks.append(mask)
 
             t1 = time.time()
             print(f"[AttentionExtractor] SAM 2 segmentation took {t1 - t0:.2f}s", file=sys.stderr)
             
-            return {"masks": final_masks}
+            return {
+                "masks": final_masks,
+                "points": generated_points if 'generated_points' in locals() else None
+            }
 
         except Exception as e:
             print(f"[AttentionExtractor] SAM 2 error: {e}", file=sys.stderr)
@@ -618,9 +796,17 @@ class AttentionExtractor:
         image_path: str,
         object_class: str,
         max_objects: int = 24,
+        box_threshold: Optional[float] = None,
+        text_threshold: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
         """Wrapper for detect() that returns the list of detections directly."""
-        result = self.detect(image_path, object_class, max_objects=max_objects)
+        result = self.detect(
+            image_path, 
+            object_class, 
+            max_objects=max_objects,
+            box_threshold=box_threshold,
+            text_threshold=text_threshold
+        )
         detections = []
         if result and "objects" in result:
             for obj in result["objects"]:
@@ -628,6 +814,7 @@ class AttentionExtractor:
                     {
                         "label": object_class,
                         "bbox": [obj["x_min"], obj["y_min"], obj["x_max"], obj["y_max"]],
+                        "score": obj.get("score", 0.0),
                     }
                 )
         return detections
@@ -772,6 +959,8 @@ class AttentionExtractor:
         masks: List[np.ndarray],
         output_path: str = "masks.png",
         alpha: float = 0.5,
+        draw_ids: bool = False,
+        colors: Optional[List[List[float]]] = None,
     ) -> str:
         """
         Visualize binary masks on top of the image.
@@ -781,8 +970,11 @@ class AttentionExtractor:
             masks: List of binary masks (H, W) or (1, H, W)
             output_path: Where to save the result
             alpha: Transparency of masks (0.0 - 1.0)
+            draw_ids: If True, draw the index number at the center of each mask
+            colors: Optional list of RGB colors [0-255] or [0-1] for each mask.
         """
         import matplotlib.pyplot as plt
+        import matplotlib.patheffects as path_effects
         import random
         
         # Load image
@@ -796,21 +988,29 @@ class AttentionExtractor:
             return [random.random(), random.random(), random.random()]
         
         # Sort masks by area (largest first) so small ones aren't hidden
-        sorted_masks = sorted(masks, key=lambda m: np.sum(m), reverse=True)
-        
-        for mask in sorted_masks:
-            # Debug shape
-            if hasattr(mask, "shape"):
-                 pass # print(f"Processing mask with shape: {mask.shape}")
+        # But if we want IDs to match the original list index, we shouldn't re-sort unless we track indices.
+        # We'll use a list of (index, mask) tuples
+        indexed_masks = []
+        for i, m in enumerate(masks):
+            if len(m.shape) == 3: m = m[0]
+            indexed_masks.append((i, m))
             
+        # Sort for display order (largest area first/bottom)
+        sorted_masks = sorted(indexed_masks, key=lambda x: np.sum(x[1]), reverse=True)
+        
+        for idx, mask in sorted_masks:
             # Ensure mask is 2D
-            if len(mask.shape) == 3:
-                mask = mask[0]
-            elif len(mask.shape) != 2:
-                print(f"[AttentionExtractor] Warning: Skipping mask with invalid shape {mask.shape}", file=sys.stderr)
+            if len(mask.shape) != 2:
                 continue
 
-            color = np.concatenate([get_random_color(), [alpha]])
+            if colors and idx < len(colors):
+                c = np.array(colors[idx])
+                # If color is > 1.0, assume 0-255 scale
+                if np.max(c) > 1.0:
+                    c = c / 255.0
+                color = np.concatenate([c, [alpha]])
+            else:
+                color = np.concatenate([get_random_color(), [alpha]])
             
             # Create colored mask
             h, w = mask.shape
@@ -819,6 +1019,66 @@ class AttentionExtractor:
             
             ax.imshow(mask_image)
             
+            if draw_ids:
+                # Find best position for label (point furthest from edges)
+                # This prevents labels from appearing in holes (e.g. centroid of a "U" shape)
+                # We pad the mask with 0s so that image boundaries are treated as edges
+                # This keeps labels away from the image border.
+                import cv2
+                h_m, w_m = mask.shape
+                padded_mask = np.zeros((h_m + 2, w_m + 2), dtype=np.uint8)
+                padded_mask[1:-1, 1:-1] = mask.astype(np.uint8)
+                
+                dist = cv2.distanceTransform(padded_mask, cv2.DIST_L2, 5)
+                _, max_val, _, max_loc = cv2.minMaxLoc(dist)
+                
+                # Adjust back to original coordinates
+                cx = max_loc[0] - 1
+                cy = max_loc[1] - 1
+                
+                # Clamp just in case
+                cx = max(0, min(w_m - 1, cx))
+                cy = max(0, min(h_m - 1, cy))
+                
+                # Draw text with solid background like overlay.py
+                # 1. Measure text
+                label_text = str(idx)
+                
+                # Heuristic for text size (matplotlib font size 12 is approx 12-14 pixels high)
+                # We want tight padding.
+                font_size = 10
+                padding = 1
+                
+                # Estimate width/height
+                # Width: approx 0.6 * fontsize * num_chars
+                # Height: approx 1.0 * fontsize
+                est_w = max(8, len(label_text) * 0.6 * font_size)
+                est_h = font_size * 1.0
+                
+                box_w = est_w + (padding * 2)
+                box_h = est_h + (padding * 2)
+                
+                x0 = cx - box_w/2
+                y0 = cy - box_h/2
+                
+                # Draw background rectangle
+                rect = plt.Rectangle((x0, y0), box_w, box_h, 
+                                   facecolor='black', 
+                                   edgecolor='none', 
+                                   linewidth=0,
+                                   alpha=0.7,
+                                   zorder=100)
+                ax.add_patch(rect)
+                
+                # Draw text on top
+                txt = ax.text(cx, cy, label_text, 
+                        color='white', 
+                        fontsize=font_size, 
+                        ha='center', 
+                        va='center', 
+                        fontweight='bold',
+                        zorder=101)
+            
         ax.axis("off")
         plt.tight_layout()
         plt.savefig(output_path, dpi=150, bbox_inches="tight")
@@ -826,3 +1086,13 @@ class AttentionExtractor:
         
         print(f"[AttentionExtractor] Saved mask visualization: {output_path}")
         return output_path
+
+    def visualize_masks_simple(self, *args, **kwargs):
+         # Compatibility alias if needed
+         return self.visualize_masks(*args, **kwargs)
+
+    def import_patheffects_helper(self):
+         # Helper to delay import
+         import matplotlib.patheffects as path_effects
+         return path_effects
+

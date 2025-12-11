@@ -38,7 +38,7 @@ from .action_types import (
     WaitAction,
 )
 from .attention import AttentionExtractor
-from .imagePreprocessing import get_grid_bounding_boxes
+from .image_processor import ImageProcessor
 from .overlay import add_drag_overlay, add_overlays_to_image
 from .planner import ActionPlanner
 from .solver import CaptchaSolver, solve_captcha
@@ -50,6 +50,7 @@ __all__ = [
     # Components
     "ActionPlanner",
     "AttentionExtractor",
+    "ImageProcessor",
     # Action Types
     "CaptchaAction",
     "ClickAction",
@@ -59,7 +60,6 @@ __all__ = [
     # Utilities
     "add_overlays_to_image",
     "add_drag_overlay",
-    "get_grid_bounding_boxes",
 ]
 
 __version__ = "0.4.0"

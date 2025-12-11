@@ -5,7 +5,7 @@ import os
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.imagePreprocessing import get_grid_bounding_boxes
+from src.image_processor import ImageProcessor
 from src.overlay import add_overlays_to_image
 
 def test_image(image_path):
@@ -14,7 +14,7 @@ def test_image(image_path):
         print(f"  File not found: {image_path}")
         return
 
-    boxes = get_grid_bounding_boxes(image_path)
+    boxes = ImageProcessor.get_grid_bounding_boxes(image_path)
     
     if boxes:
         print(f"  Success: Found {len(boxes)} boxes")

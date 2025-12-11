@@ -20,7 +20,7 @@ def main():
         epilog="""
 Examples:
   # Basic usage with Ollama (no API key needed)
-  python -m src.cli captcha.png llama3.2-vision ollama
+  python -m src.cli captcha.png qwen3-vl:4b ollama
 
   # Use Gemini
   python -m src.cli captcha.png gemini-2.0-flash-exp gemini your-gemini-key
@@ -29,7 +29,7 @@ Examples:
 
     parser.add_argument("image_path", help="Path to the captcha image")
     parser.add_argument(
-        "model", help="AI model to use for solving ie. gemini-2.0-flash-exp, llama3.2-vision"
+        "model", help="AI model to use for solving ie. gemini-2.0-flash-exp, qwen3-vl:4b"
     )
     parser.add_argument(
         "api_provider",
