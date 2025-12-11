@@ -189,7 +189,19 @@ class CaptchaSolver:
         # Debug: Save base image
         self.debug.save_image(image_path, "00_base_image.png")
 
-        # 1. Check for grid structure
+        # 1. Check for simple checkbox (lightweight)
+        checkbox_box = self.image_processor.detect_checkbox(image_path)
+        if checkbox_box:
+            self.debug.log(f"Detected checkbox at {checkbox_box}")
+            x, y, w, h = checkbox_box
+            # Convert to normalized click action
+            img_w, img_h = self._image_size
+            return ClickAction(
+                action="click",
+                target_bounding_box=[x / img_w, y / img_h, (x + w) / img_w, (y + h) / img_h],
+            )
+
+        # 2. Check for grid structure
         grid_boxes = self.image_processor.get_grid_bounding_boxes(image_path)
         if grid_boxes:
             self.debug.log(f"Detected grid with {len(grid_boxes)} cells")
