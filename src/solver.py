@@ -36,6 +36,7 @@ from .action_types import (
 from .attention import AttentionExtractor
 from .overlay import add_drag_overlay, add_overlays_to_image
 from .planner import ActionPlanner
+from .grid_planner import GridPlanner
 from .image_processor import ImageProcessor
 
 # Debug flag - set via CAPTCHA_DEBUG=1 environment variable
@@ -142,6 +143,7 @@ class CaptchaSolver:
         planner_kwargs["debug_callback"] = self.debug.log
 
         self.planner = ActionPlanner(**planner_kwargs)  # type: ignore[arg-type]
+        self.grid_planner = GridPlanner(**planner_kwargs)
 
         # Setup attention extractor (GroundingDINO + CLIP + FastSAM for detect/point)
         self.attention = AttentionExtractor(
@@ -251,7 +253,7 @@ class CaptchaSolver:
             self.debug.save_image(overlay_path, "01_grid_overlay.png")
 
             # Ask planner which squares to select
-            selected_numbers, should_wait = self.planner.get_grid_selection(instruction, overlay_path, rows=rows, cols=cols)
+            selected_numbers, should_wait = self.grid_planner.get_grid_selection(instruction, overlay_path, rows=rows, cols=cols)
 
             # --- HARD FILTER: Detect already selected cells via Computer Vision ---
             # This is a fail-safe because the model sometimes misses checkmarks in the image
