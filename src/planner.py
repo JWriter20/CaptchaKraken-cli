@@ -43,6 +43,7 @@ TASK: First analyze, then select. Think step by step:
 3. What type of thing should you be looking for?
 4. Look at EACH numbered cell carefully - what does it contain?
    - NOTE: If any cell is BLANK, SOLID WHITE, FADING IN, or shows a LOADING SPINNER, mark it as "loading".
+   - NOTE: Check if the cell is ALREADY SELECTED (has a checkmark, is smaller/padded, or has a blue/grey border).
 5. Which cells match the criteria?
    - If NO cells match the criteria, that is perfectly fine. Simply return an empty list for "selected_numbers". Do NOT guess.
 
@@ -53,14 +54,17 @@ Respond with JSON. CRITICAL: Fill in the reasoning fields FIRST, then select num
   "looking_for": "what type of object/creature/thing to select (e.g., 'birds - creatures that hatch from eggs')",
   "cell_contents": {{
     "1": "elephant",
-    "2": "parrots (birds)",
+    "2": "parrots (birds) - CHECKED",
     "3": "pigeons (birds)",
     "4": "white/blank (loading)"
   }},
   "loading_cells": [4],
-  "selected_numbers": [2, 3],
-  "reasoning": "Selected cells containing birds because birds hatch from eggs like in the reference. Cell 4 is loading, but since we found valid birds (2, 3), we select them first. If no valid options existed, we would wait."
-}}"""
+  "already_selected": [2],
+  "selected_numbers": [3],
+  "reasoning": "Selected cells containing birds. Cell 2 is a bird but is ALREADY CHECKED, so we skip it. Cell 3 is a bird and unchecked, so we select it. Cell 4 is loading. We do not re-select 2 because it is already done."
+}}
+
+CRITICAL: Do NOT include numbers in 'selected_numbers' if they are already selected/checked. Only include NEW selections."""
 
 
 # For general planning with tool support
