@@ -13,7 +13,7 @@ Backends: ollama, gemini
 import json
 import os
 import sys
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 # Debug flag - set via CAPTCHA_DEBUG=1 environment variable
 DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
