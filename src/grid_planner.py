@@ -19,6 +19,7 @@ Instruction: "{instruction}"
 
 2. Evaluate each cell (1-{total}):
    - Describe the visual content.
+   - CHECK: Is there a checkmark overlay? (usually blue/white in the center). If YES, this cell is LOADING.
    - CHECK: Is the Core Target visible? (Even a small edge/corner counts).
    - CHECK: Is it a structural continuation of the Core Target? (e.g. base, roof, top edge).
    - CHECK: Is it ONLY an Associated Item? (e.g. only a pole, only a railing, only a road).
@@ -28,16 +29,17 @@ Instruction: "{instruction}"
    - Select ALL cells containing the Core Target OR structural continuations.
    - For 4x4: Be precise but inclusive of edges. 
    - STRICTLY REJECT: Cells containing ONLY associated items (poles, railings, roads, sky).
+   - STRICTLY REJECT: Cells that have a checkmark overlay (add these to "loading_cells").
 
 Respond JSON ONLY:
 {{
   "analysis": "Core: [Describe], Associated/Excluded: [Describe]",
   "cell_states": {{
-    "1": "Description. Core Visible? [YES/NO]. Associated Only? [YES/NO]. -> [MATCH/NO MATCH]",
+    "1": "Description. Checkmark? [YES/NO]. Core Visible? [YES/NO]. Associated Only? [YES/NO]. -> [MATCH/NO MATCH/LOADING]",
     ...
   }},
-  "loading_cells": [],
-  "selected_numbers": [2, 3]
+  "loading_cells": [list of cells with checkmarks],
+  "selected_numbers": [list of cells to click]
 }}"""
 
 class GridPlanner(ActionPlanner):
