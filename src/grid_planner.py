@@ -79,6 +79,27 @@ class GridPlanner(ActionPlanner):
 
         selected = result.get("selected_numbers", [])
         loading_cells = result.get("loading_cells", [])
+        cell_states = result.get("cell_states", {})
+
+        # Filter out cells that the model analysis identified as already selected
+        # This fixes cases where the model correctly identifies "ALREADY SELECTED" in analysis
+        # but fails to exclude it from the final list.
+        filtered_selected = []
+        for num in selected:
+            state_desc = cell_states.get(str(num), "")
+            
+            # Check for indicators of selection in the analysis text
+            is_already_selected = (
+                "ALREADY SELECTED" in state_desc or 
+                "Checkmark? SELECTED" in state_desc
+            )
+            
+            if is_already_selected:
+                self._log(f"Filtering cell {num} because analysis identified it as ALREADY SELECTED.")
+            else:
+                filtered_selected.append(num)
+        
+        selected = filtered_selected
 
         # Log reasoning
         self._log(f"Analysis: {result.get('analysis', 'N/A')}")

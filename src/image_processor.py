@@ -291,9 +291,9 @@ class ImageProcessor:
         loading_indices = []
 
         # Color ranges
-        # ReCaptcha Blue
-        lower_blue = np.array([95, 60, 60])
-        upper_blue = np.array([130, 255, 255])
+        # ReCaptcha Blue - Tuned tightly for rgb(27, 115, 232) -> hsv(107, 225, 232)
+        lower_blue = np.array([100, 150, 150])
+        upper_blue = np.array([115, 255, 255])
         # hCaptcha Green
         lower_green = np.array([35, 50, 50])
         upper_green = np.array([85, 255, 255]) 
@@ -318,18 +318,26 @@ class ImageProcessor:
             if tl_roi_hsv.size > 0:
                 # Blue Badge
                 mask_blue = cv2.inRange(tl_roi_hsv, lower_blue, upper_blue)
-                if cv2.countNonZero(mask_blue) > (tl_w * tl_h) * 0.05:
+                blue_count = cv2.countNonZero(mask_blue)
+                threshold = (tl_w * tl_h) * 0.03
+                
+                if blue_count > threshold:
                     if self._check_contours_for_badge(mask_blue, tl_bgr):
                         is_selected = True
                         if self.debug: self.debug.log(f"Cell {i+1}: Detected Blue Selection Badge")
+                    elif self.debug:
+                        self.debug.log(f"Cell {i+1}: Blue pixels found ({blue_count} > {threshold:.1f}) but badge check failed.")
 
                 # Green Badge
                 if not is_selected:
                     mask_green = cv2.inRange(tl_roi_hsv, lower_green, upper_green)
-                    if cv2.countNonZero(mask_green) > (tl_w * tl_h) * 0.05:
+                    green_count = cv2.countNonZero(mask_green)
+                    if green_count > threshold:
                         if self._check_contours_for_badge(mask_green, tl_bgr):
                             is_selected = True
                             if self.debug: self.debug.log(f"Cell {i+1}: Detected Green Selection Badge")
+                        elif self.debug:
+                            self.debug.log(f"Cell {i+1}: Green pixels found ({green_count} > {threshold:.1f}) but badge check failed.")
             
             if is_selected:
                 selected_indices.append(i + 1)
@@ -407,14 +415,28 @@ class ImageProcessor:
             
         circularity = 4 * np.pi * area / (perimeter * perimeter)
         
-        # Check for white checkmark inside
-        colored_parts = cv2.bitwise_and(roi_bgr, roi_bgr, mask=mask)
-        gray = cv2.cvtColor(colored_parts, cv2.COLOR_BGR2GRAY)
-        _, white_mask = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+        # Check for white checkmark INSIDE the badge bounding box
+        # The mask only captures the blue/green part, excluding the white checkmark (saturation=0)
+        x, y, w, h = cv2.boundingRect(max_cnt)
+        
+        # Extract the region corresponding to the badge from the ROI
+        badge_roi = roi_bgr[y:y+h, x:x+w]
+        
+        if badge_roi.size == 0:
+            return False
+
+        badge_gray = cv2.cvtColor(badge_roi, cv2.COLOR_BGR2GRAY)
+        # Check for bright pixels (white checkmark)
+        _, white_mask = cv2.threshold(badge_gray, 150, 255, cv2.THRESH_BINARY)
         white_pixels = cv2.countNonZero(white_mask)
         
         # Criteria: High circularity (badge shape) AND contains white pixels (checkmark)
-        return circularity > 0.80 and white_pixels > 5
+        # Relaxed circularity > 0.50 (was 0.80) to handle small/pixelated badges
+        # Relaxed white_pixels > 2 (was 5)
+        passed = circularity > 0.50 and white_pixels > 2
+        if not passed and hasattr(self, 'debug') and self.debug:
+             self.debug.log(f"Badge check failed: Circ={circularity:.2f}, WhitePx={white_pixels}")
+        return passed
 
     @staticmethod
     def detect_checkbox(image_path: str) -> Optional[Tuple[int, int, int, int]]:
