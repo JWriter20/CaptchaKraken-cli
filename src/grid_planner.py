@@ -39,7 +39,7 @@ Respond JSON ONLY:
     ...
   }},
   "loading_cells": [list of cells with checkmarks],
-  "selected_numbers": [list of cells to click]
+  "selected_numbers": [list of integers representing cells to click]
 }}"""
 
 class GridPlanner(ActionPlanner):

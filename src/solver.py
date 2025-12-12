@@ -282,7 +282,12 @@ class CaptchaSolver:
             assert self._image_size is not None
             img_w, img_h = self._image_size
             for num in selected_numbers:
-                idx = num - 1
+                try:
+                    idx = int(num) - 1
+                except (ValueError, TypeError):
+                    self.debug.log(f"Skipping invalid selection: {num}")
+                    continue
+
                 if 0 <= idx < len(grid_boxes):
                     x1, y1, x2, y2 = grid_boxes[idx]
 
