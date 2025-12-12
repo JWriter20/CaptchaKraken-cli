@@ -430,7 +430,7 @@ class ImageProcessor:
 
         badge_gray = cv2.cvtColor(badge_roi, cv2.COLOR_BGR2GRAY)
         # Check for bright pixels (white checkmark)
-        _, white_mask = cv2.threshold(badge_gray, 150, 255, cv2.THRESH_BINARY)
+        _, white_mask = cv2.threshold(badge_gray, 200, 255, cv2.THRESH_BINARY)
         white_pixels = cv2.countNonZero(white_mask)
         
         # Criteria: High circularity (badge shape) AND contains white pixels (checkmark)
@@ -440,25 +440,39 @@ class ImageProcessor:
         passed = circularity > 0.85 and white_pixels > 2
         
         # Additional Check: Pixel purity
-        # Ensure the badge area is mostly blue/white.
-        # We can check the mask coverage vs bounding rect.
-        # A circle fills pi/4 (approx 0.785) of a square.
-        # If it's a solid circle, extent should be high.
-        
         if passed:
              # Check if the content inside the contour is mostly the badge color + white checkmark
-             # Extract ROI of the contour
-             mask_roi = mask[y:y+h, x:x+w]
-             # Count non-zero in mask (blue pixels)
-             blue_px = cv2.countNonZero(mask_roi)
-             # Total pixels in rect
-             total_px = w * h
-             # Verify it's not just a thin ring or noise
-             if blue_px / total_px < 0.5: # Badge should be solid
-                  passed = False
-                  if hasattr(self, 'debug') and self.debug:
-                       self.debug.log(f"Badge check failed: Low density ({blue_px/total_px:.2f})")
-
+             
+             # Create a mask for the contour itself to check only pixels INSIDE the circle
+             # We need to offset the contour to the bounding rect frame
+             contour_mask = np.zeros((h, w), dtype=np.uint8)
+             shifted_cnt = max_cnt - np.array([x, y])
+             cv2.drawContours(contour_mask, [shifted_cnt], -1, 255, cv2.FILLED)
+             
+             # Pixels inside the contour
+             pixels_in_contour = cv2.countNonZero(contour_mask)
+             
+             if pixels_in_contour > 0:
+                 # Get the color mask (blue/green) in this ROI
+                 color_mask_roi = mask[y:y+h, x:x+w]
+                 
+                 # Combine color mask and white mask
+                 # valid_pixels are those that are either the badge color (blue/green) OR white (checkmark)
+                 valid_pixels_mask = cv2.bitwise_or(color_mask_roi, white_mask)
+                 
+                 # Intersection: Valid pixels INSIDE the contour
+                 valid_inside = cv2.bitwise_and(valid_pixels_mask, valid_pixels_mask, mask=contour_mask)
+                 valid_count = cv2.countNonZero(valid_inside)
+                 
+                 # Ratio of valid pixels to total contour area
+                 purity_ratio = valid_count / pixels_in_contour
+                 
+                 # Strict purity check (>0.90 allows for slight anti-aliasing edges)
+                 if purity_ratio < 0.90:
+                      passed = False
+                      if hasattr(self, 'debug') and self.debug:
+                           self.debug.log(f"Badge check failed: Impure colors inside badge ({purity_ratio:.2f} < 0.90)")
+        
         if not passed and hasattr(self, 'debug') and self.debug:
              self.debug.log(f"Badge check failed: Circ={circularity:.2f}, WhitePx={white_pixels}")
         return passed

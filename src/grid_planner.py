@@ -16,6 +16,7 @@ Instruction: "{instruction}"
 1. Deconstruct the Instruction:
    - Identify the "Core Target" (e.g. for "buses", core = vehicle body/wheels/roof; for "traffic lights", core = the HEAD/HOUSING containing the lights).
    - Identify "Associated Items" to EXCLUDE (e.g. for "buses", exclude road/asphalt; for "traffic lights", exclude the POLE/SUPPORT structure if it extends away from the light housing).
+   - EXCLUDE RIDERS/OPERATORS: If the target is a vehicle/object, EXCLUDE any person operating or riding it (riders, drivers, passengers). The person is NOT part of the object.
 
 2. Evaluate each cell (1-{total}):
    - Describe the visual content.
@@ -24,13 +25,13 @@ Instruction: "{instruction}"
      * SELECTED: Small blue checkmark in the TOP-LEFT corner of the cell.
    - CHECK: Is the Core Target visible? (Even a small edge/corner counts).
    - CHECK: Is it a structural continuation of the Core Target? (e.g. vehicle body, roof, traffic light housing). NOTE: Poles are associated items, NOT continuations.
-   - CHECK: Is it ONLY an Associated Item? (e.g. only a pole, only a railing, only a road).
-   - CONSTRAINT: If it is ONLY an Associated Item, do NOT select it.
+   - CHECK: Is it ONLY an Associated Item or Rider? (e.g. only a pole, only a railing, only a road, only a rider's body/helmet without the vehicle part).
+   - CONSTRAINT: If it is ONLY an Associated Item or Rider, do NOT select it.
 
 3. Final Selection:
    - Select ALL cells containing the Core Target OR structural continuations (e.g. vehicle parts, traffic light housing parts).
    - For 4x4: Be precise but inclusive of edges. 
-   - STRICTLY REJECT: Cells containing ONLY associated items (e.g. poles with no lights, railings, roads, sky).
+   - STRICTLY REJECT: Cells containing ONLY associated items (e.g. poles with no lights, railings, roads, sky) or ONLY riders/people.
    - LOADING CELLS: Only add cells to "loading_cells" if they match the LOADING state (Center overlay or Blank).
    - IGNORE SELECTED: If a cell is ALREADY SELECTED (Top-Left checkmark), do NOT add to "selected_numbers" and do NOT add to "loading_cells".
 
