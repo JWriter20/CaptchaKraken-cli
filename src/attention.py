@@ -189,6 +189,11 @@ class AttentionExtractor:
              if hasattr(torch.mps, "empty_cache"):
                  torch.mps.empty_cache()
 
+    def load_models(self):
+        """Eagerly load all models (GroundingDINO and SAM 2)."""
+        self._load_grounding_dino()
+        self._load_sam2()
+
     def detectInteractable(
         self,
         image_path: str,

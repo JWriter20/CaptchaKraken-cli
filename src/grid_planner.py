@@ -38,7 +38,7 @@ class GridPlanner(ActionPlanner):
     Specialized planner for grid selection tasks.
     """
 
-    def get_grid_selection(self, instruction: str, image_path: str, rows: int, cols: int) -> Tuple[List[int], bool]:
+    def get_grid_selection(self, instruction: str = "Solve the captcha by selecting the correct images, DO NOT click on cells you are not sure about", image_path: str, rows: int, cols: int) -> Tuple[List[int], bool]:
         """
         Ask which numbers to select in the grid.
         """

@@ -14,6 +14,40 @@ from src.solver import CaptchaSolver
 
 
 def main():
+    # Handle start-tool-server command
+    if len(sys.argv) > 1 and sys.argv[1] == "start-tool-server":
+        from src.server import start_tool_server
+        port = 8000
+        if len(sys.argv) > 2:
+            try:
+                port = int(sys.argv[2])
+            except ValueError:
+                print(f"Invalid port '{sys.argv[2]}', using default 8000", file=sys.stderr)
+        start_tool_server(port)
+        return
+
+    # Handle stop-tool-server command
+    if len(sys.argv) > 1 and sys.argv[1] == "stop-tool-server":
+        import urllib.request
+        port = 8000
+        if len(sys.argv) > 2:
+            try:
+                port = int(sys.argv[2])
+            except ValueError:
+                print(f"Invalid port '{sys.argv[2]}', using default 8000", file=sys.stderr)
+        
+        try:
+            req = urllib.request.Request(f"http://localhost:{port}/shutdown", method="POST")
+            with urllib.request.urlopen(req) as response:
+                if response.status == 200:
+                    print("Server shutdown request sent successfully.", file=sys.stderr)
+                else:
+                    print(f"Server returned status {response.status}", file=sys.stderr)
+        except Exception as e:
+            print(f"Failed to stop server: {e}", file=sys.stderr)
+            print("Is the server running?", file=sys.stderr)
+        return
+
     parser = argparse.ArgumentParser(
         description="CaptchaKraken - AI-powered captcha solver",
         formatter_class=argparse.RawDescriptionHelpFormatter,
