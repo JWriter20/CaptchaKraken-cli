@@ -14,21 +14,21 @@ Instruction: "{instruction}"
 {grid_hint}
 
 1. Deconstruct the Instruction:
-   - Identify the "Core Target" (e.g. for "buses", core = vehicle body/wheels; for "traffic lights", core = light fixtures).
-   - Identify "Associated Items" to EXCLUDE (e.g. for "buses", exclude road/asphalt; for "traffic lights", exclude poles/wires unless holding a light).
+   - Identify the "Core Target" (e.g. for "buses", core = vehicle body/wheels/roof; for "traffic lights", core = the HEAD/HOUSING containing the lights).
+   - Identify "Associated Items" to EXCLUDE (e.g. for "buses", exclude road/asphalt; for "traffic lights", exclude the POLE/SUPPORT structure if it extends away from the light housing).
 
 2. Evaluate each cell (1-{total}):
    - Describe the visual content.
    - CHECK: Is there a checkmark overlay? (usually blue/white in the center). If YES, this cell is LOADING.
    - CHECK: Is the Core Target visible? (Even a small edge/corner counts).
-   - CHECK: Is it a structural continuation of the Core Target? (e.g. base, roof, top edge).
+   - CHECK: Is it a structural continuation of the Core Target? (e.g. vehicle body, roof, traffic light housing). NOTE: Poles are associated items, NOT continuations.
    - CHECK: Is it ONLY an Associated Item? (e.g. only a pole, only a railing, only a road).
    - CONSTRAINT: If it is ONLY an Associated Item, do NOT select it.
 
 3. Final Selection:
-   - Select ALL cells containing the Core Target OR structural continuations.
+   - Select ALL cells containing the Core Target OR structural continuations (e.g. vehicle parts, traffic light housing parts).
    - For 4x4: Be precise but inclusive of edges. 
-   - STRICTLY REJECT: Cells containing ONLY associated items (poles, railings, roads, sky).
+   - STRICTLY REJECT: Cells containing ONLY associated items (e.g. poles with no lights, railings, roads, sky).
    - STRICTLY REJECT: Cells that have a checkmark overlay (add these to "loading_cells").
 
 Respond JSON ONLY:
