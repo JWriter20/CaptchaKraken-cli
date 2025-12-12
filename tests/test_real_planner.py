@@ -15,6 +15,7 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
 from src.planner import ActionPlanner
+from src.grid_planner import GridPlanner
 from src.overlay import add_overlays_to_image
 from src.imagePreprocessing import get_grid_bounding_boxes
 
@@ -125,7 +126,8 @@ class TestGridSelection:
         n = len(grid_boxes)
         rows = cols = int(n ** 0.5)
         
-        selected = planner.get_grid_selection(instruction, overlay_path, rows=rows, cols=cols)
+        grid_planner = GridPlanner(backend=planner.backend, gemini_api_key=planner.gemini_api_key)
+        selected, _ = grid_planner.get_grid_selection(overlay_path, rows=rows, cols=cols, instruction=instruction)
         print(f"  Selected numbers: {selected}")
         
         # Basic validation

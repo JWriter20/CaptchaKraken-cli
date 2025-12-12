@@ -253,7 +253,7 @@ class CaptchaSolver:
             self.debug.save_image(overlay_path, "01_grid_overlay.png")
 
             # Ask planner which squares to select
-            selected_numbers, should_wait = self.grid_planner.get_grid_selection(instruction, overlay_path, rows=rows, cols=cols)
+            selected_numbers, should_wait = self.grid_planner.get_grid_selection(overlay_path, rows=rows, cols=cols, instruction=instruction)
 
             # --- HARD FILTER: Detect already selected cells via Computer Vision ---
             # This is a fail-safe because the model sometimes misses checkmarks in the image
