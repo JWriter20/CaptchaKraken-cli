@@ -333,12 +333,14 @@ class ImageProcessor:
                         # Check for white checkmark inside the blue badge
                         blue_parts = cv2.bitwise_and(roi_bgr, roi_bgr, mask=mask_blue)
                         gray_blue = cv2.cvtColor(blue_parts, cv2.COLOR_BGR2GRAY)
-                        # Relaxed threshold for white checkmark (was 200)
-                        _, white_mask = cv2.threshold(gray_blue, 180, 255, cv2.THRESH_BINARY)
+                        # White checkmark is very bright (usually pure white)
+                        _, white_mask = cv2.threshold(gray_blue, 200, 255, cv2.THRESH_BINARY)
                         white_pixels = cv2.countNonZero(white_mask)
                         
-                        # Relaxed circularity (was 0.5) and pixel count
-                        if circularity > 0.4 and white_pixels > 3: 
+                        # Requirement: High circularity AND contains white pixels (checkmark)
+                        # Tightened constraints: Circularity > 0.85 (very circle-like), White Pixels > 8
+                        # Note: Measured actuals are ~0.89. 0.85 is safe margin.
+                        if circularity > 0.85 and white_pixels > 8: 
                             is_blue_selected = True
                             if self.debug:
                                 self.debug.log(f"Cell {i+1}: Blue selected (Circ={circularity:.2f}, WhitePx={white_pixels})")
@@ -349,6 +351,7 @@ class ImageProcessor:
             
             is_green_selected = False
             if green_pixels > total_pixels * 0.05:
+                # Refine with shape analysis for Green (hCaptcha Badge)
                 contours, _ = cv2.findContours(mask_green, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 if contours:
                     max_cnt = max(contours, key=cv2.contourArea)
@@ -357,12 +360,14 @@ class ImageProcessor:
                     if perimeter > 0:
                         circularity = 4 * np.pi * area / (perimeter * perimeter)
                         
+                        # Check for white checkmark inside the green badge
                         green_parts = cv2.bitwise_and(roi_bgr, roi_bgr, mask=mask_green)
                         gray_green = cv2.cvtColor(green_parts, cv2.COLOR_BGR2GRAY)
-                        _, white_mask = cv2.threshold(gray_green, 180, 255, cv2.THRESH_BINARY)
+                        _, white_mask = cv2.threshold(gray_green, 200, 255, cv2.THRESH_BINARY)
                         white_pixels = cv2.countNonZero(white_mask)
                         
-                        if circularity > 0.4 and white_pixels > 3:
+                        # Tightened constraints for Green as well
+                        if circularity > 0.85 and white_pixels > 8:
                             is_green_selected = True
                             if self.debug:
                                 self.debug.log(f"Cell {i+1}: Green selected (Circ={circularity:.2f}, WhitePx={white_pixels})")
