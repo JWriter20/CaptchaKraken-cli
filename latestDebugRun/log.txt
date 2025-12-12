@@ -1,144 +1,239 @@
-Debug Run Started: 2025-12-11 17:59:43.070836
-[17:59:44] Saved image: 00_base_image.png
-[17:59:44] Detected grid with 16 cells
-[17:59:44] _solve_grid called with 16 cells (4x4)
-[17:59:44] Instruction passed to planner: 'Select all squares with buses'
-[17:59:44] Saved image: 01_grid_overlay.png
-[17:59:44] [Planner] GridPlanner.get_grid_selection called
-[17:59:44] [Planner]   instruction: 'Select all squares with buses'
-[17:59:44] [Planner]   grid: 4x4
-[17:59:44] [Planner] Backend: gemini, Model: gemini-2.5-flash-lite
-[17:59:44] [Planner] Image path: /var/folders/ng/5tmjc39175x3ln3b019pvyrh0000gn/T/tmp2v361zu7.png
-[17:59:44] [Planner] === PROMPT START ===
+Debug Run Started: 2025-12-11 21:02:32.892061
+[21:02:33] Saved image: 00_base_image.png
+[21:02:33] Detected grid with 16 cells
+[21:02:33] _solve_grid called with 16 cells (4x4)
+[21:02:33] Instruction passed to planner: 'Select all squares with buses'
+[21:02:33] Saved image: 01_grid_overlay.png
+[21:02:33] [Planner] GridPlanner.get_grid_selection called
+[21:02:33] [Planner]   instruction: 'Select all squares with buses'
+[21:02:33] [Planner]   grid: 4x4
+[21:02:33] [Planner] Backend: gemini, Model: gemini-2.5-flash-lite
+[21:02:33] [Planner] Image path: /var/folders/ng/5tmjc39175x3ln3b019pvyrh0000gn/T/tmp15uxriig.png
+[21:02:33] [Planner] === PROMPT START ===
 You are a captcha solver.
 Task: Select cells in the 4x4 grid (1-16) that match the instruction.
 
 Instruction: "Select all squares with buses"
 Hint: Single large image split into tiles. Select ALL parts.
 
-1. Analyze the instruction.
-2. For each cell (1-16), determine:
-   - Content: What is visible?
-   - Status: Does it have a VISIBLE CHECKMARK? (If yes, mark as 'checked', else 'unchecked')
-   - Match: Does it contain ANY PART of the target object? (Even small edges/slivers count for 4x4)
+1. Deconstruct the Instruction:
+   - Identify the "Core Target" (e.g. for "buses", core = vehicle body/wheels; for "traffic lights", core = light fixtures).
+   - Identify "Associated Items" to EXCLUDE (e.g. for "buses", exclude road/asphalt; for "traffic lights", exclude poles/wires unless holding a light).
 
-3. Return the list of cells that MATCH the instruction but are currently UNCHECKED.
-   - For 4x4 (single large image): Include cells with ANY part of the object. If a matching object touches a cell border, SELECT THE NEIGHBORING CELL too if it contains any continuation.
-   - For 3x3 (separate images): Include only clear matches.
+2. Evaluate each cell (1-16):
+   - Describe the visual content.
+   - CHECK: Is the Core Target visible? (Even a small edge/corner counts).
+   - CHECK: Is it a structural continuation of the Core Target? (e.g. base, roof, top edge).
+   - CHECK: Is it ONLY an Associated Item? (e.g. only a pole, only a railing, only a road).
+   - CONSTRAINT: If it is ONLY an Associated Item, do NOT select it.
+
+3. Final Selection:
+   - Select ALL cells containing the Core Target OR structural continuations.
+   - For 4x4: Be precise but inclusive of edges. 
+   - STRICTLY REJECT: Cells containing ONLY associated items (poles, railings, roads, sky).
 
 Respond JSON ONLY:
 {
-  "instruction_analysis": "what to find",
+  "analysis": "Core: [Describe], Associated/Excluded: [Describe]",
   "cell_states": {
-    "1": "content description - checked/unchecked",
+    "1": "Description. Core Visible? [YES/NO]. Associated Only? [YES/NO]. -> [MATCH/NO MATCH]",
     ...
   },
   "loading_cells": [],
-  "already_selected": [1], // Cells that HAVE VISIBLE CHECKMARKS
-  "selected_numbers": [2, 3] // Cells that MATCH but are UNCHECKED
+  "selected_numbers": [2, 3]
 }
 === PROMPT END ===
-[17:59:46] [Planner] === RAW RESPONSE ===
+[21:02:36] [Planner] === RAW RESPONSE ===
 {
-  "instruction_analysis": "Select all squares with buses.",
+  "analysis": "Core: Bus body, wheels. Associated/Excluded: Road, buildings, sky, streetlights, cars, yellow taxi.",
   "cell_states": {
-    "1": "Sky and buildings - unchecked",
-    "2": "Street light and sky - unchecked",
-    "3": "Buildings and sky - unchecked",
-    "4": "Buildings and sky - unchecked",
-    "5": "Buildings and road - unchecked",
-    "6": "Bus (rear) and road - unchecked",
-    "7": "Road and buildings - unchecked",
-    "8": "Yellow car and road - unchecked",
-    "9": "Road and curb - unchecked",
-    "10": "Bus (rear) - unchecked",
-    "11": "Road and bus side - unchecked",
-    "12": "Road - unchecked",
-    "13": "Curb and road - unchecked",
-    "14": "Road and bus rear - unchecked",
-    "15": "Road - unchecked",
-    "16": "Road - unchecked"
+    "1": "Sky and buildings. Core Visible? NO. Associated Only? YES. -> NO MATCH",
+    "2": "Sky and streetlight. Core Visible? NO. Associated Only? YES. -> NO MATCH",
+    "3": "Sky and buildings. Core Visible? NO. Associated Only? YES. -> NO MATCH",
+    "4": "Buildings and sky. Core Visible? NO. Associated Only? YES. -> NO MATCH",
+    "5": "Buildings and road. Core Visible? NO. Associated Only? YES. -> NO MATCH",
+    "6": "Part of a bus (rear window, lights, roof). Core Visible? YES. Associated Only? NO. -> MATCH",
+    "7": "Part of a bus (rear, roof, side). Core Visible? YES. Associated Only? NO. -> MATCH",
+    "8": "Yellow taxi and road. Core Visible? NO. Associated Only? YES. -> NO MATCH",
+    "9": "Road and curb. Core Visible? NO. Associated Only? YES. -> NO MATCH",
+    "10": "Rear of a bus (lights, license plate, bumper). Core Visible? YES. Associated Only? NO. -> MATCH",
+    "11": "Part of a bus (side, rear). Core Visible? YES. Associated Only? NO. -> MATCH",
+    "12": "Road. Core Visible? NO. Associated Only? YES. -> NO MATCH",
+    "13": "Road and curb. Core Visible? NO. Associated Only? YES. -> NO MATCH",
+    "14": "Road and part of a bus (lower rear). Core Visible? YES. Associated Only? NO. -> MATCH",
+    "15": "Road and part of a bus (lower side). Core Visible? YES. Associated Only? NO. -> MATCH",
+    "16": "Road. Core Visible? NO. Associated Only? YES. -> NO MATCH"
   },
   "loading_cells": [],
-  "already_selected": [],
   "selected_numbers": [
     6,
+    7,
     10,
     11,
-    14
+    14,
+    15
   ]
 }
 === END RESPONSE ===
-[17:59:46] [Planner] Analysis: Select all squares with buses.
-[17:59:46] [Planner] Final selection: [6, 10, 11, 14]
-[17:59:46] Grid selection: [6, 10, 11, 14]
-[17:59:46] Saved image: 00_base_image.png
-[17:59:46] Detected grid with 16 cells
-[17:59:46] _solve_grid called with 16 cells (4x4)
-[17:59:46] Instruction passed to planner: 'Select all squares with motorcycles'
-[17:59:46] Saved image: 01_grid_overlay.png
-[17:59:46] [Planner] GridPlanner.get_grid_selection called
-[17:59:46] [Planner]   instruction: 'Select all squares with motorcycles'
-[17:59:46] [Planner]   grid: 4x4
-[17:59:46] [Planner] Backend: gemini, Model: gemini-2.5-flash-lite
-[17:59:46] [Planner] Image path: /var/folders/ng/5tmjc39175x3ln3b019pvyrh0000gn/T/tmp2b7p7539.png
-[17:59:46] [Planner] === PROMPT START ===
+[21:02:36] [Planner] Analysis: Core: Bus body, wheels. Associated/Excluded: Road, buildings, sky, streetlights, cars, yellow taxi.
+[21:02:36] [Planner] Final selection: [6, 7, 10, 11, 14, 15]
+[21:02:36] Grid selection: [6, 7, 10, 11, 14, 15]
+[21:02:36] Saved image: 00_base_image.png
+[21:02:36] Detected grid with 16 cells
+[21:02:36] _solve_grid called with 16 cells (4x4)
+[21:02:36] Instruction passed to planner: 'Select all squares with motorcycles'
+[21:02:36] Saved image: 01_grid_overlay.png
+[21:02:36] [Planner] GridPlanner.get_grid_selection called
+[21:02:36] [Planner]   instruction: 'Select all squares with motorcycles'
+[21:02:36] [Planner]   grid: 4x4
+[21:02:36] [Planner] Backend: gemini, Model: gemini-2.5-flash-lite
+[21:02:36] [Planner] Image path: /var/folders/ng/5tmjc39175x3ln3b019pvyrh0000gn/T/tmpg3qbtsnx.png
+[21:02:36] [Planner] === PROMPT START ===
 You are a captcha solver.
 Task: Select cells in the 4x4 grid (1-16) that match the instruction.
 
 Instruction: "Select all squares with motorcycles"
 Hint: Single large image split into tiles. Select ALL parts.
 
-1. Analyze the instruction.
-2. For each cell (1-16), determine:
-   - Content: What is visible?
-   - Status: Does it have a VISIBLE CHECKMARK? (If yes, mark as 'checked', else 'unchecked')
-   - Match: Does it contain ANY PART of the target object? (Even small edges/slivers count for 4x4)
+1. Deconstruct the Instruction:
+   - Identify the "Core Target" (e.g. for "buses", core = vehicle body/wheels; for "traffic lights", core = light fixtures).
+   - Identify "Associated Items" to EXCLUDE (e.g. for "buses", exclude road/asphalt; for "traffic lights", exclude poles/wires unless holding a light).
 
-3. Return the list of cells that MATCH the instruction but are currently UNCHECKED.
-   - For 4x4 (single large image): Include cells with ANY part of the object. If a matching object touches a cell border, SELECT THE NEIGHBORING CELL too if it contains any continuation.
-   - For 3x3 (separate images): Include only clear matches.
+2. Evaluate each cell (1-16):
+   - Describe the visual content.
+   - CHECK: Is the Core Target visible? (Even a small edge/corner counts).
+   - CHECK: Is it a structural continuation of the Core Target? (e.g. base, roof, top edge).
+   - CHECK: Is it ONLY an Associated Item? (e.g. only a pole, only a railing, only a road).
+   - CONSTRAINT: If it is ONLY an Associated Item, do NOT select it.
+
+3. Final Selection:
+   - Select ALL cells containing the Core Target OR structural continuations.
+   - For 4x4: Be precise but inclusive of edges. 
+   - STRICTLY REJECT: Cells containing ONLY associated items (poles, railings, roads, sky).
 
 Respond JSON ONLY:
 {
-  "instruction_analysis": "what to find",
+  "analysis": "Core: [Describe], Associated/Excluded: [Describe]",
   "cell_states": {
-    "1": "content description - checked/unchecked",
+    "1": "Description. Core Visible? [YES/NO]. Associated Only? [YES/NO]. -> [MATCH/NO MATCH]",
     ...
   },
   "loading_cells": [],
-  "already_selected": [1], // Cells that HAVE VISIBLE CHECKMARKS
-  "selected_numbers": [2, 3] // Cells that MATCH but are UNCHECKED
+  "selected_numbers": [2, 3]
 }
 === PROMPT END ===
-[17:59:48] [Planner] === RAW RESPONSE ===
+[21:02:38] [Planner] === RAW RESPONSE ===
 {
-  "instruction_analysis": "Select all squares with motorcycles.",
+  "analysis": "Core: Motorcycle (vehicle body, wheels, handlebars). Associated/Excluded: Road, pavement, person's legs/clothing, basket.",
   "cell_states": {
-    "1": "Part of a motorcycle (front wheel, handlebars, rider's leg) - checked",
-    "2": "Front of a motorcycle (handlebars, headlight) - unchecked",
-    "3": "Part of a motorcycle (headlight, front wheel) - unchecked",
-    "4": "Road and some greenery - unchecked",
-    "5": "Part of a motorcycle (rider's leg, body) - unchecked",
-    "6": "Part of a motorcycle (body, basket) - unchecked",
-    "7": "Part of a motorcycle (basket, handlebars) - unchecked",
-    "8": "Road - unchecked",
-    "9": "Part of a motorcycle (exhaust pipe, wheel) - unchecked",
-    "10": "Part of a motorcycle (body, wheel) - unchecked",
-    "11": "Part of a motorcycle (wheel, body) - unchecked",
-    "12": "Road - unchecked",
-    "13": "Road - unchecked",
-    "14": "Road - unchecked",
-    "15": "Road - unchecked",
-    "16": "Road - unchecked"
+    "1": "A person's leg and part of a motorcycle frame. Core Visible? YES. Associated Only? NO. -> MATCH",
+    "2": "Handlebars and front of a motorcycle. Core Visible? YES. Associated Only? NO. -> MATCH",
+    "3": "Front of a motorcycle with headlights and handlebars. Core Visible? YES. Associated Only? NO. -> MATCH",
+    "4": "Road and pavement. Core Visible? NO. Associated Only? YES. -> NO MATCH",
+    "5": "A person's leg and part of a motorcycle frame. Core Visible? YES. Associated Only? NO. -> MATCH",
+    "6": "The body of a motorcycle with a basket. Core Visible? YES. Associated Only? NO. -> MATCH",
+    "7": "Part of a motorcycle basket and frame. Core Visible? YES. Associated Only? NO. -> MATCH",
+    "8": "Road and pavement. Core Visible? NO. Associated Only? YES. -> NO MATCH",
+    "9": "The exhaust pipe and part of the rear wheel of a motorcycle. Core Visible? YES. Associated Only? NO. -> MATCH",
+    "10": "The body and front wheel of a motorcycle. Core Visible? YES. Associated Only? NO. -> MATCH",
+    "11": "The front wheel and part of the body of a motorcycle. Core Visible? YES. Associated Only? NO. -> MATCH",
+    "12": "Road and pavement. Core Visible? NO. Associated Only? YES. -> NO MATCH",
+    "13": "Pavement. Core Visible? NO. Associated Only? YES. -> NO MATCH",
+    "14": "Pavement and part of a motorcycle wheel. Core Visible? YES. Associated Only? NO. -> MATCH",
+    "15": "Pavement and part of a motorcycle wheel. Core Visible? YES. Associated Only? NO. -> MATCH",
+    "16": "Pavement. Core Visible? NO. Associated Only? YES. -> NO MATCH"
   },
   "loading_cells": [],
-  "already_selected": [1],
-  "selected_numbers": [2, 3, 5, 6, 7, 9, 10, 11]
+  "selected_numbers": [
+    1,
+    2,
+    3,
+    5,
+    6,
+    7,
+    9,
+    10,
+    11,
+    14,
+    15
+  ]
 }
 === END RESPONSE ===
-[17:59:48] [Planner] Analysis: Select all squares with motorcycles.
-[17:59:48] [Planner] Final selection: [2, 3, 5, 6, 7, 9, 10, 11]
-[17:59:48] Cell 1: Blue selected (Circ=0.89, WhitePx=16)
-[17:59:48] CV Detected already selected cells: [1]
-[17:59:48] Grid selection: [2, 3, 5, 6, 7, 9, 10, 11]
+[21:02:38] [Planner] Analysis: Core: Motorcycle (vehicle body, wheels, handlebars). Associated/Excluded: Road, pavement, person's legs/clothing, basket.
+[21:02:38] [Planner] Final selection: [1, 2, 3, 5, 6, 7, 9, 10, 11, 14, 15]
+[21:02:38] Cell 1: Blue selected (Circ=0.89, WhitePx=16)
+[21:02:38] CV Detected already selected cells: [1]
+[21:02:38] CV Filter removed 1 items that were already checked.
+[21:02:38] Grid selection: [2, 3, 5, 6, 7, 9, 10, 11, 14, 15]
+[21:02:38] Saved image: 00_base_image.png
+[21:02:38] Detected grid with 16 cells
+[21:02:38] _solve_grid called with 16 cells (4x4)
+[21:02:38] Instruction passed to planner: 'Select all squares with stairs'
+[21:02:38] Saved image: 01_grid_overlay.png
+[21:02:38] [Planner] GridPlanner.get_grid_selection called
+[21:02:38] [Planner]   instruction: 'Select all squares with stairs'
+[21:02:38] [Planner]   grid: 4x4
+[21:02:38] [Planner] Backend: gemini, Model: gemini-2.5-flash-lite
+[21:02:38] [Planner] Image path: /var/folders/ng/5tmjc39175x3ln3b019pvyrh0000gn/T/tmp4fyvlssn.png
+[21:02:38] [Planner] === PROMPT START ===
+You are a captcha solver.
+Task: Select cells in the 4x4 grid (1-16) that match the instruction.
+
+Instruction: "Select all squares with stairs"
+Hint: Single large image split into tiles. Select ALL parts.
+
+1. Deconstruct the Instruction:
+   - Identify the "Core Target" (e.g. for "buses", core = vehicle body/wheels; for "traffic lights", core = light fixtures).
+   - Identify "Associated Items" to EXCLUDE (e.g. for "buses", exclude road/asphalt; for "traffic lights", exclude poles/wires unless holding a light).
+
+2. Evaluate each cell (1-16):
+   - Describe the visual content.
+   - CHECK: Is the Core Target visible? (Even a small edge/corner counts).
+   - CHECK: Is it a structural continuation of the Core Target? (e.g. base, roof, top edge).
+   - CHECK: Is it ONLY an Associated Item? (e.g. only a pole, only a railing, only a road).
+   - CONSTRAINT: If it is ONLY an Associated Item, do NOT select it.
+
+3. Final Selection:
+   - Select ALL cells containing the Core Target OR structural continuations.
+   - For 4x4: Be precise but inclusive of edges. 
+   - STRICTLY REJECT: Cells containing ONLY associated items (poles, railings, roads, sky).
+
+Respond JSON ONLY:
+{
+  "analysis": "Core: [Describe], Associated/Excluded: [Describe]",
+  "cell_states": {
+    "1": "Description. Core Visible? [YES/NO]. Associated Only? [YES/NO]. -> [MATCH/NO MATCH]",
+    ...
+  },
+  "loading_cells": [],
+  "selected_numbers": [2, 3]
+}
+=== PROMPT END ===
+[21:02:42] [Planner] === RAW RESPONSE ===
+{
+  "analysis": "Core: Stairs (steps, risers, treads). Associated/Excluded: Railings, bushes, house siding, windows, grass, pavement.",
+  "cell_states": {
+    "1": "A bush and part of a house window. No stairs. Core Visible? NO. Associated Only? YES. -> NO MATCH",
+    "2": "Part of the stairs (riser and tread) and railing. Core Visible? YES. Associated Only? NO. -> MATCH",
+    "3": "Part of the stairs (riser and tread) and railing. Core Visible? YES. Associated Only? NO. -> MATCH",
+    "4": "House siding and a bush. No stairs. Core Visible? NO. Associated Only? YES. -> NO MATCH",
+    "5": "A bush. No stairs. Core Visible? NO. Associated Only? YES. -> NO MATCH",
+    "6": "Part of the stairs (riser and tread) and railing. Core Visible? YES. Associated Only? NO. -> MATCH",
+    "7": "Part of the stairs (riser and tread) and railing. Core Visible? YES. Associated Only? NO. -> MATCH",
+    "8": "House siding and a bush. No stairs. Core Visible? NO. Associated Only? YES. -> NO MATCH",
+    "9": "A bush. No stairs. Core Visible? NO. Associated Only? YES. -> NO MATCH",
+    "10": "Part of the stairs (riser and tread) and railing. Core Visible? YES. Associated Only? NO. -> MATCH",
+    "11": "Part of the stairs (riser and tread) and railing. Core Visible? YES. Associated Only? NO. -> MATCH",
+    "12": "House siding and grass. No stairs. Core Visible? NO. Associated Only? YES. -> NO MATCH",
+    "13": "Grass and pavement. No stairs. Core Visible? NO. Associated Only? YES. -> NO MATCH",
+    "14": "Part of the stairs (riser and tread) and pavement. Core Visible? YES. Associated Only? NO. -> MATCH",
+    "15": "Part of the stairs (riser and tread) and pavement. Core Visible? YES. Associated Only? NO. -> MATCH",
+    "16": "Grass and pavement. No stairs. Core Visible? NO. Associated Only? YES. -> NO MATCH"
+  },
+  "loading_cells": [],
+  "selected_numbers": [2, 3, 6, 7, 10, 11, 14, 15]
+}
+=== END RESPONSE ===
+[21:02:42] [Planner] Analysis: Core: Stairs (steps, risers, treads). Associated/Excluded: Railings, bushes, house siding, windows, grass, pavement.
+[21:02:42] [Planner] Final selection: [2, 3, 6, 7, 10, 11, 14, 15]
+[21:02:42] Grid selection: [2, 3, 6, 7, 10, 11, 14, 15]

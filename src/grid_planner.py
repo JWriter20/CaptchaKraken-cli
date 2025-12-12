@@ -13,22 +13,27 @@ Task: Select cells in the {rows}x{cols} grid (1-{total}) that match the instruct
 Instruction: "{instruction}"
 {grid_hint}
 
-1. Define the target object's visual core (e.g., "stairs" = steps/risers).
-2. Evaluate each cell (1-{total}):
-   - Visible content?
-   - Contains the CORE target object?
-   - NEGATIVE CONSTRAINT: Do NOT select cells containing only "associated" items (e.g., railings, poles) or "context" (trees, walls) if the core object (steps) is absent.
+1. Deconstruct the Instruction:
+   - Identify the "Core Target" (e.g. for "buses", core = vehicle body/wheels; for "traffic lights", core = light fixtures).
+   - Identify "Associated Items" to EXCLUDE (e.g. for "buses", exclude road/asphalt; for "traffic lights", exclude poles/wires unless holding a light).
 
-3. Selection:
-   - Select ALL cells containing the target object, including those with only a part of it.
-   - For 4x4: If the object spans cells, ensure you select the entire object. But strictly respect the negative constraint: associated items (like railings) alone do NOT count.
-   - CHECK CORNERS: Often the object extends into corners (like bottom steps).
+2. Evaluate each cell (1-{total}):
+   - Describe the visual content.
+   - CHECK: Is the Core Target visible? (Even a small edge/corner counts).
+   - CHECK: Is it a structural continuation of the Core Target? (e.g. base, roof, top edge).
+   - CHECK: Is it ONLY an Associated Item? (e.g. only a pole, only a railing, only a road).
+   - CONSTRAINT: If it is ONLY an Associated Item, do NOT select it.
+
+3. Final Selection:
+   - Select ALL cells containing the Core Target OR structural continuations.
+   - For 4x4: Be precise but inclusive of edges. 
+   - STRICTLY REJECT: Cells containing ONLY associated items (poles, railings, roads, sky).
 
 Respond JSON ONLY:
 {{
-  "instruction_analysis": "target core features",
+  "analysis": "Core: [Describe], Associated/Excluded: [Describe]",
   "cell_states": {{
-    "1": "content - match/no match",
+    "1": "Description. Core Visible? [YES/NO]. Associated Only? [YES/NO]. -> [MATCH/NO MATCH]",
     ...
   }},
   "loading_cells": [],
@@ -71,7 +76,7 @@ class GridPlanner(ActionPlanner):
         loading_cells = result.get("loading_cells", [])
 
         # Log reasoning
-        self._log(f"Analysis: {result.get('instruction_analysis', 'N/A')}")
+        self._log(f"Analysis: {result.get('analysis', 'N/A')}")
         
         # Only wait if we have loading cells AND no valid selections
         should_wait = len(loading_cells) > 0 and len(selected) == 0
