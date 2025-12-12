@@ -13,24 +13,26 @@ Task: Select cells in the {rows}x{cols} grid (1-{total}) that match the instruct
 Instruction: "{instruction}"
 {grid_hint}
 
-1. Analyze the instruction.
-2. For each cell (1-{total}), determine:
-   - Content: What is visible?
-   - Match: Does it contain ANY PART of the target object? (Even small edges/slivers count for 4x4)
+1. Define the target object's visual core (e.g., "stairs" = steps/risers).
+2. Evaluate each cell (1-{total}):
+   - Visible content?
+   - Contains the CORE target object?
+   - NEGATIVE CONSTRAINT: Do NOT select cells containing only "associated" items (e.g., railings, poles) or "context" (trees, walls) if the core object (steps) is absent.
 
-3. Return the list of cells that MATCH the instruction.
-   - For 4x4 (single large image): Include cells with ANY part of the object. If a matching object touches a cell border, SELECT THE NEIGHBORING CELL too if it contains any continuation.
-   - For 3x3 (separate images): Include only clear matches.
+3. Selection:
+   - Select ALL cells containing the target object, including those with only a part of it.
+   - For 4x4: If the object spans cells, ensure you select the entire object. But strictly respect the negative constraint: associated items (like railings) alone do NOT count.
+   - CHECK CORNERS: Often the object extends into corners (like bottom steps).
 
 Respond JSON ONLY:
 {{
-  "instruction_analysis": "what to find",
+  "instruction_analysis": "target core features",
   "cell_states": {{
-    "1": "content description",
+    "1": "content - match/no match",
     ...
   }},
   "loading_cells": [],
-  "selected_numbers": [2, 3] // Cells that MATCH
+  "selected_numbers": [2, 3]
 }}"""
 
 class GridPlanner(ActionPlanner):
@@ -80,4 +82,3 @@ class GridPlanner(ActionPlanner):
         self._log(f"Final selection: {selected}")
 
         return selected, should_wait
-

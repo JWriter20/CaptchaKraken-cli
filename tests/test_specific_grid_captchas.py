@@ -101,3 +101,41 @@ def test_motorcycle_captcha_solution(solver):
     # Check that we didn't find anything unexpected
     unexpected = selected - expected_full
     assert not unexpected, f"Selected unexpected squares: {unexpected}"
+
+def test_stairs_captcha_solution(solver):
+    """
+    Test solving stairsCaptchaImage.png with REAL LLM call.
+    Expected squares: 10, 14, 15
+    """
+    filename = "stairsCaptchaImage.png"
+    image_path = os.path.join(IMAGES_DIR, filename)
+    if not os.path.exists(image_path):
+        pytest.skip(f"Image not found: {image_path}")
+    
+    # User specified strict set: 10, 14, 15
+    core_selection = {10, 14, 15}
+    # No optional squares mentioned, assuming strict
+    optional_selection = set()
+    expected_full = core_selection | optional_selection
+
+    print(f"\nTesting {filename}...")
+    instruction = "Select all squares with stairs"
+    
+    actions = solver.solve(image_path, instruction)
+    
+    selected = set()
+    if isinstance(actions, list):
+        for action in actions:
+            if isinstance(action, ClickAction) and action.target_number is not None:
+                selected.add(action.target_number)
+    
+    selected_list = sorted(list(selected))
+    print(f"Selected: {selected_list}")
+    
+    # Check that we found all core items
+    missing_core = core_selection - selected
+    assert not missing_core, f"Missed core squares: {missing_core}"
+    
+    # Check that we didn't find anything unexpected
+    unexpected = selected - expected_full
+    assert not unexpected, f"Selected unexpected squares: {unexpected}"
