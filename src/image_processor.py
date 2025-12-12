@@ -292,8 +292,10 @@ class ImageProcessor:
 
         # Color ranges
         # ReCaptcha Blue - Tuned tightly for rgb(27, 115, 232) -> hsv(107, 225, 232)
-        lower_blue = np.array([100, 150, 150])
-        upper_blue = np.array([115, 255, 255])
+        # Standard Blue is ~108. User requested tight margin.
+        # Widen slightly to cover 108 +/- 4 roughly, and lower saturation support.
+        lower_blue = np.array([102, 130, 130])
+        upper_blue = np.array([114, 255, 255])
         # hCaptcha Green
         lower_green = np.array([35, 50, 50])
         upper_green = np.array([85, 255, 255]) 
@@ -304,9 +306,10 @@ class ImageProcessor:
             h = y2 - y1
             
             # --- 1. Check Top-Left for Selection Badge ---
-            # ROI: Top-Left 35%
-            tl_w = int(w * 0.35)
-            tl_h = int(h * 0.35)
+            # ROI: Top-Left 25% (Split into 4, check top-left)
+            # Stricter ROI to avoid catching content in the cell
+            tl_w = int(w * 0.25)
+            tl_h = int(h * 0.25)
             tl_w = max(1, min(tl_w, w))
             tl_h = max(1, min(tl_h, h))
             
@@ -431,9 +434,31 @@ class ImageProcessor:
         white_pixels = cv2.countNonZero(white_mask)
         
         # Criteria: High circularity (badge shape) AND contains white pixels (checkmark)
-        # Relaxed circularity > 0.50 (was 0.80) to handle small/pixelated badges
-        # Relaxed white_pixels > 2 (was 5)
-        passed = circularity > 0.50 and white_pixels > 2
+        # User requirement: Circularity > 0.85
+        # User requirement: Only white and blue pixels (handled by contour/mask check mostly, but can be stricter)
+        
+        passed = circularity > 0.85 and white_pixels > 2
+        
+        # Additional Check: Pixel purity
+        # Ensure the badge area is mostly blue/white.
+        # We can check the mask coverage vs bounding rect.
+        # A circle fills pi/4 (approx 0.785) of a square.
+        # If it's a solid circle, extent should be high.
+        
+        if passed:
+             # Check if the content inside the contour is mostly the badge color + white checkmark
+             # Extract ROI of the contour
+             mask_roi = mask[y:y+h, x:x+w]
+             # Count non-zero in mask (blue pixels)
+             blue_px = cv2.countNonZero(mask_roi)
+             # Total pixels in rect
+             total_px = w * h
+             # Verify it's not just a thin ring or noise
+             if blue_px / total_px < 0.5: # Badge should be solid
+                  passed = False
+                  if hasattr(self, 'debug') and self.debug:
+                       self.debug.log(f"Badge check failed: Low density ({blue_px/total_px:.2f})")
+
         if not passed and hasattr(self, 'debug') and self.debug:
              self.debug.log(f"Badge check failed: Circ={circularity:.2f}, WhitePx={white_pixels}")
         return passed

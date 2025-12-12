@@ -41,10 +41,11 @@ def test_selected_fields_all_images():
         # 2. Detect Selections
         # Initialize ImageProcessor (mock dependencies as they are not needed for this method)
         processor = ImageProcessor(attention_extractor=None, planner=None, debug_manager=None)
-        selected_indices = processor.detect_selected_cells(image_path, grid_boxes)
+        selected_indices, loading_indices = processor.detect_selected_cells(image_path, grid_boxes)
         selected_indices.sort()
         
-        print(f"  Detected: {selected_indices}")
+        print(f"  Detected Selected: {selected_indices}")
+        print(f"  Detected Loading: {loading_indices}")
         
         expected = expectations.get(filename, [])
         expected.sort()
@@ -57,4 +58,6 @@ def test_selected_fields_all_images():
             assert selected_indices == expected, f"Failed for {filename}: Expected {expected}, got {selected_indices}"
         else:
             # For other images, we verify no false positives
+            # Note: We allow loading indices to be non-empty if the image actually has loading spinners,
+            # but for now we only strictly assert on selected_indices (blue badges).
             assert selected_indices == [], f"False positive in {filename}: Found {selected_indices}, expected empty"
