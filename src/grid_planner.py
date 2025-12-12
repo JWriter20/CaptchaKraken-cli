@@ -13,24 +13,26 @@ Task: Select cells in the {rows}x{cols} grid (1-{total}) that match the instruct
 Instruction: "{instruction}"
 {grid_hint}
 
-1. Analyze the instruction and reference image (if any).
-2. Inspect each numbered cell.
-   - If a cell is LOADING (blank/white/spinner), mark as "loading".
-   - If a cell is ALREADY SELECTED (checkmark/highlight), mark as "selected".
-3. Decide which UNCHECKED cells contain the target.
-   - For 4x4 (single large image): Select ALL tiles containing ANY part of the object.
-   - For 3x3 (separate images): Select ONLY tiles with the CLEAR object.
+1. Analyze the instruction.
+2. For each cell (1-{total}), determine:
+   - Content: What is visible?
+   - Status: Does it have a VISIBLE CHECKMARK? (If yes, mark as 'checked', else 'unchecked')
+   - Match: Does it contain ANY PART of the target object? (Even small edges/slivers count for 4x4)
+
+3. Return the list of cells that MATCH the instruction but are currently UNCHECKED.
+   - For 4x4 (single large image): Include cells with ANY part of the object. If a matching object touches a cell border, SELECT THE NEIGHBORING CELL too if it contains any continuation.
+   - For 3x3 (separate images): Include only clear matches.
 
 Respond JSON ONLY:
 {{
   "instruction_analysis": "what to find",
   "cell_states": {{
-    "1": "content - state (checked/loading/normal)",
+    "1": "content description - checked/unchecked",
     ...
   }},
-  "loading_cells": [1],
-  "already_selected": [2],
-  "selected_numbers": [3, 4] // ONLY new selections. Do not include already_selected.
+  "loading_cells": [],
+  "already_selected": [1], // Cells that HAVE VISIBLE CHECKMARKS
+  "selected_numbers": [2, 3] // Cells that MATCH but are UNCHECKED
 }}"""
 
 class GridPlanner(ActionPlanner):
@@ -72,7 +74,13 @@ class GridPlanner(ActionPlanner):
 
         # Robustness: Check cell_states for 'selected' or 'checked' and add to already_selected
         for cell_num_str, state_desc in cell_states.items():
-            if "selected" in state_desc.lower() or "checked" in state_desc.lower():
+            state_lower = state_desc.lower()
+            # "checked" is a substring of "unchecked", so we must ensure "unchecked" is NOT present
+            # when looking for "checked".
+            is_checked = "checked" in state_lower and "unchecked" not in state_lower
+            is_selected = "selected" in state_lower and "unselected" not in state_lower
+            
+            if is_checked or is_selected:
                 try:
                     already_selected.add(int(cell_num_str))
                 except ValueError:
