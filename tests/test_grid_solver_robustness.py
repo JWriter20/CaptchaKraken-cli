@@ -26,16 +26,16 @@ class TestSolverGridFix(unittest.TestCase):
         
         # Mock planner response with STRINGS
         # This simulates the failure case: "selected_numbers": ["6"]
-        self.solver.grid_planner.get_grid_selection.return_value = (["6"], False)
+        self.solver.grid_planner.get_grid_selection.return_value = ["6"]
         
         # Mock image processor to return empty list for already selected cells
-        self.solver.image_processor.detect_selected_cells.return_value = []
+        self.solver.image_processor.detect_selected_cells.return_value = ([], [])
 
         actions = self.solver._solve_grid("test.png", "instruction", grid_boxes)
         
         self.assertTrue(len(actions) > 0)
         self.assertIsInstance(actions[0], ClickAction)
-        self.assertEqual(actions[0].target_number, 6) # Pydantic converts "6" to 6
+        self.assertEqual(int(actions[0].target_number), 6) # Pydantic converts "6" to 6
         
     @patch('src.solver.add_overlays_to_image')
     @patch('src.solver.os.path.exists')
@@ -45,8 +45,8 @@ class TestSolverGridFix(unittest.TestCase):
         grid_boxes = [(0,0,10,10) for _ in range(9)]
         
         # Mock planner response with INTEGERS (normal case)
-        self.solver.grid_planner.get_grid_selection.return_value = ([6], False)
-        self.solver.image_processor.detect_selected_cells.return_value = []
+        self.solver.grid_planner.get_grid_selection.return_value = [6]
+        self.solver.image_processor.detect_selected_cells.return_value = ([], [])
 
         actions = self.solver._solve_grid("test.png", "instruction", grid_boxes)
         
@@ -61,19 +61,18 @@ class TestSolverGridFix(unittest.TestCase):
         grid_boxes = [(0,0,10,10) for _ in range(9)]
         
         # Mixed int, string, and invalid garbage
-        self.solver.grid_planner.get_grid_selection.return_value = ([1, "2", "invalid"], False)
-        self.solver.image_processor.detect_selected_cells.return_value = []
+        self.solver.grid_planner.get_grid_selection.return_value = [1, "2", "invalid"]
+        self.solver.image_processor.detect_selected_cells.return_value = ([], [])
 
         actions = self.solver._solve_grid("test.png", "instruction", grid_boxes)
         
         self.assertEqual(len(actions), 2)
         # Should have processed 1 and "2"
         # We don't guarantee order if implementation changes, but usually it preserves order
-        targets = [a.target_number for a in actions]
+        targets = [int(a.target_number) for a in actions]
         self.assertIn(1, targets)
         self.assertIn(2, targets) # Pydantic converts "2" to 2
         self.assertNotIn("invalid", targets)
 
 if __name__ == '__main__':
     unittest.main()
-

@@ -6,7 +6,7 @@ Inherits from ActionPlanner to reuse backend connection.
 from typing import List, Tuple
 from .planner import ActionPlanner
 
-# Concise prompt for grid selection
+# Detailed prompt for grid selection (Restored & Tuned)
 SELECT_GRID_PROMPT = """You are a captcha solver.
 Task: Select cells in the {rows}x{cols} grid (1-{total}) that match the instruction.
 
@@ -21,9 +21,6 @@ Instruction: "{instruction}"
 
 2. Evaluate each cell (1-{total}):
    - Describe the visual content.
-   - CHECK: Is there a checkmark overlay?
-     * LOADING: Large blue/white circle/spinner OR Large blue circle with checkmark in the CENTER of the cell OR Blank/White/Grey empty cell.
-     * SELECTED: Small blue checkmark in the TOP-LEFT corner of the cell.
    - CHECK: Is the Core Target visible? (Even a small edge/corner counts). NOTE: A rider or shadow is NOT the Core Target.
    - CHECK: Is it a structural continuation of the Core Target? (e.g. vehicle body, roof, traffic light housing). NOTE: Poles, riders, and shadows are NOT continuations.
    - CHECK: Is it ONLY an Associated Item, Rider, or Shadow? (e.g. only a pole, only a railing, only a road, only a rider's body/helmet without the vehicle part, only a shadow).
@@ -33,23 +30,14 @@ Instruction: "{instruction}"
    - Select ALL cells containing the Core Target OR structural continuations (e.g. vehicle parts, traffic light housing parts).
    - For 4x4: Be precise but inclusive of edges. 
    - STRICTLY REJECT: Cells containing ONLY associated items (e.g. poles with no lights, railings, roads, sky), ONLY riders/people, or ONLY shadows.
-   - LOADING CELLS: Only add cells to "loading_cells" if they match the LOADING state (Center overlay or Blank).
-   - IGNORE SELECTED: If a cell is ALREADY SELECTED (Top-Left checkmark), do NOT add to "selected_numbers" and do NOT add to "loading_cells".
    
-   - VERIFICATION MODE: If you see ANY selected cells (checkmarks), this is a verification step.
-     * The existing selections are likely correct.
-     * ONLY select NEW cells if they are CLEARLY the Core Target and were missed.
-     * Do NOT select cells that are ambiguous, blurry, or only contain associated items (poles, trees) in this phase.
-     * If no new clear targets are found, return empty "selected_numbers".
-
 Respond JSON ONLY:
 {{
   "analysis": "Core: [Describe], Associated/Excluded: [Describe]",
   "cell_states": {{
-    "1": "Description. Checkmark? [NONE/LOADING/SELECTED]. Core Visible? [YES/NO]. Associated Only? [YES/NO]. -> [MATCH/NO MATCH/LOADING/ALREADY SELECTED]",
+    "1": "Description. Core Visible? [YES/NO]. Associated Only? [YES/NO]. -> [MATCH/NO MATCH]",
     ...
   }},
-  "loading_cells": [list of cells with CENTER LOADING checkmarks or Blank cells],
   "selected_numbers": [list of integers representing cells to click]
 }}"""
 
@@ -58,9 +46,10 @@ class GridPlanner(ActionPlanner):
     Specialized planner for grid selection tasks.
     """
 
-    def get_grid_selection(self, image_path: str, rows: int, cols: int, instruction: str = "Solve the captcha by selecting the correct images, DO NOT click on cells you are not sure about") -> Tuple[List[int], bool]:
+    def get_grid_selection(self, image_path: str, rows: int, cols: int, instruction: str = "Solve the captcha by selecting the correct images") -> List[int]:
         """
         Ask which numbers to select in the grid.
+        Returns a list of selected cell numbers.
         """
         total = rows * cols
 
@@ -86,38 +75,10 @@ class GridPlanner(ActionPlanner):
         result = self._parse_json(response)
 
         selected = result.get("selected_numbers", [])
-        loading_cells = result.get("loading_cells", [])
-        cell_states = result.get("cell_states", {})
-
-        # Filter out cells that the model analysis identified as already selected
-        # This fixes cases where the model correctly identifies "ALREADY SELECTED" in analysis
-        # but fails to exclude it from the final list.
-        filtered_selected = []
-        for num in selected:
-            state_desc = cell_states.get(str(num), "")
-            
-            # Check for indicators of selection in the analysis text
-            is_already_selected = (
-                "ALREADY SELECTED" in state_desc or 
-                "Checkmark? SELECTED" in state_desc
-            )
-            
-            if is_already_selected:
-                self._log(f"Filtering cell {num} because analysis identified it as ALREADY SELECTED.")
-            else:
-                filtered_selected.append(num)
         
-        selected = filtered_selected
-
         # Log reasoning
         self._log(f"Analysis: {result.get('analysis', 'N/A')}")
-        
-        # Only wait if we have loading cells AND no valid selections
-        should_wait = len(loading_cells) > 0 and len(selected) == 0
-
-        if should_wait:
-            self._log(f"Loading cells detected: {loading_cells}. Suggesting wait.")
-
+        self._log(f"Cell States: {result.get('cell_states', 'N/A')}")
         self._log(f"Final selection: {selected}")
 
-        return selected, should_wait
+        return selected

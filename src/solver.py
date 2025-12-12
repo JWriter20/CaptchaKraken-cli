@@ -238,6 +238,18 @@ class CaptchaSolver:
         self.debug.log(f"_solve_grid called with {n} cells ({rows}x{cols})")
         self.debug.log(f"Instruction passed to planner: '{instruction}'")
 
+        # 1. Detect state (Selected / Loading) via CV
+        cv_selected = []
+        cv_loading = []
+        try:
+            cv_selected, cv_loading = self.image_processor.detect_selected_cells(image_path, grid_boxes)
+            if cv_selected:
+                self.debug.log(f"CV Detected already selected cells: {cv_selected}")
+            if cv_loading:
+                self.debug.log(f"CV Detected loading cells: {cv_loading}")
+        except Exception as e:
+            self.debug.log(f"Error in CV check for selected cells: {e}")
+
         # Create temp image with numbered overlay
         ext = os.path.splitext(image_path)[1] or ".png"
         with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tf:
@@ -245,49 +257,57 @@ class CaptchaSolver:
         self._temp_files.append(overlay_path)
 
         try:
-            # Prepare overlays - bbox in [x, y, w, h] pixel format for overlay function
+            # Prepare overlays - only for selectable cells
             overlays = []
+            valid_indices = []
+            
             for i, (x1, y1, x2, y2) in enumerate(grid_boxes):
+                idx = i + 1
+                w = x2 - x1
+                h = y2 - y1
+                
+                # Filter out selected and loading cells from the overlay
+                if idx in cv_selected or idx in cv_loading:
+                    continue
+                
                 # Use a high-contrast color that doesn't resemble traffic lights (Red/Yellow/Green)
                 # or Checkmarks (Blue). Magenta/Purple is a good choice.
-                overlays.append({"bbox": [x1, y1, w, h], "number": i + 1, "color": "#9B59B6"})
+                overlays.append({"bbox": [x1, y1, w, h], "number": idx, "color": "#9B59B6"})
+                valid_indices.append(idx)
+
+            # If no cells are valid for selection
+            if not overlays:
+                if cv_loading:
+                    self.debug.log("No selectable cells, but loading cells present. Waiting.")
+                    return WaitAction(action="wait", duration_ms=1000)
+                else:
+                    self.debug.log("No selectable cells found and no loading cells. Assuming Done.")
+                    return DoneAction(action="done")
 
             add_overlays_to_image(image_path, overlays, output_path=overlay_path, label_position="bottom-right")
             self.debug.save_image(overlay_path, "01_grid_overlay.png")
 
             # Ask planner which squares to select
-            selected_numbers, should_wait = self.grid_planner.get_grid_selection(overlay_path, rows=rows, cols=cols, instruction=instruction)
-
-            # --- HARD FILTER: Detect already selected cells via Computer Vision ---
-            # This is a fail-safe because the model sometimes misses checkmarks in the image
-            try:
-                cv_selected, cv_loading = self.image_processor.detect_selected_cells(image_path, grid_boxes)
-                
-                if cv_selected:
-                    self.debug.log(f"CV Detected already selected cells: {cv_selected}")
-                    
-                    original_count = len(selected_numbers)
-                    selected_numbers = [n for n in selected_numbers if n not in cv_selected]
-                    
-                    if len(selected_numbers) < original_count:
-                        self.debug.log(f"CV Filter removed {original_count - len(selected_numbers)} items that were already checked.")
-                
-                if cv_loading:
-                    self.debug.log(f"CV Detected loading cells: {cv_loading}")
-                    # If CV detects loading spinners and we have no clicks, we should wait
-                    if not selected_numbers and not should_wait:
-                        self.debug.log("CV detected loading cells and no selections. Enforcing Wait.")
-                        should_wait = True
-                        
-            except Exception as e:
-                self.debug.log(f"Error in CV check for selected cells: {e}")
-            # ----------------------------------------------------------------------
-
-            if should_wait:
-                self.debug.log("Planner detected loading/fading cells. Returning WaitAction.")
-                return WaitAction(action="wait", duration_ms=1000)
+            selected_numbers = self.grid_planner.get_grid_selection(
+                overlay_path, 
+                rows=rows, 
+                cols=cols, 
+                instruction=instruction
+            )
+            
+            # Filter just in case the model hallucinates numbers not in overlay
+            # (The model shouldn't see numbers that aren't there, but good for safety)
+            selected_numbers = [n for n in selected_numbers if n in valid_indices]
 
             self.debug.log(f"Grid selection: {selected_numbers}")
+
+            # Wait Logic
+            if not selected_numbers and cv_loading:
+                self.debug.log("No new selections and loading cells detected. Returning WaitAction.")
+                return WaitAction(action="wait", duration_ms=1000)
+
+            if not selected_numbers:
+                return DoneAction(action="done")
 
             # Convert to ClickActions
             actions = []
