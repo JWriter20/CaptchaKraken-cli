@@ -248,9 +248,9 @@ class CaptchaSolver:
             # Prepare overlays - bbox in [x, y, w, h] pixel format for overlay function
             overlays = []
             for i, (x1, y1, x2, y2) in enumerate(grid_boxes):
-                w = x2 - x1
-                h = y2 - y1
-                overlays.append({"bbox": [x1, y1, w, h], "number": i + 1, "color": "#E74C3C"})
+                # Use a high-contrast color that doesn't resemble traffic lights (Red/Yellow/Green)
+                # or Checkmarks (Blue). Magenta/Purple is a good choice.
+                overlays.append({"bbox": [x1, y1, w, h], "number": i + 1, "color": "#9B59B6"})
 
             add_overlays_to_image(image_path, overlays, output_path=overlay_path, label_position="bottom-right")
             self.debug.save_image(overlay_path, "01_grid_overlay.png")

@@ -35,6 +35,12 @@ Instruction: "{instruction}"
    - STRICTLY REJECT: Cells containing ONLY associated items (e.g. poles with no lights, railings, roads, sky), ONLY riders/people, or ONLY shadows.
    - LOADING CELLS: Only add cells to "loading_cells" if they match the LOADING state (Center overlay or Blank).
    - IGNORE SELECTED: If a cell is ALREADY SELECTED (Top-Left checkmark), do NOT add to "selected_numbers" and do NOT add to "loading_cells".
+   
+   - VERIFICATION MODE: If you see ANY selected cells (checkmarks), this is a verification step.
+     * The existing selections are likely correct.
+     * ONLY select NEW cells if they are CLEARLY the Core Target and were missed.
+     * Do NOT select cells that are ambiguous, blurry, or only contain associated items (poles, trees) in this phase.
+     * If no new clear targets are found, return empty "selected_numbers".
 
 Respond JSON ONLY:
 {{
