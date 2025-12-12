@@ -271,26 +271,30 @@ class ImageProcessor:
 
         return boxes
 
-    def detect_selected_cells(self, image_path: str, grid_boxes: List[Tuple[int, int, int, int]]) -> List[int]:
+    def detect_selected_cells(self, image_path: str, grid_boxes: List[Tuple[int, int, int, int]]) -> Tuple[List[int], List[int]]:
         """
-        Detects which grid cells are already selected (checkmark overlay).
-        Returns a list of 1-based indices (e.g. [1, 5, 9]).
+        Detects grid cells status using Computer Vision.
+        Returns a tuple of two lists:
+        1. selected_indices: Cells with a checkmark badge (Completed selection).
+        2. loading_indices: Cells with a spinner or center checkmark (Loading/Fading).
+
+        Differentiation:
+        - Selected: Small circular badge with checkmark in Top-Left.
+        - Loading: Spinner or Large Badge with checkmark in the Center.
         """
         img = cv2.imread(image_path)
         if img is None:
-            return []
+            return [], []
 
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
         selected_indices = []
+        loading_indices = []
 
-        # Color ranges for overlays
-        # ReCaptcha Blue: ~215 deg Hue -> ~107 OpenCV Hue
-        # Range: [95, 50, 50] to [130, 255, 255]
+        # Color ranges
+        # ReCaptcha Blue
         lower_blue = np.array([95, 60, 60])
         upper_blue = np.array([130, 255, 255])
-
-        # hCaptcha Green: ~130 deg Hue -> ~65 OpenCV Hue
-        # Range: [35, 50, 50] to [85, 255, 255]
+        # hCaptcha Green
         lower_green = np.array([35, 50, 50])
         upper_green = np.array([85, 255, 255]) 
 
@@ -299,83 +303,94 @@ class ImageProcessor:
             w = x2 - x1
             h = y2 - y1
             
-            # Checkmark is usually in top-left
-            # Look at top-left quadrant (35% of size)
-            roi_w = int(w * 0.35)
-            roi_h = int(h * 0.35)
+            # --- 1. Check Top-Left for Selection Badge ---
+            # ROI: Top-Left 35%
+            tl_w = int(w * 0.35)
+            tl_h = int(h * 0.35)
+            tl_w = max(1, min(tl_w, w))
+            tl_h = max(1, min(tl_h, h))
             
-            roi_x2 = min(x1 + roi_w, img.shape[1])
-            roi_y2 = min(y1 + roi_h, img.shape[0])
+            tl_roi_hsv = hsv[y1:y1+tl_h, x1:x1+tl_w]
+            tl_bgr = img[y1:y1+tl_h, x1:x1+tl_w]
             
-            roi_hsv = hsv[y1:roi_y2, x1:roi_x2]
-            roi_bgr = img[y1:roi_y2, x1:roi_x2]
+            is_selected = False
             
-            if roi_hsv.size == 0:
-                continue
-            
-            total_pixels = roi_hsv.shape[0] * roi_hsv.shape[1]
+            if tl_roi_hsv.size > 0:
+                # Blue Badge
+                mask_blue = cv2.inRange(tl_roi_hsv, lower_blue, upper_blue)
+                if cv2.countNonZero(mask_blue) > (tl_w * tl_h) * 0.05:
+                    if self._check_contours_for_badge(mask_blue, tl_bgr):
+                        is_selected = True
+                        if self.debug: self.debug.log(f"Cell {i+1}: Detected Blue Selection Badge")
 
-            # Check for Blue (ReCaptcha)
-            mask_blue = cv2.inRange(roi_hsv, lower_blue, upper_blue)
-            blue_pixels = cv2.countNonZero(mask_blue)
+                # Green Badge
+                if not is_selected:
+                    mask_green = cv2.inRange(tl_roi_hsv, lower_green, upper_green)
+                    if cv2.countNonZero(mask_green) > (tl_w * tl_h) * 0.05:
+                        if self._check_contours_for_badge(mask_green, tl_bgr):
+                            is_selected = True
+                            if self.debug: self.debug.log(f"Cell {i+1}: Detected Green Selection Badge")
             
-            is_blue_selected = False
-            if blue_pixels > total_pixels * 0.05:
-                # Refine with shape analysis for Blue (Recaptcha Badge)
-                contours, _ = cv2.findContours(mask_blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                if contours:
-                    max_cnt = max(contours, key=cv2.contourArea)
-                    area = cv2.contourArea(max_cnt)
-                    perimeter = cv2.arcLength(max_cnt, True)
-                    if perimeter > 0:
-                        circularity = 4 * np.pi * area / (perimeter * perimeter)
-                        
-                        # Check for white checkmark inside the blue badge
-                        blue_parts = cv2.bitwise_and(roi_bgr, roi_bgr, mask=mask_blue)
-                        gray_blue = cv2.cvtColor(blue_parts, cv2.COLOR_BGR2GRAY)
-                        # White checkmark is very bright (usually pure white)
-                        _, white_mask = cv2.threshold(gray_blue, 200, 255, cv2.THRESH_BINARY)
-                        white_pixels = cv2.countNonZero(white_mask)
-                        
-                        # Requirement: High circularity AND contains white pixels (checkmark)
-                        # Tightened constraints: Circularity > 0.85 (very circle-like), White Pixels > 8
-                        # Note: Measured actuals are ~0.89. 0.85 is safe margin.
-                        if circularity > 0.85 and white_pixels > 8: 
-                            is_blue_selected = True
-                            if self.debug:
-                                self.debug.log(f"Cell {i+1}: Blue selected (Circ={circularity:.2f}, WhitePx={white_pixels})")
-            
-            # Check for Green (hCaptcha/other)
-            mask_green = cv2.inRange(roi_hsv, lower_green, upper_green)
-            green_pixels = cv2.countNonZero(mask_green)
-            
-            is_green_selected = False
-            if green_pixels > total_pixels * 0.05:
-                # Refine with shape analysis for Green (hCaptcha Badge)
-                contours, _ = cv2.findContours(mask_green, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                if contours:
-                    max_cnt = max(contours, key=cv2.contourArea)
-                    area = cv2.contourArea(max_cnt)
-                    perimeter = cv2.arcLength(max_cnt, True)
-                    if perimeter > 0:
-                        circularity = 4 * np.pi * area / (perimeter * perimeter)
-                        
-                        # Check for white checkmark inside the green badge
-                        green_parts = cv2.bitwise_and(roi_bgr, roi_bgr, mask=mask_green)
-                        gray_green = cv2.cvtColor(green_parts, cv2.COLOR_BGR2GRAY)
-                        _, white_mask = cv2.threshold(gray_green, 200, 255, cv2.THRESH_BINARY)
-                        white_pixels = cv2.countNonZero(white_mask)
-                        
-                        # Tightened constraints for Green as well
-                        if circularity > 0.85 and white_pixels > 8:
-                            is_green_selected = True
-                            if self.debug:
-                                self.debug.log(f"Cell {i+1}: Green selected (Circ={circularity:.2f}, WhitePx={white_pixels})")
-            
-            if is_blue_selected or is_green_selected:
+            if is_selected:
                 selected_indices.append(i + 1)
+                # If selected, we assume it's not "loading" in a way that blocks progress
+                # (Static selection)
+                continue 
+
+            # --- 2. Check Center for Loading Spinner / Badge ---
+            # ROI: Center 40%
+            cx = int(w * 0.3)
+            cy = int(h * 0.3)
+            cw = int(w * 0.4)
+            ch = int(h * 0.4)
+            
+            center_roi_hsv = hsv[y1+cy:y1+cy+ch, x1+cx:x1+cx+cw]
+            center_roi_bgr = img[y1+cy:y1+cy+ch, x1+cx:x1+cx+cw]
+            
+            if center_roi_hsv.size > 0:
+                # Loading indicators are typically Blue
+                mask_blue_center = cv2.inRange(center_roi_hsv, lower_blue, upper_blue)
+                blue_density = cv2.countNonZero(mask_blue_center) / (cw * ch)
                 
-        return selected_indices
+                # Check for "Large blue circle with checkmark" (Badge in center)
+                if blue_density > 0.05:
+                     # Check if it's a badge (Checkmark)
+                     if self._check_contours_for_badge(mask_blue_center, center_roi_bgr):
+                         loading_indices.append(i + 1)
+                         if self.debug: self.debug.log(f"Cell {i+1}: Detected Center Loading Badge (Checkmark)")
+                     
+                     # Or if it's just a spinner (significant blue mass in center)
+                     # Spinners might not pass the circularity/white-pixel test of a badge,
+                     # but they are definitely blue activity in the center.
+                     else:
+                         loading_indices.append(i + 1)
+                         if self.debug: self.debug.log(f"Cell {i+1}: Detected Center Loading Spinner")
+
+        return selected_indices, loading_indices
+
+    def _check_contours_for_badge(self, mask, roi_bgr) -> bool:
+        """Helper to validate if a mask looks like a checkmark badge."""
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return False
+            
+        max_cnt = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(max_cnt)
+        perimeter = cv2.arcLength(max_cnt, True)
+        
+        if perimeter == 0:
+            return False
+            
+        circularity = 4 * np.pi * area / (perimeter * perimeter)
+        
+        # Check for white checkmark inside
+        colored_parts = cv2.bitwise_and(roi_bgr, roi_bgr, mask=mask)
+        gray = cv2.cvtColor(colored_parts, cv2.COLOR_BGR2GRAY)
+        _, white_mask = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+        white_pixels = cv2.countNonZero(white_mask)
+        
+        # Criteria: High circularity (badge shape) AND contains white pixels (checkmark)
+        return circularity > 0.80 and white_pixels > 5
 
     @staticmethod
     def detect_checkbox(image_path: str) -> Optional[Tuple[int, int, int, int]]:

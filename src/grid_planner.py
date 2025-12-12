@@ -19,7 +19,9 @@ Instruction: "{instruction}"
 
 2. Evaluate each cell (1-{total}):
    - Describe the visual content.
-   - CHECK: Is there a checkmark overlay? (usually blue/white in the center). If YES, this cell is LOADING.
+   - CHECK: Is there a checkmark overlay?
+     * LOADING: Large blue/white circle/spinner OR Large blue circle with checkmark in the CENTER of the cell.
+     * SELECTED: Small blue checkmark in the TOP-LEFT corner of the cell.
    - CHECK: Is the Core Target visible? (Even a small edge/corner counts).
    - CHECK: Is it a structural continuation of the Core Target? (e.g. vehicle body, roof, traffic light housing). NOTE: Poles are associated items, NOT continuations.
    - CHECK: Is it ONLY an Associated Item? (e.g. only a pole, only a railing, only a road).
@@ -29,16 +31,17 @@ Instruction: "{instruction}"
    - Select ALL cells containing the Core Target OR structural continuations (e.g. vehicle parts, traffic light housing parts).
    - For 4x4: Be precise but inclusive of edges. 
    - STRICTLY REJECT: Cells containing ONLY associated items (e.g. poles with no lights, railings, roads, sky).
-   - STRICTLY REJECT: Cells that have a checkmark overlay (add these to "loading_cells").
+   - LOADING CELLS: Only add cells to "loading_cells" if they have the LOADING (Center) overlay.
+   - IGNORE SELECTED: If a cell is ALREADY SELECTED (Top-Left checkmark), do NOT add to "selected_numbers" and do NOT add to "loading_cells".
 
 Respond JSON ONLY:
 {{
   "analysis": "Core: [Describe], Associated/Excluded: [Describe]",
   "cell_states": {{
-    "1": "Description. Checkmark? [YES/NO]. Core Visible? [YES/NO]. Associated Only? [YES/NO]. -> [MATCH/NO MATCH/LOADING]",
+    "1": "Description. Checkmark? [NONE/LOADING/SELECTED]. Core Visible? [YES/NO]. Associated Only? [YES/NO]. -> [MATCH/NO MATCH/LOADING/ALREADY SELECTED]",
     ...
   }},
-  "loading_cells": [list of cells with checkmarks],
+  "loading_cells": [list of cells with CENTER LOADING checkmarks],
   "selected_numbers": [list of integers representing cells to click]
 }}"""
 

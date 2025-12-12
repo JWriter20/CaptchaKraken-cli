@@ -258,15 +258,24 @@ class CaptchaSolver:
             # --- HARD FILTER: Detect already selected cells via Computer Vision ---
             # This is a fail-safe because the model sometimes misses checkmarks in the image
             try:
-                cv_detected_selected = self.image_processor.detect_selected_cells(image_path, grid_boxes)
-                if cv_detected_selected:
-                    self.debug.log(f"CV Detected already selected cells: {cv_detected_selected}")
+                cv_selected, cv_loading = self.image_processor.detect_selected_cells(image_path, grid_boxes)
+                
+                if cv_selected:
+                    self.debug.log(f"CV Detected already selected cells: {cv_selected}")
                     
                     original_count = len(selected_numbers)
-                    selected_numbers = [n for n in selected_numbers if n not in cv_detected_selected]
+                    selected_numbers = [n for n in selected_numbers if n not in cv_selected]
                     
                     if len(selected_numbers) < original_count:
                         self.debug.log(f"CV Filter removed {original_count - len(selected_numbers)} items that were already checked.")
+                
+                if cv_loading:
+                    self.debug.log(f"CV Detected loading cells: {cv_loading}")
+                    # If CV detects loading spinners and we have no clicks, we should wait
+                    if not selected_numbers and not should_wait:
+                        self.debug.log("CV detected loading cells and no selections. Enforcing Wait.")
+                        should_wait = True
+                        
             except Exception as e:
                 self.debug.log(f"Error in CV check for selected cells: {e}")
             # ----------------------------------------------------------------------
