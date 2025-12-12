@@ -360,11 +360,35 @@ class ImageProcessor:
                          if self.debug: self.debug.log(f"Cell {i+1}: Detected Center Loading Badge (Checkmark)")
                      
                      # Or if it's just a spinner (significant blue mass in center)
-                     # Spinners might not pass the circularity/white-pixel test of a badge,
-                     # but they are definitely blue activity in the center.
                      else:
-                         loading_indices.append(i + 1)
-                         if self.debug: self.debug.log(f"Cell {i+1}: Detected Center Loading Spinner")
+                         # Refined Spinner Detection:
+                         # Spinners are ring-like (low density in bbox) and roughly square aspect ratio.
+                         # Blue signs are solid (high density) and/or rectangular.
+                        contours, _ = cv2.findContours(mask_blue_center, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                        if contours:
+                            max_cnt = max(contours, key=cv2.contourArea)
+                            x, y, w_cnt, h_cnt = cv2.boundingRect(max_cnt)
+                            
+                            if w_cnt > 0 and h_cnt > 0:
+                                aspect_ratio = float(w_cnt) / h_cnt
+                                shape_area = w_cnt * h_cnt
+                                # Count pixels within the bounding box (approximation using total blue pixels)
+                                blue_pixels = cv2.countNonZero(mask_blue_center)
+                                shape_density = blue_pixels / shape_area
+                                
+                                # Check size relative to ROI (Spinner should cover a good portion of the center)
+                                rel_width = w_cnt / cw
+                                rel_height = h_cnt / ch
+
+                                # Criteria for Spinner:
+                                # 1. Aspect Ratio ~ 1 (Circle) - Stricter range
+                                # 2. Shape Density < 0.6 (Ring structure) but > 0.25 (Not too sparse)
+                                # 3. Size relative to ROI > 0.35 (Must be substantial)
+                                if 0.8 < aspect_ratio < 1.25 and 0.25 < shape_density < 0.6 and rel_width > 0.35 and rel_height > 0.35:
+                                    loading_indices.append(i + 1)
+                                    if self.debug: self.debug.log(f"Cell {i+1}: Detected Center Loading Spinner (Density: {shape_density:.2f}, AR: {aspect_ratio:.2f}, RelSize: {rel_width:.2f}x{rel_height:.2f})")
+                                elif self.debug:
+                                    self.debug.log(f"Cell {i+1}: Ignored blue object (Density: {shape_density:.2f}, AR: {aspect_ratio:.2f}, RelSize: {rel_width:.2f}x{rel_height:.2f}) - likely a sign/static object")
 
         return selected_indices, loading_indices
 

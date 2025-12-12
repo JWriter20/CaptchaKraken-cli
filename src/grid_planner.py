@@ -20,7 +20,7 @@ Instruction: "{instruction}"
 2. Evaluate each cell (1-{total}):
    - Describe the visual content.
    - CHECK: Is there a checkmark overlay?
-     * LOADING: Large blue/white circle/spinner OR Large blue circle with checkmark in the CENTER of the cell.
+     * LOADING: Large blue/white circle/spinner OR Large blue circle with checkmark in the CENTER of the cell OR Blank/White/Grey empty cell.
      * SELECTED: Small blue checkmark in the TOP-LEFT corner of the cell.
    - CHECK: Is the Core Target visible? (Even a small edge/corner counts).
    - CHECK: Is it a structural continuation of the Core Target? (e.g. vehicle body, roof, traffic light housing). NOTE: Poles are associated items, NOT continuations.
@@ -31,7 +31,7 @@ Instruction: "{instruction}"
    - Select ALL cells containing the Core Target OR structural continuations (e.g. vehicle parts, traffic light housing parts).
    - For 4x4: Be precise but inclusive of edges. 
    - STRICTLY REJECT: Cells containing ONLY associated items (e.g. poles with no lights, railings, roads, sky).
-   - LOADING CELLS: Only add cells to "loading_cells" if they have the LOADING (Center) overlay.
+   - LOADING CELLS: Only add cells to "loading_cells" if they match the LOADING state (Center overlay or Blank).
    - IGNORE SELECTED: If a cell is ALREADY SELECTED (Top-Left checkmark), do NOT add to "selected_numbers" and do NOT add to "loading_cells".
 
 Respond JSON ONLY:
@@ -41,7 +41,7 @@ Respond JSON ONLY:
     "1": "Description. Checkmark? [NONE/LOADING/SELECTED]. Core Visible? [YES/NO]. Associated Only? [YES/NO]. -> [MATCH/NO MATCH/LOADING/ALREADY SELECTED]",
     ...
   }},
-  "loading_cells": [list of cells with CENTER LOADING checkmarks],
+  "loading_cells": [list of cells with CENTER LOADING checkmarks or Blank cells],
   "selected_numbers": [list of integers representing cells to click]
 }}"""
 
