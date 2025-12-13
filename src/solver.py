@@ -284,7 +284,7 @@ class CaptchaSolver:
                     self.debug.log("No selectable cells found and no loading cells. Assuming Done.")
                     return DoneAction(action="done")
 
-            add_overlays_to_image(image_path, overlays, output_path=overlay_path, label_position="bottom-right")
+            add_overlays_to_image(image_path, overlays, output_path=overlay_path, label_position="top-right")
             self.debug.save_image(overlay_path, "01_grid_overlay.png")
 
             # Ask planner which squares to select

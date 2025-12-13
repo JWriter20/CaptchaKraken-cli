@@ -6,39 +6,45 @@ Inherits from ActionPlanner to reuse backend connection.
 from typing import List, Tuple
 from .planner import ActionPlanner
 
-# Detailed prompt for grid selection (Restored & Tuned)
-SELECT_GRID_PROMPT = """You are a captcha solver.
-Task: Select cells in the {rows}x{cols} grid (1-{total}) that match the instruction.
+# Detailed prompt for grid selection (Tuned for precision)
+SELECT_GRID_PROMPT = """You are an expert captcha solver.
+Task: Identify grid cells (1-{total}) that contain the "{instruction}".
 
-Instruction: "{instruction}"
+Image Grid: {rows}x{cols}
 {grid_hint}
 
-1. Deconstruct the Instruction:
-   - Identify the "Core Target" (e.g. for "buses", core = vehicle body/wheels/roof; for "traffic lights", core = the HEAD/HOUSING containing the lights; for "motorcycles", core = vehicle parts/wheels/engine; for "stairs", core = steps/treads).
-   - Identify "Associated Items" to EXCLUDE (e.g. for "buses", exclude road/asphalt; for "traffic lights", exclude the POLE/SUPPORT structure if it extends away from the light housing).
-   - EXCLUDE RIDERS/OPERATORS: If the target is a vehicle/object, EXCLUDE any person operating or riding it (riders, drivers, passengers). The rider (helmet, body, arms) is NOT the vehicle.
-   - EXCLUDE SHADOWS: Shadows cast by the object are NOT the object. Do not select cells that contain ONLY the shadow.
+Rules:
+1. TARGET IDENTIFICATION: Focus on the main object specified.
+2. INCLUSION: Select cells containing ANY visible part of the target object.
+   - For 4x4 (single large image): Select ALL cells with any part of the object to maintain connectivity.
+   - For 3x3 (separate images): Select only cells with a clear view of the object.
+3. EXCLUSION: DO NOT select cells that contain ONLY:
+   - Background (road, sky, trees, buildings)
+   - Supporting structures (poles, wires, signs) - UNLESS they are integral to the object (e.g. crosswalk lines).
+   - Riders/People (if target is vehicle).
+   - Shadows/Reflections.
+   - ALREADY SELECTED cells: Look for a blue/green checkmark in the corner or a faded/white overlay. If present, DO NOT SELECT.
 
-2. Evaluate each cell (1-{total}):
-   - Describe the visual content.
-   - CHECK: Is the Core Target visible? (Even a small edge/corner counts). NOTE: A rider or shadow is NOT the Core Target.
-   - CHECK: Is it a structural continuation of the Core Target? (e.g. vehicle body, roof, traffic light housing). NOTE: Poles, riders, and shadows are NOT continuations.
-   - CHECK: Is it ONLY an Associated Item, Rider, or Shadow? (e.g. only a pole, only a railing, only a road, only a rider's body/helmet without the vehicle part, only a shadow).
-   - CONSTRAINT: If it is ONLY an Associated Item, Rider, or Shadow, do NOT select it.
+Instructions for specific targets:
+- "traffic lights": Select ONLY the signal housing (box) and lights. IGNORE the pole, arm, wires, and pedestrian signals.
+- "bus" / "motorcycle" / "vehicle" / "bicycle": Select vehicle parts (body, wheels, windows, handlebars). IGNORE riders/drivers.
+- "stairs": Select the tread/risers. IGNORE independent walls or railings not attached to steps.
+- "crosswalk": Select the painted road lines.
+- "fire hydrant": Select the hydrant body.
 
-3. Final Selection:
-   - Select ALL cells containing the Core Target OR structural continuations (e.g. vehicle parts, traffic light housing parts).
-   - For 4x4: Be precise but inclusive of edges. 
-   - STRICTLY REJECT: Cells containing ONLY associated items (e.g. poles with no lights, railings, roads, sky), ONLY riders/people, or ONLY shadows.
-   
+Process:
+1. Scan the image to locate the target object(s).
+2. For each cell 1-{total}, decide if it contains the target.
+3. Return the list of selected numbers.
+
 Respond JSON ONLY:
 {{
-  "analysis": "Core: [Describe], Associated/Excluded: [Describe]",
-  "cell_states": {{
-    "1": "Description. Core Visible? [YES/NO]. Associated Only? [YES/NO]. -> [MATCH/NO MATCH]",
+  "reasoning": "Brief analysis",
+  "cell_analysis": {{
+    "1": "Description. Match? [Yes/No]",
     ...
   }},
-  "selected_numbers": [list of integers representing cells to click]
+  "selected_numbers": [list of integers]
 }}"""
 
 class GridPlanner(ActionPlanner):

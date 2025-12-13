@@ -38,6 +38,14 @@ def get_cross_platform_font(font_size: int):
     return font
 
 
+def hex_to_rgba(hex_color, alpha=180):
+    hex_color = hex_color.lstrip('#')
+    if len(hex_color) == 6:
+        rgb = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+    else:
+        rgb = (255, 0, 0) # Fallback
+    return rgb + (alpha,)
+
 def draw_enhanced_bounding_box(draw, bbox, text=None, number=None, image_size=None, color="#C0392B", label_position="top-left"):
     x1, y1, x2, y2 = bbox
     # color is passed as argument
@@ -81,8 +89,8 @@ def draw_enhanced_bounding_box(draw, bbox, text=None, number=None, image_size=No
     if label_text and image_size:
         img_width, img_height = image_size
 
-        # Scale font based on image width - increased size for visibility
-        base_font_size = max(20, min(60, int(img_width * 0.04)))
+        # Scale font based on image width - reduced size for visibility
+        base_font_size = max(12, min(40, int(img_width * 0.03)))
         font = get_cross_platform_font(base_font_size)
 
         # Get text size
@@ -94,7 +102,7 @@ def draw_enhanced_bounding_box(draw, bbox, text=None, number=None, image_size=No
         text_width = bbox_text[2] - bbox_text[0]
         text_height = bbox_text[3] - bbox_text[1]
 
-        padding = max(4, min(10, int(img_width * 0.005)))
+        padding = 2 # Minimal padding
 
         container_width = text_width + padding * 2
         container_height = text_height + padding * 2
@@ -115,6 +123,13 @@ def draw_enhanced_bounding_box(draw, bbox, text=None, number=None, image_size=No
             bg_x2 = x2 - 4
             bg_y2 = y2 - 4
             bg_x1 = bg_x2 - container_width
+            bg_y1 = bg_y2 - container_height
+
+        elif label_position == "bottom-left":
+            # Bottom Left of the box (inside)
+            bg_x1 = x1 + 4
+            bg_y2 = y2 - 4
+            bg_x2 = bg_x1 + container_width
             bg_y1 = bg_y2 - container_height
             
         else: # Default to top-left
@@ -150,7 +165,12 @@ def draw_enhanced_bounding_box(draw, bbox, text=None, number=None, image_size=No
             text_y -= offset
 
         # Draw background and text
-        draw.rectangle([bg_x1, bg_y1, bg_x2, bg_y2], fill=color, outline="white", width=2)
+        # Make background semi-transparent
+        fill_color = color
+        if isinstance(color, str) and color.startswith("#"):
+            fill_color = hex_to_rgba(color, alpha=160)
+            
+        draw.rectangle([bg_x1, bg_y1, bg_x2, bg_y2], fill=fill_color, outline="white", width=2)
         draw.text((text_x, text_y), label_text, fill="white", font=font)
 
 

@@ -292,12 +292,11 @@ class ImageProcessor:
 
         # Color ranges
         # ReCaptcha Blue - Tuned tightly for rgb(27, 115, 232) -> hsv(107, 225, 232)
-        # Standard Blue is ~108. User requested tight margin.
-        # Widen slightly to cover 108 +/- 4 roughly, and lower saturation support.
-        lower_blue = np.array([102, 130, 130])
-        upper_blue = np.array([114, 255, 255])
+        # Widen slightly to cover variations.
+        lower_blue = np.array([100, 120, 120])
+        upper_blue = np.array([120, 255, 255])
         # hCaptcha Green
-        lower_green = np.array([35, 50, 50])
+        lower_green = np.array([35, 40, 40])
         upper_green = np.array([85, 255, 255]) 
 
         for i, box in enumerate(grid_boxes):
@@ -434,10 +433,9 @@ class ImageProcessor:
         white_pixels = cv2.countNonZero(white_mask)
         
         # Criteria: High circularity (badge shape) AND contains white pixels (checkmark)
-        # User requirement: Circularity > 0.85
-        # User requirement: Only white and blue pixels (handled by contour/mask check mostly, but can be stricter)
+        # User requirement: Circularity > 0.85 -> Relaxed to 0.7
         
-        passed = circularity > 0.85 and white_pixels > 2
+        passed = circularity > 0.70 and white_pixels > 2
         
         # Additional Check: Pixel purity
         if passed:
@@ -467,11 +465,11 @@ class ImageProcessor:
                  # Ratio of valid pixels to total contour area
                  purity_ratio = valid_count / pixels_in_contour
                  
-                 # Strict purity check (>0.90 allows for slight anti-aliasing edges)
-                 if purity_ratio < 0.90:
+                 # Relaxed purity check (allows for more anti-aliasing/noise)
+                 if purity_ratio < 0.75:
                       passed = False
                       if hasattr(self, 'debug') and self.debug:
-                           self.debug.log(f"Badge check failed: Impure colors inside badge ({purity_ratio:.2f} < 0.90)")
+                           self.debug.log(f"Badge check failed: Impure colors inside badge ({purity_ratio:.2f} < 0.75)")
         
         if not passed and hasattr(self, 'debug') and self.debug:
              self.debug.log(f"Badge check failed: Circ={circularity:.2f}, WhitePx={white_pixels}")

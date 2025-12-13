@@ -13,7 +13,7 @@ IMAGES_DIR = os.path.join(CORE_DIR, "captchaimages")
 
 def test_selected_fields_all_images():
     """
-    Test that selectedFieldsRecaptcha.png is the ONLY image with detected selections.
+    Test that detected selections match expectations for known images.
     All other images should return empty lists.
     """
     if not os.path.exists(IMAGES_DIR):
@@ -24,7 +24,9 @@ def test_selected_fields_all_images():
     # Define expectations
     # Filename -> List of 1-based indices
     expectations = {
-        "selectedFieldsRecaptcha.png": [1, 2, 6]
+        "selectedFieldsRecaptcha.png": [1, 2, 6],
+        "selectedCars.png": [2, 3, 4, 5, 7],
+        "selectedCrosswalks.png": [9, 10, 11, 12, 14, 15, 16]
     }
 
     for filename in images:
@@ -50,14 +52,5 @@ def test_selected_fields_all_images():
         expected = expectations.get(filename, [])
         expected.sort()
         
-        # Determine if this failure is critical
-        # For selectedFieldsRecaptcha.png, we MUST match [1, 2, 6]
-        # For others, we MUST match []
-        
-        if filename == "selectedFieldsRecaptcha.png":
-            assert selected_indices == expected, f"Failed for {filename}: Expected {expected}, got {selected_indices}"
-        else:
-            # For other images, we verify no false positives
-            # Note: We allow loading indices to be non-empty if the image actually has loading spinners,
-            # but for now we only strictly assert on selected_indices (blue badges).
-            assert selected_indices == [], f"False positive in {filename}: Found {selected_indices}, expected empty"
+        # Verify results match expectations
+        assert selected_indices == expected, f"Failed for {filename}: Expected {expected}, got {selected_indices}"
