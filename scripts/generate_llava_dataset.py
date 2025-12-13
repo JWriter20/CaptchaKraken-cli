@@ -61,7 +61,7 @@ def generate_llava_dataset():
         output_image_path = os.path.join(output_dir, output_image_filename)
         
         try:
-            add_overlays_to_image(image_path, overlays, output_path=output_image_path, label_position="top-left")
+            add_overlays_to_image(image_path, overlays, output_path=output_image_path, label_position="top-right")
         except Exception as e:
             print(f"Error saving overlay for {filename}: {e}")
             continue

@@ -131,6 +131,13 @@ def draw_enhanced_bounding_box(draw, bbox, text=None, number=None, image_size=No
             bg_y2 = y2 - 4
             bg_x2 = bg_x1 + container_width
             bg_y1 = bg_y2 - container_height
+
+        elif label_position == "top-right":
+            # Top Right of the box (inside)
+            bg_x2 = x2 - 4
+            bg_y1 = y1 + 4
+            bg_x1 = bg_x2 - container_width
+            bg_y2 = bg_y1 + container_height
             
         else: # Default to top-left
             bg_x1 = x1 + 4
@@ -166,10 +173,9 @@ def draw_enhanced_bounding_box(draw, bbox, text=None, number=None, image_size=No
 
         # Draw background and text
         # Make background semi-transparent
-        fill_color = color
-        if isinstance(color, str) and color.startswith("#"):
-            fill_color = hex_to_rgba(color, alpha=160)
-            
+        # Use black background for labels to ensure high contrast for numbers
+        fill_color = (0, 0, 0, 180)
+
         draw.rectangle([bg_x1, bg_y1, bg_x2, bg_y2], fill=fill_color, outline="white", width=2)
         draw.text((text_x, text_y), label_text, fill="white", font=font)
 
