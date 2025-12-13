@@ -274,10 +274,15 @@ class ImageProcessor:
     # --- Configuration ---
     # HSV color ranges for detection
     # Base blue: rgb(27, 115, 232) -> hsv(107, 225, 232)
-    # Actual blue checkmarks in images: hue 109-111, sat 151-191, val 152-236
-    # Range: hue 108-112 (±2 from mean), sat 140-255 (lowered to catch lower sat blues), val 150-255 (lowered to catch lower val blues)
+    # Actual blue badge analysis shows: hue 101-113, sat 51-226, val 114-252
+    # We want to capture ONLY the blue badge fill, NOT the white checkmark (white has low saturation).
+    # In practice the badge has a consistent "core" hue (median ~107) while edges can be noisy.
+    # So we use a tighter range for the *badge* and keep a broader blue for *loading/spinner* detection.
     COLORS = {
-        'BLUE':  {'lower': (108, 140, 150), 'upper': (112, 255, 255)}
+        # Tight "badge blue" core (excludes many non-badge blues)
+        'BADGE_BLUE': {'lower': (104, 80, 120), 'upper': (111, 255, 255)},
+        # Broader blue for spinners/loading indicators
+        'BLUE':       {'lower': (100, 50, 100), 'upper': (114, 255, 255)},
     }
 
     def detect_selected_cells(self, image_path: str, grid_boxes: List[Tuple[int, int, int, int]]) -> Tuple[List[int], List[int]]:
@@ -375,7 +380,7 @@ class ImageProcessor:
         Checks if a region contains a Blue checkmark badge with circularity check.
         Requires: pixel count > threshold AND circularity > 0.85
         """
-        color_name = 'BLUE'
+        color_name = 'BADGE_BLUE'
         color = self.COLORS[color_name]
         mask = cv2.inRange(hsv_roi, np.array(color['lower']), np.array(color['upper']))
         pixel_count = cv2.countNonZero(mask)
@@ -387,17 +392,33 @@ class ImageProcessor:
                 self.debug.log(f"Cell {cell_id}: Pixel count below threshold, {pixel_count} <= {threshold}")
             return False
         
-        # Check circularity - badge should be circular
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Morphology: close small gaps in the blue circle caused by anti-aliasing / compression.
+        # IMPORTANT: the white checkmark should *not* be included in the mask (low saturation), so
+        # we compute circularity on the convex hull of the blue pixels to ignore the checkmark cut-out.
+        kernel = np.ones((3, 3), np.uint8)
+        cleaned = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+        # Check circularity - badge should be circular (on convex hull)
+        contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             if self.debug and cell_id is not None:
-                self.debug.log(f"Cell {cell_id}: No contours found")
+                self.debug.log(f"Cell {cell_id}: No blue contours found")
             return False
         
         # Find the largest contour (should be the badge)
         max_cnt = max(contours, key=cv2.contourArea)
-        area = cv2.contourArea(max_cnt)
-        perimeter = cv2.arcLength(max_cnt, True)
+        hull = cv2.convexHull(max_cnt)
+        area = cv2.contourArea(hull)
+        perimeter = cv2.arcLength(hull, True)
+
+        # Area sanity check: badge should be a reasonably-sized blob within the ROI
+        roi_area = hsv_roi.shape[0] * hsv_roi.shape[1]
+        if roi_area > 0:
+            area_ratio = area / roi_area
+            if area_ratio < 0.05:
+                if self.debug and cell_id is not None:
+                    self.debug.log(f"Cell {cell_id}: Blue area too small ({area_ratio:.3f} of ROI)")
+                return False
         
         if perimeter == 0:
             if self.debug and cell_id is not None:
@@ -415,7 +436,29 @@ class ImageProcessor:
                 self.debug.log(f"Cell {cell_id}: Circularity too low")
             return False
         
-        return True  # Found a circular badge
+        # Check that the badge is positioned in the top-left corner
+        # Badges should be near the corner, not in the center or elsewhere
+        h, w = hsv_roi.shape[:2]
+        M = cv2.moments(hull)
+        if M["m00"] == 0:
+            if self.debug and cell_id is not None:
+                self.debug.log(f"Cell {cell_id}: Zero moment")
+            return False
+        
+        centroid_x = M["m10"] / M["m00"]
+        centroid_y = M["m01"] / M["m00"]
+        
+        # Badge should be in top-left region (first 60% of width and height)
+        # Using 60% instead of 50% to account for slight positioning variations
+        if centroid_x > w * 0.6 or centroid_y > h * 0.6:
+            if self.debug and cell_id is not None:
+                self.debug.log(f"Cell {cell_id}: Badge centroid ({centroid_x:.1f}, {centroid_y:.1f}) not in top-left region")
+            return False
+        
+        if self.debug and cell_id is not None:
+            self.debug.log(f"Cell {cell_id}: Badge centroid ({centroid_x:.1f}, {centroid_y:.1f}) in top-left region")
+        
+        return True  # Found a circular badge in the top-left corner
 
     def _is_loading(self, hsv_roi, cell_id: int = None, bgr_roi = None) -> bool:
         """Detects blue movement/spinners in the center of the cell."""

@@ -464,5 +464,24 @@
       12
     ],
     "optional": []
+  },
+  "motorcycle3of7Selected.png": {
+    "reasoning": "",
+    "selectedCells": [
+      6,
+      10,
+      11
+    ],
+    "required": [
+      6,
+      7,
+      8,
+      10,
+      11,
+      12
+    ],
+    "optional": [
+      14
+    ]
   }
 }
