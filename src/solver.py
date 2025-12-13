@@ -245,8 +245,12 @@ class CaptchaSolver:
             cv_selected, cv_loading = self.image_processor.detect_selected_cells(image_path, grid_boxes)
             if cv_selected:
                 self.debug.log(f"CV Detected already selected cells: {cv_selected}")
+            else:
+                self.debug.log("CV Detection: No selected cells detected")
             if cv_loading:
                 self.debug.log(f"CV Detected loading cells: {cv_loading}")
+            else:
+                self.debug.log("CV Detection: No loading cells detected")
         except Exception as e:
             self.debug.log(f"Error in CV check for selected cells: {e}")
 
@@ -260,6 +264,7 @@ class CaptchaSolver:
             # Prepare overlays - only for selectable cells
             overlays = []
             valid_indices = []
+            filtered_out = []
             
             for i, (x1, y1, x2, y2) in enumerate(grid_boxes):
                 idx = i + 1
@@ -268,12 +273,18 @@ class CaptchaSolver:
                 
                 # Filter out selected and loading cells from the overlay
                 if idx in cv_selected or idx in cv_loading:
+                    filtered_out.append(idx)
+                    self.debug.log(f"Filtering out cell {idx} from overlay (selected={idx in cv_selected}, loading={idx in cv_loading})")
                     continue
                 
                 # Use a high-contrast color that doesn't resemble traffic lights (Red/Yellow/Green)
                 # or Checkmarks (Blue). Magenta/Purple is a good choice.
                 overlays.append({"bbox": [x1, y1, w, h], "number": idx, "color": "#9B59B6"})
                 valid_indices.append(idx)
+            
+            if filtered_out:
+                self.debug.log(f"Total cells filtered out: {filtered_out}")
+            self.debug.log(f"Cells available for selection (numbered in overlay): {valid_indices}")
 
             # If no cells are valid for selection
             if not overlays:
@@ -297,9 +308,15 @@ class CaptchaSolver:
             
             # Filter just in case the model hallucinates numbers not in overlay
             # (The model shouldn't see numbers that aren't there, but good for safety)
+            before_filter = selected_numbers.copy()
             selected_numbers = [n for n in selected_numbers if n in valid_indices]
+            
+            if len(before_filter) != len(selected_numbers):
+                filtered = set(before_filter) - set(selected_numbers)
+                self.debug.log(f"WARNING: LLM selected cells that were filtered out: {filtered}")
+                self.debug.log(f"These cells should not have been in the overlay (CV detected them as selected/loading)")
 
-            self.debug.log(f"Grid selection: {selected_numbers}")
+            self.debug.log(f"Grid selection (after filtering): {selected_numbers}")
 
             # Wait Logic
             if not selected_numbers and cv_loading:

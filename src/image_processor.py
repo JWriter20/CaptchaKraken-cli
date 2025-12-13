@@ -299,6 +299,9 @@ class ImageProcessor:
         selected_indices = []
         loading_indices = []
 
+        if self.debug:
+            self.debug.log(f"Starting CV detection for {len(grid_boxes)} cells")
+
         for i, (x1, y1, x2, y2) in enumerate(grid_boxes):
             cell_hsv = hsv[y1:y2, x1:x2]
             cell_bgr = img[y1:y2, x1:x2]
@@ -324,31 +327,11 @@ class ImageProcessor:
                 cv2.rectangle(overlay, (cx, cy), (cx + cw, cy + ch), (255, 0, 0), 2)  # Blue for loading detection
                 cv2.putText(overlay, "Center Loading", (cx + 5, cy + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
                 
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                    overlay_path = tf.name
-                cv2.imwrite(overlay_path, overlay)
-                self._temp_files.append(overlay_path)
-                self.debug.save_image(overlay_path, f"cell_{cell_id}_overlay.png")
-                
-                # Also save the plain cell image
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                    cell_path = tf.name
-                cv2.imwrite(cell_path, cell_bgr)
-                self._temp_files.append(cell_path)
-                self.debug.save_image(cell_path, f"cell_{cell_id}_full.png")
-
             # 1. Check Top-Left (40% area) for a Selection Badge
             tl_roi = self._get_roi(cell_hsv, 0, 0, 0.4, 0.4)
             if tl_roi.size > 0:
-                # Save top-left ROI for debugging
-                tl_roi_bgr = None
-                if self.debug:
-                    tl_roi_bgr = self._get_roi(cell_bgr, 0, 0, 0.4, 0.4)
-                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                        tl_roi_path = tf.name
-                    cv2.imwrite(tl_roi_path, tl_roi_bgr)
-                    self._temp_files.append(tl_roi_path)
-                    self.debug.save_image(tl_roi_path, f"cell_{cell_id}_tl_roi.png")
+                # Get BGR version for debugging
+                tl_roi_bgr = self._get_roi(cell_bgr, 0, 0, 0.4, 0.4) if self.debug else None
                 
                 if self._has_badge(tl_roi, cell_id, tl_roi_bgr):
                     selected_indices.append(cell_id)
@@ -359,20 +342,20 @@ class ImageProcessor:
             # 2. Check Center (40% area) for Spinner/Loading Badge
             center_roi = self._get_roi(cell_hsv, 0.3, 0.3, 0.4, 0.4)
             if center_roi.size > 0:
-                # Save center ROI for debugging
-                center_roi_bgr = None
-                if self.debug:
-                    center_roi_bgr = self._get_roi(cell_bgr, 0.3, 0.3, 0.4, 0.4)
-                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                        center_roi_path = tf.name
-                    cv2.imwrite(center_roi_path, center_roi_bgr)
-                    self._temp_files.append(center_roi_path)
-                    self.debug.save_image(center_roi_path, f"cell_{cell_id}_center_roi.png")
+                # Get BGR version for debugging
+                center_roi_bgr = self._get_roi(cell_bgr, 0.3, 0.3, 0.4, 0.4) if self.debug else None
                 
                 if self._is_loading(center_roi, cell_id, center_roi_bgr):
                     loading_indices.append(cell_id)
                     if self.debug:
                         self.debug.log(f"Cell {cell_id}: Detected Loading Indicator")
+
+        if self.debug:
+            self.debug.log(f"CV Detection complete: {len(selected_indices)} selected, {len(loading_indices)} loading")
+            if selected_indices:
+                self.debug.log(f"Selected cell IDs: {selected_indices}")
+            if loading_indices:
+                self.debug.log(f"Loading cell IDs: {loading_indices}")
 
         return selected_indices, loading_indices
 
@@ -397,29 +380,6 @@ class ImageProcessor:
         mask = cv2.inRange(hsv_roi, np.array(color['lower']), np.array(color['upper']))
         pixel_count = cv2.countNonZero(mask)
         threshold = hsv_roi.size * 0.03
-        
-        # Save mask and overlay for debugging
-        if self.debug and cell_id is not None:
-            # Save raw mask
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                mask_path = tf.name
-            cv2.imwrite(mask_path, mask)
-            self._temp_files.append(mask_path)
-            self.debug.save_image(mask_path, f"cell_{cell_id}_tl_{color_name.lower()}_mask.png")
-            
-            # Save overlay if BGR ROI is provided
-            if bgr_roi is not None:
-                overlay = bgr_roi.copy()
-                # Create colored mask overlay
-                mask_colored = cv2.applyColorMap(mask, cv2.COLORMAP_JET)
-                overlay = cv2.addWeighted(overlay, 0.7, mask_colored, 0.3, 0)
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                    overlay_path = tf.name
-                cv2.imwrite(overlay_path, overlay)
-                self._temp_files.append(overlay_path)
-                self.debug.save_image(overlay_path, f"cell_{cell_id}_tl_{color_name.lower()}_overlay.png")
-            
-            self.debug.log(f"Cell {cell_id}: {color_name} mask - {pixel_count} pixels (threshold: {threshold:.1f})")
         
         # Check pixel count threshold first
         if pixel_count <= threshold:
@@ -465,29 +425,8 @@ class ImageProcessor:
         pixel_count = cv2.countNonZero(blue_mask)
         total_pixels = hsv_roi.shape[0] * hsv_roi.shape[1]
         density = pixel_count / total_pixels if total_pixels > 0 else 0
-        
-        # Save mask and overlay for debugging
-        if self.debug and cell_id is not None:
-            # Save raw mask
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                mask_path = tf.name
-            cv2.imwrite(mask_path, blue_mask)
-            self._temp_files.append(mask_path)
-            self.debug.save_image(mask_path, f"cell_{cell_id}_center_blue_mask.png")
             
-            # Save overlay if BGR ROI is provided
-            if bgr_roi is not None:
-                overlay = bgr_roi.copy()
-                # Create colored mask overlay
-                mask_colored = cv2.applyColorMap(blue_mask, cv2.COLORMAP_JET)
-                overlay = cv2.addWeighted(overlay, 0.7, mask_colored, 0.3, 0)
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                    overlay_path = tf.name
-                cv2.imwrite(overlay_path, overlay)
-                self._temp_files.append(overlay_path)
-                self.debug.save_image(overlay_path, f"cell_{cell_id}_center_blue_overlay.png")
-            
-            self.debug.log(f"Cell {cell_id}: Center blue density = {density:.3f} ({pixel_count}/{total_pixels} pixels)")
+        self.debug.log(f"Cell {cell_id}: Center blue density = {density:.3f} ({pixel_count}/{total_pixels} pixels)")
         
         return 0.05 < density < 0.60  # Spinners are rings, so density is moderate
 
