@@ -384,7 +384,7 @@ class ImageProcessor:
         # Check pixel count threshold first
         if pixel_count <= threshold:
             if self.debug and cell_id is not None:
-                self.debug.log(f"Cell {cell_id}: Pixel count below threshold")
+                self.debug.log(f"Cell {cell_id}: Pixel count below threshold, {pixel_count} <= {threshold}")
             return False
         
         # Check circularity - badge should be circular
