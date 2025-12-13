@@ -10,6 +10,7 @@ Tests:
 import pytest
 import os
 import sys
+import importlib.util
 
 # Add src to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
@@ -17,7 +18,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "s
 from src.planner import ActionPlanner
 from src.grid_planner import GridPlanner
 from src.overlay import add_overlays_to_image
-from src.imagePreprocessing import get_grid_bounding_boxes
+from src.image_processor import ImageProcessor
 
 # Paths
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -27,6 +28,14 @@ IMAGES_DIR = os.path.join(CORE_DIR, "captchaimages")
 
 @pytest.fixture(scope="module")
 def planner():
+    try:
+        has_google_genai = importlib.util.find_spec("google.genai") is not None
+    except ModuleNotFoundError:
+        has_google_genai = False
+    if not has_google_genai:
+        pytest.skip("google-genai not installed. Skipping real LLM planner tests.", allow_module_level=True)
+    if not os.getenv("GEMINI_API_KEY"):
+        pytest.skip("GEMINI_API_KEY not set in environment. Skipping real LLM planner tests.", allow_module_level=True)
     return ActionPlanner(backend="gemini")
 
 
@@ -97,7 +106,7 @@ class TestGridSelection:
             pytest.skip(f"Image not found: {image_path}")
         
         # Check if it's actually a grid
-        grid_boxes = get_grid_bounding_boxes(image_path)
+        grid_boxes = ImageProcessor.get_grid_bounding_boxes(image_path)
         if not grid_boxes:
             pytest.skip("No grid detected in image")
         

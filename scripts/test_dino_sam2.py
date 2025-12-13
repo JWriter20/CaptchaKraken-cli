@@ -7,7 +7,7 @@ from PIL import Image
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from src.imagePreprocessing import apply_gaussian_blur, apply_clahe
+from src.image_processor import ImageProcessor
 from src.attention import AttentionExtractor
 from src.overlay import add_overlays_to_image
 
@@ -24,9 +24,7 @@ def test_dino_sam2_hybrid():
     sharpened_path = "test-results/hcaptchaDragImage4_sharpened_dino.png"
     if not os.path.exists(sharpened_path):
         print("Sharpening image for DINO...")
-        # Use existing sharpen_image from imagePreprocessing
-        from src.imagePreprocessing import sharpen_image
-        sharpen_image(image_path, sharpened_path)
+        ImageProcessor.sharpen_image(image_path, sharpened_path)
     
     # Use sharpened image for detection
     detect_path = sharpened_path

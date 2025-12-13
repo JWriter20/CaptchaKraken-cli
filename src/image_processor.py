@@ -271,6 +271,15 @@ class ImageProcessor:
 
         return boxes
 
+    # --- Configuration ---
+    # HSV color ranges for detection
+    # Base blue: rgb(27, 115, 232) -> hsv(107, 225, 232)
+    # Actual blue checkmarks in images: hue 109-111, sat 151-191, val 152-236
+    # Range: hue 108-112 (±2 from mean), sat 140-255 (lowered to catch lower sat blues), val 150-255 (lowered to catch lower val blues)
+    COLORS = {
+        'BLUE':  {'lower': (108, 140, 150), 'upper': (112, 255, 255)}
+    }
+
     def detect_selected_cells(self, image_path: str, grid_boxes: List[Tuple[int, int, int, int]]) -> Tuple[List[int], List[int]]:
         """
         Detects grid cells status using Computer Vision.
@@ -290,190 +299,197 @@ class ImageProcessor:
         selected_indices = []
         loading_indices = []
 
-        # Color ranges
-        # ReCaptcha Blue - Tuned tightly for rgb(27, 115, 232) -> hsv(107, 225, 232)
-        # Widen slightly to cover variations.
-        lower_blue = np.array([100, 120, 120])
-        upper_blue = np.array([120, 255, 255])
-        # hCaptcha Green
-        lower_green = np.array([35, 40, 40])
-        upper_green = np.array([85, 255, 255]) 
+        for i, (x1, y1, x2, y2) in enumerate(grid_boxes):
+            cell_hsv = hsv[y1:y2, x1:x2]
+            cell_bgr = img[y1:y2, x1:x2]
+            cell_id = i + 1
 
-        for i, box in enumerate(grid_boxes):
-            x1, y1, x2, y2 = box
-            w = x2 - x1
-            h = y2 - y1
-            
-            # --- 1. Check Top-Left for Selection Badge ---
-            # ROI: Top-Left 25% (Split into 4, check top-left)
-            # Stricter ROI to avoid catching content in the cell
-            tl_w = int(w * 0.25)
-            tl_h = int(h * 0.25)
-            tl_w = max(1, min(tl_w, w))
-            tl_h = max(1, min(tl_h, h))
-            
-            tl_roi_hsv = hsv[y1:y1+tl_h, x1:x1+tl_w]
-            tl_bgr = img[y1:y1+tl_h, x1:x1+tl_w]
-            
-            is_selected = False
-            
-            if tl_roi_hsv.size > 0:
-                # Blue Badge
-                mask_blue = cv2.inRange(tl_roi_hsv, lower_blue, upper_blue)
-                blue_count = cv2.countNonZero(mask_blue)
-                threshold = (tl_w * tl_h) * 0.03
+            # Save full cell image with ROI overlays for debugging
+            if self.debug:
+                # Create overlay showing ROI regions
+                overlay = cell_bgr.copy()
+                h, w = cell_bgr.shape[:2]
                 
-                if blue_count > threshold:
-                    if self._check_contours_for_badge(mask_blue, tl_bgr):
-                        is_selected = True
-                        if self.debug: self.debug.log(f"Cell {i+1}: Detected Blue Selection Badge")
-                    elif self.debug:
-                        self.debug.log(f"Cell {i+1}: Blue pixels found ({blue_count} > {threshold:.1f}) but badge check failed.")
-
-                # Green Badge
-                if not is_selected:
-                    mask_green = cv2.inRange(tl_roi_hsv, lower_green, upper_green)
-                    green_count = cv2.countNonZero(mask_green)
-                    if green_count > threshold:
-                        if self._check_contours_for_badge(mask_green, tl_bgr):
-                            is_selected = True
-                            if self.debug: self.debug.log(f"Cell {i+1}: Detected Green Selection Badge")
-                        elif self.debug:
-                            self.debug.log(f"Cell {i+1}: Green pixels found ({green_count} > {threshold:.1f}) but badge check failed.")
-            
-            if is_selected:
-                selected_indices.append(i + 1)
-                # If selected, we assume it's not "loading" in a way that blocks progress
-                # (Static selection)
-                continue 
-
-            # --- 2. Check Center for Loading Spinner / Badge ---
-            # ROI: Center 40%
-            cx = int(w * 0.3)
-            cy = int(h * 0.3)
-            cw = int(w * 0.4)
-            ch = int(h * 0.4)
-            
-            center_roi_hsv = hsv[y1+cy:y1+cy+ch, x1+cx:x1+cx+cw]
-            center_roi_bgr = img[y1+cy:y1+cy+ch, x1+cx:x1+cx+cw]
-            
-            if center_roi_hsv.size > 0:
-                # Loading indicators are typically Blue
-                mask_blue_center = cv2.inRange(center_roi_hsv, lower_blue, upper_blue)
-                blue_density = cv2.countNonZero(mask_blue_center) / (cw * ch)
+                # Draw top-left ROI rectangle (40% x 40%)
+                tl_w = int(w * 0.4)
+                tl_h = int(h * 0.4)
+                cv2.rectangle(overlay, (0, 0), (tl_w, tl_h), (0, 255, 0), 2)  # Green for badge detection
+                cv2.putText(overlay, "TL Badge", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
                 
-                # Check for "Large blue circle with checkmark" (Badge in center)
-                if blue_density > 0.05:
-                     # Check if it's a badge (Checkmark)
-                     if self._check_contours_for_badge(mask_blue_center, center_roi_bgr):
-                         loading_indices.append(i + 1)
-                         if self.debug: self.debug.log(f"Cell {i+1}: Detected Center Loading Badge (Checkmark)")
-                     
-                     # Or if it's just a spinner (significant blue mass in center)
-                     else:
-                         # Refined Spinner Detection:
-                         # Spinners are ring-like (low density in bbox) and roughly square aspect ratio.
-                         # Blue signs are solid (high density) and/or rectangular.
-                        contours, _ = cv2.findContours(mask_blue_center, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                        if contours:
-                            max_cnt = max(contours, key=cv2.contourArea)
-                            x, y, w_cnt, h_cnt = cv2.boundingRect(max_cnt)
-                            
-                            if w_cnt > 0 and h_cnt > 0:
-                                aspect_ratio = float(w_cnt) / h_cnt
-                                shape_area = w_cnt * h_cnt
-                                # Count pixels within the bounding box (approximation using total blue pixels)
-                                blue_pixels = cv2.countNonZero(mask_blue_center)
-                                shape_density = blue_pixels / shape_area
-                                
-                                # Check size relative to ROI (Spinner should cover a good portion of the center)
-                                rel_width = w_cnt / cw
-                                rel_height = h_cnt / ch
+                # Draw center ROI rectangle (40% x 40%, starting at 30%)
+                cx = int(w * 0.3)
+                cy = int(h * 0.3)
+                cw = int(w * 0.4)
+                ch = int(h * 0.4)
+                cv2.rectangle(overlay, (cx, cy), (cx + cw, cy + ch), (255, 0, 0), 2)  # Blue for loading detection
+                cv2.putText(overlay, "Center Loading", (cx + 5, cy + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+                
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+                    overlay_path = tf.name
+                cv2.imwrite(overlay_path, overlay)
+                self._temp_files.append(overlay_path)
+                self.debug.save_image(overlay_path, f"cell_{cell_id}_overlay.png")
+                
+                # Also save the plain cell image
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+                    cell_path = tf.name
+                cv2.imwrite(cell_path, cell_bgr)
+                self._temp_files.append(cell_path)
+                self.debug.save_image(cell_path, f"cell_{cell_id}_full.png")
 
-                                # Criteria for Spinner:
-                                # 1. Aspect Ratio ~ 1 (Circle) - Stricter range
-                                # 2. Shape Density < 0.6 (Ring structure) but > 0.25 (Not too sparse)
-                                # 3. Size relative to ROI > 0.35 (Must be substantial)
-                                if 0.8 < aspect_ratio < 1.25 and 0.25 < shape_density < 0.6 and rel_width > 0.35 and rel_height > 0.35:
-                                    loading_indices.append(i + 1)
-                                    if self.debug: self.debug.log(f"Cell {i+1}: Detected Center Loading Spinner (Density: {shape_density:.2f}, AR: {aspect_ratio:.2f}, RelSize: {rel_width:.2f}x{rel_height:.2f})")
-                                elif self.debug:
-                                    self.debug.log(f"Cell {i+1}: Ignored blue object (Density: {shape_density:.2f}, AR: {aspect_ratio:.2f}, RelSize: {rel_width:.2f}x{rel_height:.2f}) - likely a sign/static object")
+            # 1. Check Top-Left (40% area) for a Selection Badge
+            tl_roi = self._get_roi(cell_hsv, 0, 0, 0.4, 0.4)
+            if tl_roi.size > 0:
+                # Save top-left ROI for debugging
+                tl_roi_bgr = None
+                if self.debug:
+                    tl_roi_bgr = self._get_roi(cell_bgr, 0, 0, 0.4, 0.4)
+                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+                        tl_roi_path = tf.name
+                    cv2.imwrite(tl_roi_path, tl_roi_bgr)
+                    self._temp_files.append(tl_roi_path)
+                    self.debug.save_image(tl_roi_path, f"cell_{cell_id}_tl_roi.png")
+                
+                if self._has_badge(tl_roi, cell_id, tl_roi_bgr):
+                    selected_indices.append(cell_id)
+                    if self.debug:
+                        self.debug.log(f"Cell {cell_id}: Detected Selection Badge")
+                continue
+
+            # 2. Check Center (40% area) for Spinner/Loading Badge
+            center_roi = self._get_roi(cell_hsv, 0.3, 0.3, 0.4, 0.4)
+            if center_roi.size > 0:
+                # Save center ROI for debugging
+                center_roi_bgr = None
+                if self.debug:
+                    center_roi_bgr = self._get_roi(cell_bgr, 0.3, 0.3, 0.4, 0.4)
+                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+                        center_roi_path = tf.name
+                    cv2.imwrite(center_roi_path, center_roi_bgr)
+                    self._temp_files.append(center_roi_path)
+                    self.debug.save_image(center_roi_path, f"cell_{cell_id}_center_roi.png")
+                
+                if self._is_loading(center_roi, cell_id, center_roi_bgr):
+                    loading_indices.append(cell_id)
+                    if self.debug:
+                        self.debug.log(f"Cell {cell_id}: Detected Loading Indicator")
 
         return selected_indices, loading_indices
 
-    def _check_contours_for_badge(self, mask, roi_bgr) -> bool:
-        """Helper to validate if a mask looks like a checkmark badge."""
+    # --- Helper Logic ---
+
+    def _get_roi(self, img, x_pct, y_pct, w_pct, h_pct):
+        """Extracts a sub-region of an image based on percentages."""
+        h, w = img.shape[:2]
+        y_start = int(h * y_pct)
+        y_end = int(h * (y_pct + h_pct))
+        x_start = int(w * x_pct)
+        x_end = int(w * (x_pct + w_pct))
+        return img[y_start:y_end, x_start:x_end]
+
+    def _has_badge(self, hsv_roi, cell_id: int = None, bgr_roi = None) -> bool:
+        """
+        Checks if a region contains a Blue checkmark badge with circularity check.
+        Requires: pixel count > threshold AND circularity > 0.85
+        """
+        color_name = 'BLUE'
+        color = self.COLORS[color_name]
+        mask = cv2.inRange(hsv_roi, np.array(color['lower']), np.array(color['upper']))
+        pixel_count = cv2.countNonZero(mask)
+        threshold = hsv_roi.size * 0.03
+        
+        # Save mask and overlay for debugging
+        if self.debug and cell_id is not None:
+            # Save raw mask
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+                mask_path = tf.name
+            cv2.imwrite(mask_path, mask)
+            self._temp_files.append(mask_path)
+            self.debug.save_image(mask_path, f"cell_{cell_id}_tl_{color_name.lower()}_mask.png")
+            
+            # Save overlay if BGR ROI is provided
+            if bgr_roi is not None:
+                overlay = bgr_roi.copy()
+                # Create colored mask overlay
+                mask_colored = cv2.applyColorMap(mask, cv2.COLORMAP_JET)
+                overlay = cv2.addWeighted(overlay, 0.7, mask_colored, 0.3, 0)
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+                    overlay_path = tf.name
+                cv2.imwrite(overlay_path, overlay)
+                self._temp_files.append(overlay_path)
+                self.debug.save_image(overlay_path, f"cell_{cell_id}_tl_{color_name.lower()}_overlay.png")
+            
+            self.debug.log(f"Cell {cell_id}: {color_name} mask - {pixel_count} pixels (threshold: {threshold:.1f})")
+        
+        # Check pixel count threshold first
+        if pixel_count <= threshold:
+            if self.debug and cell_id is not None:
+                self.debug.log(f"Cell {cell_id}: Pixel count below threshold")
+            return False
+        
+        # Check circularity - badge should be circular
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
+            if self.debug and cell_id is not None:
+                self.debug.log(f"Cell {cell_id}: No contours found")
             return False
-            
+        
+        # Find the largest contour (should be the badge)
         max_cnt = max(contours, key=cv2.contourArea)
         area = cv2.contourArea(max_cnt)
         perimeter = cv2.arcLength(max_cnt, True)
         
         if perimeter == 0:
+            if self.debug and cell_id is not None:
+                self.debug.log(f"Cell {cell_id}: Zero perimeter")
             return False
-            
+        
         circularity = 4 * np.pi * area / (perimeter * perimeter)
         
-        # Check for white checkmark INSIDE the badge bounding box
-        # The mask only captures the blue/green part, excluding the white checkmark (saturation=0)
-        x, y, w, h = cv2.boundingRect(max_cnt)
+        if self.debug and cell_id is not None:
+            self.debug.log(f"Cell {cell_id}: Circularity = {circularity:.3f} (required: >0.85)")
         
-        # Extract the region corresponding to the badge from the ROI
-        badge_roi = roi_bgr[y:y+h, x:x+w]
-        
-        if badge_roi.size == 0:
+        # Require circularity > 0.85 for badge detection
+        if circularity < 0.85:
+            if self.debug and cell_id is not None:
+                self.debug.log(f"Cell {cell_id}: Circularity too low")
             return False
+        
+        return True  # Found a circular badge
 
-        badge_gray = cv2.cvtColor(badge_roi, cv2.COLOR_BGR2GRAY)
-        # Check for bright pixels (white checkmark)
-        _, white_mask = cv2.threshold(badge_gray, 200, 255, cv2.THRESH_BINARY)
-        white_pixels = cv2.countNonZero(white_mask)
+    def _is_loading(self, hsv_roi, cell_id: int = None, bgr_roi = None) -> bool:
+        """Detects blue movement/spinners in the center of the cell."""
+        blue_mask = cv2.inRange(hsv_roi, 
+                                np.array(self.COLORS['BLUE']['lower']), 
+                                np.array(self.COLORS['BLUE']['upper']))
+        pixel_count = cv2.countNonZero(blue_mask)
+        total_pixels = hsv_roi.shape[0] * hsv_roi.shape[1]
+        density = pixel_count / total_pixels if total_pixels > 0 else 0
         
-        # Criteria: High circularity (badge shape) AND contains white pixels (checkmark)
-        # User requirement: Circularity > 0.85 -> Relaxed to 0.7
+        # Save mask and overlay for debugging
+        if self.debug and cell_id is not None:
+            # Save raw mask
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+                mask_path = tf.name
+            cv2.imwrite(mask_path, blue_mask)
+            self._temp_files.append(mask_path)
+            self.debug.save_image(mask_path, f"cell_{cell_id}_center_blue_mask.png")
+            
+            # Save overlay if BGR ROI is provided
+            if bgr_roi is not None:
+                overlay = bgr_roi.copy()
+                # Create colored mask overlay
+                mask_colored = cv2.applyColorMap(blue_mask, cv2.COLORMAP_JET)
+                overlay = cv2.addWeighted(overlay, 0.7, mask_colored, 0.3, 0)
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+                    overlay_path = tf.name
+                cv2.imwrite(overlay_path, overlay)
+                self._temp_files.append(overlay_path)
+                self.debug.save_image(overlay_path, f"cell_{cell_id}_center_blue_overlay.png")
+            
+            self.debug.log(f"Cell {cell_id}: Center blue density = {density:.3f} ({pixel_count}/{total_pixels} pixels)")
         
-        passed = circularity > 0.70 and white_pixels > 2
-        
-        # Additional Check: Pixel purity
-        if passed:
-             # Check if the content inside the contour is mostly the badge color + white checkmark
-             
-             # Create a mask for the contour itself to check only pixels INSIDE the circle
-             # We need to offset the contour to the bounding rect frame
-             contour_mask = np.zeros((h, w), dtype=np.uint8)
-             shifted_cnt = max_cnt - np.array([x, y])
-             cv2.drawContours(contour_mask, [shifted_cnt], -1, 255, cv2.FILLED)
-             
-             # Pixels inside the contour
-             pixels_in_contour = cv2.countNonZero(contour_mask)
-             
-             if pixels_in_contour > 0:
-                 # Get the color mask (blue/green) in this ROI
-                 color_mask_roi = mask[y:y+h, x:x+w]
-                 
-                 # Combine color mask and white mask
-                 # valid_pixels are those that are either the badge color (blue/green) OR white (checkmark)
-                 valid_pixels_mask = cv2.bitwise_or(color_mask_roi, white_mask)
-                 
-                 # Intersection: Valid pixels INSIDE the contour
-                 valid_inside = cv2.bitwise_and(valid_pixels_mask, valid_pixels_mask, mask=contour_mask)
-                 valid_count = cv2.countNonZero(valid_inside)
-                 
-                 # Ratio of valid pixels to total contour area
-                 purity_ratio = valid_count / pixels_in_contour
-                 
-                 # Relaxed purity check (allows for more anti-aliasing/noise)
-                 if purity_ratio < 0.75:
-                      passed = False
-                      if hasattr(self, 'debug') and self.debug:
-                           self.debug.log(f"Badge check failed: Impure colors inside badge ({purity_ratio:.2f} < 0.75)")
-        
-        if not passed and hasattr(self, 'debug') and self.debug:
-             self.debug.log(f"Badge check failed: Circ={circularity:.2f}, WhitePx={white_pixels}")
-        return passed
+        return 0.05 < density < 0.60  # Spinners are rings, so density is moderate
 
     @staticmethod
     def detect_checkbox(image_path: str) -> Optional[Tuple[int, int, int, int]]:

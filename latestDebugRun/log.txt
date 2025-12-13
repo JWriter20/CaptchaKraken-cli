@@ -1,239 +1,115 @@
-Debug Run Started: 2025-12-11 21:02:32.892061
-[21:02:33] Saved image: 00_base_image.png
-[21:02:33] Detected grid with 16 cells
-[21:02:33] _solve_grid called with 16 cells (4x4)
-[21:02:33] Instruction passed to planner: 'Select all squares with buses'
-[21:02:33] Saved image: 01_grid_overlay.png
-[21:02:33] [Planner] GridPlanner.get_grid_selection called
-[21:02:33] [Planner]   instruction: 'Select all squares with buses'
-[21:02:33] [Planner]   grid: 4x4
-[21:02:33] [Planner] Backend: gemini, Model: gemini-2.5-flash-lite
-[21:02:33] [Planner] Image path: /var/folders/ng/5tmjc39175x3ln3b019pvyrh0000gn/T/tmp15uxriig.png
-[21:02:33] [Planner] === PROMPT START ===
-You are a captcha solver.
-Task: Select cells in the 4x4 grid (1-16) that match the instruction.
-
-Instruction: "Select all squares with buses"
-Hint: Single large image split into tiles. Select ALL parts.
-
-1. Deconstruct the Instruction:
-   - Identify the "Core Target" (e.g. for "buses", core = vehicle body/wheels; for "traffic lights", core = light fixtures).
-   - Identify "Associated Items" to EXCLUDE (e.g. for "buses", exclude road/asphalt; for "traffic lights", exclude poles/wires unless holding a light).
-
-2. Evaluate each cell (1-16):
-   - Describe the visual content.
-   - CHECK: Is the Core Target visible? (Even a small edge/corner counts).
-   - CHECK: Is it a structural continuation of the Core Target? (e.g. base, roof, top edge).
-   - CHECK: Is it ONLY an Associated Item? (e.g. only a pole, only a railing, only a road).
-   - CONSTRAINT: If it is ONLY an Associated Item, do NOT select it.
-
-3. Final Selection:
-   - Select ALL cells containing the Core Target OR structural continuations.
-   - For 4x4: Be precise but inclusive of edges. 
-   - STRICTLY REJECT: Cells containing ONLY associated items (poles, railings, roads, sky).
-
-Respond JSON ONLY:
-{
-  "analysis": "Core: [Describe], Associated/Excluded: [Describe]",
-  "cell_states": {
-    "1": "Description. Core Visible? [YES/NO]. Associated Only? [YES/NO]. -> [MATCH/NO MATCH]",
-    ...
-  },
-  "loading_cells": [],
-  "selected_numbers": [2, 3]
-}
-=== PROMPT END ===
-[21:02:36] [Planner] === RAW RESPONSE ===
-{
-  "analysis": "Core: Bus body, wheels. Associated/Excluded: Road, buildings, sky, streetlights, cars, yellow taxi.",
-  "cell_states": {
-    "1": "Sky and buildings. Core Visible? NO. Associated Only? YES. -> NO MATCH",
-    "2": "Sky and streetlight. Core Visible? NO. Associated Only? YES. -> NO MATCH",
-    "3": "Sky and buildings. Core Visible? NO. Associated Only? YES. -> NO MATCH",
-    "4": "Buildings and sky. Core Visible? NO. Associated Only? YES. -> NO MATCH",
-    "5": "Buildings and road. Core Visible? NO. Associated Only? YES. -> NO MATCH",
-    "6": "Part of a bus (rear window, lights, roof). Core Visible? YES. Associated Only? NO. -> MATCH",
-    "7": "Part of a bus (rear, roof, side). Core Visible? YES. Associated Only? NO. -> MATCH",
-    "8": "Yellow taxi and road. Core Visible? NO. Associated Only? YES. -> NO MATCH",
-    "9": "Road and curb. Core Visible? NO. Associated Only? YES. -> NO MATCH",
-    "10": "Rear of a bus (lights, license plate, bumper). Core Visible? YES. Associated Only? NO. -> MATCH",
-    "11": "Part of a bus (side, rear). Core Visible? YES. Associated Only? NO. -> MATCH",
-    "12": "Road. Core Visible? NO. Associated Only? YES. -> NO MATCH",
-    "13": "Road and curb. Core Visible? NO. Associated Only? YES. -> NO MATCH",
-    "14": "Road and part of a bus (lower rear). Core Visible? YES. Associated Only? NO. -> MATCH",
-    "15": "Road and part of a bus (lower side). Core Visible? YES. Associated Only? NO. -> MATCH",
-    "16": "Road. Core Visible? NO. Associated Only? YES. -> NO MATCH"
-  },
-  "loading_cells": [],
-  "selected_numbers": [
-    6,
-    7,
-    10,
-    11,
-    14,
-    15
-  ]
-}
-=== END RESPONSE ===
-[21:02:36] [Planner] Analysis: Core: Bus body, wheels. Associated/Excluded: Road, buildings, sky, streetlights, cars, yellow taxi.
-[21:02:36] [Planner] Final selection: [6, 7, 10, 11, 14, 15]
-[21:02:36] Grid selection: [6, 7, 10, 11, 14, 15]
-[21:02:36] Saved image: 00_base_image.png
-[21:02:36] Detected grid with 16 cells
-[21:02:36] _solve_grid called with 16 cells (4x4)
-[21:02:36] Instruction passed to planner: 'Select all squares with motorcycles'
-[21:02:36] Saved image: 01_grid_overlay.png
-[21:02:36] [Planner] GridPlanner.get_grid_selection called
-[21:02:36] [Planner]   instruction: 'Select all squares with motorcycles'
-[21:02:36] [Planner]   grid: 4x4
-[21:02:36] [Planner] Backend: gemini, Model: gemini-2.5-flash-lite
-[21:02:36] [Planner] Image path: /var/folders/ng/5tmjc39175x3ln3b019pvyrh0000gn/T/tmpg3qbtsnx.png
-[21:02:36] [Planner] === PROMPT START ===
-You are a captcha solver.
-Task: Select cells in the 4x4 grid (1-16) that match the instruction.
-
-Instruction: "Select all squares with motorcycles"
-Hint: Single large image split into tiles. Select ALL parts.
-
-1. Deconstruct the Instruction:
-   - Identify the "Core Target" (e.g. for "buses", core = vehicle body/wheels; for "traffic lights", core = light fixtures).
-   - Identify "Associated Items" to EXCLUDE (e.g. for "buses", exclude road/asphalt; for "traffic lights", exclude poles/wires unless holding a light).
-
-2. Evaluate each cell (1-16):
-   - Describe the visual content.
-   - CHECK: Is the Core Target visible? (Even a small edge/corner counts).
-   - CHECK: Is it a structural continuation of the Core Target? (e.g. base, roof, top edge).
-   - CHECK: Is it ONLY an Associated Item? (e.g. only a pole, only a railing, only a road).
-   - CONSTRAINT: If it is ONLY an Associated Item, do NOT select it.
-
-3. Final Selection:
-   - Select ALL cells containing the Core Target OR structural continuations.
-   - For 4x4: Be precise but inclusive of edges. 
-   - STRICTLY REJECT: Cells containing ONLY associated items (poles, railings, roads, sky).
-
-Respond JSON ONLY:
-{
-  "analysis": "Core: [Describe], Associated/Excluded: [Describe]",
-  "cell_states": {
-    "1": "Description. Core Visible? [YES/NO]. Associated Only? [YES/NO]. -> [MATCH/NO MATCH]",
-    ...
-  },
-  "loading_cells": [],
-  "selected_numbers": [2, 3]
-}
-=== PROMPT END ===
-[21:02:38] [Planner] === RAW RESPONSE ===
-{
-  "analysis": "Core: Motorcycle (vehicle body, wheels, handlebars). Associated/Excluded: Road, pavement, person's legs/clothing, basket.",
-  "cell_states": {
-    "1": "A person's leg and part of a motorcycle frame. Core Visible? YES. Associated Only? NO. -> MATCH",
-    "2": "Handlebars and front of a motorcycle. Core Visible? YES. Associated Only? NO. -> MATCH",
-    "3": "Front of a motorcycle with headlights and handlebars. Core Visible? YES. Associated Only? NO. -> MATCH",
-    "4": "Road and pavement. Core Visible? NO. Associated Only? YES. -> NO MATCH",
-    "5": "A person's leg and part of a motorcycle frame. Core Visible? YES. Associated Only? NO. -> MATCH",
-    "6": "The body of a motorcycle with a basket. Core Visible? YES. Associated Only? NO. -> MATCH",
-    "7": "Part of a motorcycle basket and frame. Core Visible? YES. Associated Only? NO. -> MATCH",
-    "8": "Road and pavement. Core Visible? NO. Associated Only? YES. -> NO MATCH",
-    "9": "The exhaust pipe and part of the rear wheel of a motorcycle. Core Visible? YES. Associated Only? NO. -> MATCH",
-    "10": "The body and front wheel of a motorcycle. Core Visible? YES. Associated Only? NO. -> MATCH",
-    "11": "The front wheel and part of the body of a motorcycle. Core Visible? YES. Associated Only? NO. -> MATCH",
-    "12": "Road and pavement. Core Visible? NO. Associated Only? YES. -> NO MATCH",
-    "13": "Pavement. Core Visible? NO. Associated Only? YES. -> NO MATCH",
-    "14": "Pavement and part of a motorcycle wheel. Core Visible? YES. Associated Only? NO. -> MATCH",
-    "15": "Pavement and part of a motorcycle wheel. Core Visible? YES. Associated Only? NO. -> MATCH",
-    "16": "Pavement. Core Visible? NO. Associated Only? YES. -> NO MATCH"
-  },
-  "loading_cells": [],
-  "selected_numbers": [
-    1,
-    2,
-    3,
-    5,
-    6,
-    7,
-    9,
-    10,
-    11,
-    14,
-    15
-  ]
-}
-=== END RESPONSE ===
-[21:02:38] [Planner] Analysis: Core: Motorcycle (vehicle body, wheels, handlebars). Associated/Excluded: Road, pavement, person's legs/clothing, basket.
-[21:02:38] [Planner] Final selection: [1, 2, 3, 5, 6, 7, 9, 10, 11, 14, 15]
-[21:02:38] Cell 1: Blue selected (Circ=0.89, WhitePx=16)
-[21:02:38] CV Detected already selected cells: [1]
-[21:02:38] CV Filter removed 1 items that were already checked.
-[21:02:38] Grid selection: [2, 3, 5, 6, 7, 9, 10, 11, 14, 15]
-[21:02:38] Saved image: 00_base_image.png
-[21:02:38] Detected grid with 16 cells
-[21:02:38] _solve_grid called with 16 cells (4x4)
-[21:02:38] Instruction passed to planner: 'Select all squares with stairs'
-[21:02:38] Saved image: 01_grid_overlay.png
-[21:02:38] [Planner] GridPlanner.get_grid_selection called
-[21:02:38] [Planner]   instruction: 'Select all squares with stairs'
-[21:02:38] [Planner]   grid: 4x4
-[21:02:38] [Planner] Backend: gemini, Model: gemini-2.5-flash-lite
-[21:02:38] [Planner] Image path: /var/folders/ng/5tmjc39175x3ln3b019pvyrh0000gn/T/tmp4fyvlssn.png
-[21:02:38] [Planner] === PROMPT START ===
-You are a captcha solver.
-Task: Select cells in the 4x4 grid (1-16) that match the instruction.
-
-Instruction: "Select all squares with stairs"
-Hint: Single large image split into tiles. Select ALL parts.
-
-1. Deconstruct the Instruction:
-   - Identify the "Core Target" (e.g. for "buses", core = vehicle body/wheels; for "traffic lights", core = light fixtures).
-   - Identify "Associated Items" to EXCLUDE (e.g. for "buses", exclude road/asphalt; for "traffic lights", exclude poles/wires unless holding a light).
-
-2. Evaluate each cell (1-16):
-   - Describe the visual content.
-   - CHECK: Is the Core Target visible? (Even a small edge/corner counts).
-   - CHECK: Is it a structural continuation of the Core Target? (e.g. base, roof, top edge).
-   - CHECK: Is it ONLY an Associated Item? (e.g. only a pole, only a railing, only a road).
-   - CONSTRAINT: If it is ONLY an Associated Item, do NOT select it.
-
-3. Final Selection:
-   - Select ALL cells containing the Core Target OR structural continuations.
-   - For 4x4: Be precise but inclusive of edges. 
-   - STRICTLY REJECT: Cells containing ONLY associated items (poles, railings, roads, sky).
-
-Respond JSON ONLY:
-{
-  "analysis": "Core: [Describe], Associated/Excluded: [Describe]",
-  "cell_states": {
-    "1": "Description. Core Visible? [YES/NO]. Associated Only? [YES/NO]. -> [MATCH/NO MATCH]",
-    ...
-  },
-  "loading_cells": [],
-  "selected_numbers": [2, 3]
-}
-=== PROMPT END ===
-[21:02:42] [Planner] === RAW RESPONSE ===
-{
-  "analysis": "Core: Stairs (steps, risers, treads). Associated/Excluded: Railings, bushes, house siding, windows, grass, pavement.",
-  "cell_states": {
-    "1": "A bush and part of a house window. No stairs. Core Visible? NO. Associated Only? YES. -> NO MATCH",
-    "2": "Part of the stairs (riser and tread) and railing. Core Visible? YES. Associated Only? NO. -> MATCH",
-    "3": "Part of the stairs (riser and tread) and railing. Core Visible? YES. Associated Only? NO. -> MATCH",
-    "4": "House siding and a bush. No stairs. Core Visible? NO. Associated Only? YES. -> NO MATCH",
-    "5": "A bush. No stairs. Core Visible? NO. Associated Only? YES. -> NO MATCH",
-    "6": "Part of the stairs (riser and tread) and railing. Core Visible? YES. Associated Only? NO. -> MATCH",
-    "7": "Part of the stairs (riser and tread) and railing. Core Visible? YES. Associated Only? NO. -> MATCH",
-    "8": "House siding and a bush. No stairs. Core Visible? NO. Associated Only? YES. -> NO MATCH",
-    "9": "A bush. No stairs. Core Visible? NO. Associated Only? YES. -> NO MATCH",
-    "10": "Part of the stairs (riser and tread) and railing. Core Visible? YES. Associated Only? NO. -> MATCH",
-    "11": "Part of the stairs (riser and tread) and railing. Core Visible? YES. Associated Only? NO. -> MATCH",
-    "12": "House siding and grass. No stairs. Core Visible? NO. Associated Only? YES. -> NO MATCH",
-    "13": "Grass and pavement. No stairs. Core Visible? NO. Associated Only? YES. -> NO MATCH",
-    "14": "Part of the stairs (riser and tread) and pavement. Core Visible? YES. Associated Only? NO. -> MATCH",
-    "15": "Part of the stairs (riser and tread) and pavement. Core Visible? YES. Associated Only? NO. -> MATCH",
-    "16": "Grass and pavement. No stairs. Core Visible? NO. Associated Only? YES. -> NO MATCH"
-  },
-  "loading_cells": [],
-  "selected_numbers": [2, 3, 6, 7, 10, 11, 14, 15]
-}
-=== END RESPONSE ===
-[21:02:42] [Planner] Analysis: Core: Stairs (steps, risers, treads). Associated/Excluded: Railings, bushes, house siding, windows, grass, pavement.
-[21:02:42] [Planner] Final selection: [2, 3, 6, 7, 10, 11, 14, 15]
-[21:02:42] Grid selection: [2, 3, 6, 7, 10, 11, 14, 15]
+Debug Run Started: 2025-12-13 14:49:25.847969
+[14:49:25] Saved image: cell_1_overlay.png
+[14:49:25] Saved image: cell_1_full.png
+[14:49:25] Saved image: cell_1_tl_roi.png
+[14:49:25] Saved image: cell_1_tl_blue_mask.png
+[14:49:25] Saved image: cell_1_tl_blue_overlay.png
+[14:49:25] Cell 1: BLUE mask - 0 pixels (threshold: 533.6)
+[14:49:25] Cell 1: Pixel count below threshold
+[14:49:25] Saved image: cell_2_overlay.png
+[14:49:25] Saved image: cell_2_full.png
+[14:49:25] Saved image: cell_2_tl_roi.png
+[14:49:25] Saved image: cell_2_tl_blue_mask.png
+[14:49:25] Saved image: cell_2_tl_blue_overlay.png
+[14:49:25] Cell 2: BLUE mask - 0 pixels (threshold: 533.6)
+[14:49:25] Cell 2: Pixel count below threshold
+[14:49:25] Saved image: cell_3_overlay.png
+[14:49:25] Saved image: cell_3_full.png
+[14:49:25] Saved image: cell_3_tl_roi.png
+[14:49:25] Saved image: cell_3_tl_blue_mask.png
+[14:49:25] Saved image: cell_3_tl_blue_overlay.png
+[14:49:25] Cell 3: BLUE mask - 1450 pixels (threshold: 533.6)
+[14:49:25] Cell 3: Circularity = 0.890 (required: >0.85)
+[14:49:25] Cell 3: Detected Selection Badge
+[14:49:25] Saved image: cell_4_overlay.png
+[14:49:25] Saved image: cell_4_full.png
+[14:49:25] Saved image: cell_4_tl_roi.png
+[14:49:25] Saved image: cell_4_tl_blue_mask.png
+[14:49:25] Saved image: cell_4_tl_blue_overlay.png
+[14:49:25] Cell 4: BLUE mask - 1443 pixels (threshold: 533.6)
+[14:49:25] Cell 4: Circularity = 0.893 (required: >0.85)
+[14:49:25] Cell 4: Detected Selection Badge
+[14:49:25] Saved image: cell_5_overlay.png
+[14:49:25] Saved image: cell_5_full.png
+[14:49:25] Saved image: cell_5_tl_roi.png
+[14:49:25] Saved image: cell_5_tl_blue_mask.png
+[14:49:25] Saved image: cell_5_tl_blue_overlay.png
+[14:49:25] Cell 5: BLUE mask - 0 pixels (threshold: 533.6)
+[14:49:25] Cell 5: Pixel count below threshold
+[14:49:25] Saved image: cell_6_overlay.png
+[14:49:25] Saved image: cell_6_full.png
+[14:49:25] Saved image: cell_6_tl_roi.png
+[14:49:25] Saved image: cell_6_tl_blue_mask.png
+[14:49:25] Saved image: cell_6_tl_blue_overlay.png
+[14:49:25] Cell 6: BLUE mask - 0 pixels (threshold: 533.6)
+[14:49:25] Cell 6: Pixel count below threshold
+[14:49:25] Saved image: cell_7_overlay.png
+[14:49:25] Saved image: cell_7_full.png
+[14:49:25] Saved image: cell_7_tl_roi.png
+[14:49:25] Saved image: cell_7_tl_blue_mask.png
+[14:49:25] Saved image: cell_7_tl_blue_overlay.png
+[14:49:25] Cell 7: BLUE mask - 0 pixels (threshold: 533.6)
+[14:49:25] Cell 7: Pixel count below threshold
+[14:49:25] Saved image: cell_8_overlay.png
+[14:49:25] Saved image: cell_8_full.png
+[14:49:25] Saved image: cell_8_tl_roi.png
+[14:49:25] Saved image: cell_8_tl_blue_mask.png
+[14:49:25] Saved image: cell_8_tl_blue_overlay.png
+[14:49:25] Cell 8: BLUE mask - 0 pixels (threshold: 533.6)
+[14:49:25] Cell 8: Pixel count below threshold
+[14:49:25] Saved image: cell_9_overlay.png
+[14:49:25] Saved image: cell_9_full.png
+[14:49:25] Saved image: cell_9_tl_roi.png
+[14:49:25] Saved image: cell_9_tl_blue_mask.png
+[14:49:25] Saved image: cell_9_tl_blue_overlay.png
+[14:49:25] Cell 9: BLUE mask - 0 pixels (threshold: 533.6)
+[14:49:25] Cell 9: Pixel count below threshold
+[14:49:25] Saved image: cell_10_overlay.png
+[14:49:25] Saved image: cell_10_full.png
+[14:49:25] Saved image: cell_10_tl_roi.png
+[14:49:25] Saved image: cell_10_tl_blue_mask.png
+[14:49:25] Saved image: cell_10_tl_blue_overlay.png
+[14:49:25] Cell 10: BLUE mask - 0 pixels (threshold: 533.6)
+[14:49:25] Cell 10: Pixel count below threshold
+[14:49:25] Saved image: cell_11_overlay.png
+[14:49:25] Saved image: cell_11_full.png
+[14:49:25] Saved image: cell_11_tl_roi.png
+[14:49:25] Saved image: cell_11_tl_blue_mask.png
+[14:49:25] Saved image: cell_11_tl_blue_overlay.png
+[14:49:25] Cell 11: BLUE mask - 0 pixels (threshold: 533.6)
+[14:49:25] Cell 11: Pixel count below threshold
+[14:49:25] Saved image: cell_12_overlay.png
+[14:49:25] Saved image: cell_12_full.png
+[14:49:25] Saved image: cell_12_tl_roi.png
+[14:49:25] Saved image: cell_12_tl_blue_mask.png
+[14:49:25] Saved image: cell_12_tl_blue_overlay.png
+[14:49:25] Cell 12: BLUE mask - 0 pixels (threshold: 533.6)
+[14:49:25] Cell 12: Pixel count below threshold
+[14:49:25] Saved image: cell_13_overlay.png
+[14:49:25] Saved image: cell_13_full.png
+[14:49:25] Saved image: cell_13_tl_roi.png
+[14:49:25] Saved image: cell_13_tl_blue_mask.png
+[14:49:25] Saved image: cell_13_tl_blue_overlay.png
+[14:49:25] Cell 13: BLUE mask - 0 pixels (threshold: 533.6)
+[14:49:25] Cell 13: Pixel count below threshold
+[14:49:25] Saved image: cell_14_overlay.png
+[14:49:25] Saved image: cell_14_full.png
+[14:49:25] Saved image: cell_14_tl_roi.png
+[14:49:25] Saved image: cell_14_tl_blue_mask.png
+[14:49:25] Saved image: cell_14_tl_blue_overlay.png
+[14:49:25] Cell 14: BLUE mask - 0 pixels (threshold: 533.6)
+[14:49:25] Cell 14: Pixel count below threshold
+[14:49:25] Saved image: cell_15_overlay.png
+[14:49:25] Saved image: cell_15_full.png
+[14:49:25] Saved image: cell_15_tl_roi.png
+[14:49:25] Saved image: cell_15_tl_blue_mask.png
+[14:49:25] Saved image: cell_15_tl_blue_overlay.png
+[14:49:25] Cell 15: BLUE mask - 0 pixels (threshold: 533.6)
+[14:49:25] Cell 15: Pixel count below threshold
+[14:49:25] Saved image: cell_16_overlay.png
+[14:49:25] Saved image: cell_16_full.png
+[14:49:25] Saved image: cell_16_tl_roi.png
+[14:49:25] Saved image: cell_16_tl_blue_mask.png
+[14:49:25] Saved image: cell_16_tl_blue_overlay.png
+[14:49:25] Cell 16: BLUE mask - 0 pixels (threshold: 533.6)
+[14:49:25] Cell 16: Pixel count below threshold
