@@ -379,7 +379,7 @@ class ImageProcessor:
         color = self.COLORS[color_name]
         mask = cv2.inRange(hsv_roi, np.array(color['lower']), np.array(color['upper']))
         pixel_count = cv2.countNonZero(mask)
-        threshold = hsv_roi.size * 0.01
+        threshold = hsv_roi.size * 0.003
         
         # Check pixel count threshold first
         if pixel_count <= threshold:
