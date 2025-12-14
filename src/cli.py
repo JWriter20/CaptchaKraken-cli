@@ -11,6 +11,7 @@ import os
 import sys
 
 from src.solver import CaptchaSolver
+from src.timing import timed
 
 
 def main():
@@ -85,15 +86,18 @@ Examples:
         sys.exit(1)
 
     try:
-        # Create solver with simplified interface
-        solver = CaptchaSolver(
-            model=args.model,
-            provider=args.api_provider,
-            api_key=args.api_key,
-        )
+        with timed("cli.total"):
+            # Create solver with simplified interface
+            with timed("cli.init_solver", extra=f"provider={args.api_provider}, model={args.model}"):
+                solver = CaptchaSolver(
+                    model=args.model,
+                    provider=args.api_provider,
+                    api_key=args.api_key,
+                )
 
-        # Solve the captcha
-        result = solver.solve(args.image_path, "Solve this captcha")
+            # Solve the captcha
+            with timed("cli.solve"):
+                result = solver.solve(args.image_path, "Solve this captcha")
 
         # Convert to dict for JSON output
         # solve() returns either a single action or a list of ClickActions (for grids)

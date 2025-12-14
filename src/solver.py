@@ -38,6 +38,7 @@ from .overlay import add_drag_overlay, add_overlays_to_image
 from .planner import ActionPlanner
 from .grid_planner import GridPlanner
 from .image_processor import ImageProcessor
+from .timing import timed
 
 # Debug flag - set via CAPTCHA_DEBUG=1 environment variable
 DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
@@ -145,17 +146,29 @@ class CaptchaSolver:
         self.planner = ActionPlanner(**planner_kwargs)  # type: ignore[arg-type]
         self.grid_planner = GridPlanner(**planner_kwargs)
 
-        # Setup attention extractor (GroundingDINO + CLIP + FastSAM for detect/point)
-        self.attention = AttentionExtractor(
-            device=None,  # Auto-detect
-        )
+        # IMPORTANT: AttentionExtractor imports/initializes heavyweight deps (torch, HF models).
+        # Most reCAPTCHA/hCAPTCHA grid flows do not need it. Lazily initialize on-demand to
+        # keep single-shot CLI invocations fast.
+        self._attention: Optional[AttentionExtractor] = None
 
-        # specialized tools
-        self.image_processor = ImageProcessor(self.attention, self.planner, self.debug)
+        # Specialized tools (CV utilities). AttentionExtractor is optional and can be injected later.
+        self.image_processor = ImageProcessor(None, self.planner, self.debug)
 
         # Image size cache
         self._image_size: Optional[Tuple[int, int]] = None
         self._temp_files: List[str] = []
+
+    def _get_attention(self) -> AttentionExtractor:
+        """
+        Lazily construct the AttentionExtractor.
+
+        This avoids importing torch / initializing heavy vision deps for grid-only or checkbox-only flows.
+        """
+        if self._attention is None:
+            self._attention = AttentionExtractor(device=None)  # Auto-detect
+            # Keep ImageProcessor in sync for background removal/segmentation code paths
+            self.image_processor.attention = self._attention
+        return self._attention
 
     def __del__(self):
         # Cleanup temp files
@@ -181,41 +194,47 @@ class CaptchaSolver:
         Returns:
             CaptchaAction or List[ClickAction] for grid selections
         """
-        # Resolve path and get image size
-        image_path = str(Path(image_path).resolve())
-        if not os.path.exists(image_path):
-            raise FileNotFoundError(f"Image not found: {image_path}")
+        with timed("solver.solve.total"):
+            # Resolve path and get image size
+            with timed("solver.resolve_path"):
+                image_path = str(Path(image_path).resolve())
+                if not os.path.exists(image_path):
+                    raise FileNotFoundError(f"Image not found: {image_path}")
 
-        with Image.open(image_path) as img:
-            self._image_size = img.size
-            
-        # Debug: Save base image
-        self.debug.save_image(image_path, "00_base_image.png")
+            with timed("solver.open_image"):
+                with Image.open(image_path) as img:
+                    self._image_size = img.size
 
-        # 1. Check for grid structure
-        grid_boxes = self.image_processor.get_grid_bounding_boxes(image_path)
-        if grid_boxes:
-            self.debug.log(f"Detected grid with {len(grid_boxes)} cells")
-            return self._solve_grid(image_path, instruction, grid_boxes)
+            # Debug: Save base image
+            with timed("solver.debug.save_base_image"):
+                self.debug.save_image(image_path, "00_base_image.png")
 
-        # 2. Check for simple checkbox (lightweight)
-        # Optimization: Only run fast checkbox detection on small/wide images (likely the checkbox widget).
-        # Large/tall images are likely challenge windows where we should use the planner to avoid false positives (like footer icons).
-        img_w, img_h = self._image_size
-        if img_h < 400:
-            checkbox_box = self.image_processor.detect_checkbox(image_path)
-            if checkbox_box:
-                self.debug.log(f"Detected checkbox at {checkbox_box}")
-                x, y, w, h = checkbox_box
-                # Convert to normalized click action
-                return ClickAction(
-                    action="click",
-                    target_bounding_box=[x / img_w, y / img_h, (x + w) / img_w, (y + h) / img_h],
-                )
+            # 1. Check for grid structure
+            with timed("solver.grid.detect_grid_boxes"):
+                grid_boxes = self.image_processor.get_grid_bounding_boxes(image_path)
+            if grid_boxes:
+                self.debug.log(f"Detected grid with {len(grid_boxes)} cells")
+                return self._solve_grid(image_path, instruction, grid_boxes)
 
-        # 3. General solving with tool use
-        self.debug.log("Using general solving flow")
-        return self._solve_general(image_path, instruction)
+            # 2. Check for simple checkbox (lightweight)
+            # Optimization: Only run fast checkbox detection on small/wide images (likely the checkbox widget).
+            # Large/tall images are likely challenge windows where we should use the planner to avoid false positives (like footer icons).
+            img_w, img_h = self._image_size
+            if img_h < 400:
+                with timed("solver.checkbox.detect_checkbox"):
+                    checkbox_box = self.image_processor.detect_checkbox(image_path)
+                if checkbox_box:
+                    self.debug.log(f"Detected checkbox at {checkbox_box}")
+                    x, y, w, h = checkbox_box
+                    # Convert to normalized click action
+                    return ClickAction(
+                        action="click",
+                        target_bounding_box=[x / img_w, y / img_h, (x + w) / img_w, (y + h) / img_h],
+                    )
+
+            # 3. General solving with tool use
+            self.debug.log("Using general solving flow")
+            return self._solve_general(image_path, instruction)
 
     def _solve_grid(
         self,
@@ -242,7 +261,8 @@ class CaptchaSolver:
         cv_selected = []
         cv_loading = []
         try:
-            cv_selected, cv_loading = self.image_processor.detect_selected_cells(image_path, grid_boxes)
+            with timed("solver.grid.cv_detect_selected_cells", extra=f"cells={len(grid_boxes)}"):
+                cv_selected, cv_loading = self.image_processor.detect_selected_cells(image_path, grid_boxes)
             if cv_selected:
                 self.debug.log(f"CV Detected already selected cells: {cv_selected}")
                 # For grids most of the time we can select all of the tiles in one go, doing more often 
@@ -260,8 +280,9 @@ class CaptchaSolver:
 
         # Create temp image with numbered overlay
         ext = os.path.splitext(image_path)[1] or ".png"
-        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tf:
-            overlay_path = tf.name
+        with timed("solver.grid.create_temp_overlay_path"):
+            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tf:
+                overlay_path = tf.name
         self._temp_files.append(overlay_path)
 
         try:
@@ -270,21 +291,24 @@ class CaptchaSolver:
             valid_indices = []
             filtered_out = []
             
-            for i, (x1, y1, x2, y2) in enumerate(grid_boxes):
-                idx = i + 1
-                w = x2 - x1
-                h = y2 - y1
-                
-                # Filter out selected and loading cells from the overlay
-                if idx in cv_selected or idx in cv_loading:
-                    filtered_out.append(idx)
-                    self.debug.log(f"Filtering out cell {idx} from overlay (selected={idx in cv_selected}, loading={idx in cv_loading})")
-                    continue
-                
-                # Use a high-contrast color that doesn't resemble traffic lights (Red/Yellow/Green)
-                # or Checkmarks (Blue). Magenta/Purple is a good choice.
-                overlays.append({"bbox": [x1, y1, w, h], "number": idx, "color": "#9B59B6"})
-                valid_indices.append(idx)
+            with timed("solver.grid.build_overlay_boxes", extra=f"cells={len(grid_boxes)}"):
+                for i, (x1, y1, x2, y2) in enumerate(grid_boxes):
+                    idx = i + 1
+                    w = x2 - x1
+                    h = y2 - y1
+                    
+                    # Filter out selected and loading cells from the overlay
+                    if idx in cv_selected or idx in cv_loading:
+                        filtered_out.append(idx)
+                        self.debug.log(f"Filtering out cell {idx} from overlay (selected={idx in cv_selected}, loading={idx in cv_loading})")
+                        continue
+                    
+                    # Tile-grid overlay: match the coordinate grid overlay aesthetic (solid green + black underlay).
+                    # This is less visually confusing than multi-color dashed boxes on busy captcha images.
+                    overlays.append(
+                        {"bbox": [x1, y1, w, h], "number": idx, "color": "#00FF00", "box_style": "solid"}
+                    )
+                    valid_indices.append(idx)
             
             if filtered_out:
                 self.debug.log(f"Total cells filtered out: {filtered_out}")
@@ -299,21 +323,25 @@ class CaptchaSolver:
                     self.debug.log("No selectable cells found and no loading cells. Assuming Done.")
                     return DoneAction(action="done")
 
-            add_overlays_to_image(image_path, overlays, output_path=overlay_path, label_position="top-right")
-            self.debug.save_image(overlay_path, "01_grid_overlay.png")
+            with timed("solver.grid.render_overlay_image"):
+                add_overlays_to_image(image_path, overlays, output_path=overlay_path, label_position="top-right")
+            with timed("solver.debug.save_grid_overlay"):
+                self.debug.save_image(overlay_path, "01_grid_overlay.png")
 
             # Ask planner which squares to select
-            selected_numbers = self.grid_planner.get_grid_selection(
-                overlay_path, 
-                rows=rows, 
-                cols=cols, 
-                instruction=instruction
-            )
+            with timed("solver.grid.llm_get_grid_selection"):
+                selected_numbers = self.grid_planner.get_grid_selection(
+                    overlay_path, 
+                    rows=rows, 
+                    cols=cols, 
+                    instruction=instruction
+                )
             
             # Filter just in case the model hallucinates numbers not in overlay
             # (The model shouldn't see numbers that aren't there, but good for safety)
             before_filter = selected_numbers.copy()
-            selected_numbers = [n for n in selected_numbers if n in valid_indices]
+            with timed("solver.grid.filter_llm_numbers"):
+                selected_numbers = [n for n in selected_numbers if n in valid_indices]
             
             if len(before_filter) != len(selected_numbers):
                 filtered = set(before_filter) - set(selected_numbers)
@@ -334,26 +362,27 @@ class CaptchaSolver:
             actions = []
             assert self._image_size is not None
             img_w, img_h = self._image_size
-            for num in selected_numbers:
-                try:
-                    idx = int(num) - 1
-                except (ValueError, TypeError):
-                    self.debug.log(f"Skipping invalid selection: {num}")
-                    continue
+            with timed("solver.grid.build_click_actions", extra=f"n={len(selected_numbers)}"):
+                for num in selected_numbers:
+                    try:
+                        idx = int(num) - 1
+                    except (ValueError, TypeError):
+                        self.debug.log(f"Skipping invalid selection: {num}")
+                        continue
 
-                if 0 <= idx < len(grid_boxes):
-                    x1, y1, x2, y2 = grid_boxes[idx]
+                    if 0 <= idx < len(grid_boxes):
+                        x1, y1, x2, y2 = grid_boxes[idx]
 
-                    # Convert to normalized coordinates
-                    bbox_pct = [x1 / img_w, y1 / img_h, x2 / img_w, y2 / img_h]
+                        # Convert to normalized coordinates
+                        bbox_pct = [x1 / img_w, y1 / img_h, x2 / img_w, y2 / img_h]
 
-                    actions.append(
-                        ClickAction(
-                            action="click",
-                            target_number=num,
-                            target_bounding_box=bbox_pct,
+                        actions.append(
+                            ClickAction(
+                                action="click",
+                                target_number=num,
+                                target_bounding_box=bbox_pct,
+                            )
                         )
-                    )
 
             if not actions:
                 return DoneAction(action="done")
@@ -409,9 +438,12 @@ class CaptchaSolver:
             self.debug.log(f"Sharpening failed: {e}")
             shutil.copy2(sharpen_input, sharp_path)
 
+        # Ensure heavyweight vision stack is available for segmentation.
+        attention = self._get_attention()
+
         # 2. Segment with SAM2 using detectInteractable (better sensitivity/filtering)
         # detectInteractable returns objects with pixel bboxes [x, y, w, h]
-        result = self.attention.detectInteractable(sharp_path)
+        result = attention.detectInteractable(sharp_path)
         objects = result.get("objects", [])
         
         if not objects:
@@ -477,6 +509,9 @@ class CaptchaSolver:
         """
         max_tool_calls = 5
         history: List[str] = []
+
+        # General solving relies on detect/point/segmentation -> needs heavyweight vision stack.
+        attention = self._get_attention()
         
         # Run initial segmentation immediately
         current_image_path, current_objects = self._handle_segmentation(image_path)
@@ -516,7 +551,7 @@ class CaptchaSolver:
                     if tool == "detect":
                         object_class = args.get("object_class", "target")
                         self.debug.log(f"Tool call: detect('{object_class}')")
-                        detections = self.attention.detect_objects(current_image_path, object_class)
+                        detections = attention.detect_objects(current_image_path, object_class)
 
                         if detections:
                             for det in detections:
@@ -530,7 +565,7 @@ class CaptchaSolver:
                         else:
                             # Fallback to point
                             self.debug.log("No detections, falling back to point()")
-                            x, y = self.attention.extract_coordinates(current_image_path, object_class)
+                            x, y = attention.extract_coordinates(current_image_path, object_class)
                             collected_actions.append(
                                 ClickAction(
                                     action="click",
@@ -643,7 +678,7 @@ class CaptchaSolver:
                             self.debug.log(f"Running detect for '{search_term}'...")
                             
                             # Run detect on CLEAN image
-                            detect_result = self.attention.detect(image_path, search_term, max_objects=1)
+                            detect_result = attention.detect(image_path, search_term, max_objects=1)
                             detections = detect_result.get("objects", [])
                             
                             if detections:
@@ -715,7 +750,7 @@ class CaptchaSolver:
                                 )
                             )
                         else:
-                            x, y = self.attention.extract_coordinates(current_image_path, target)
+                            x, y = attention.extract_coordinates(current_image_path, target)
                             collected_actions.append(
                                 ClickAction(
                                     action="click",
@@ -808,7 +843,7 @@ class CaptchaSolver:
                         target_bounding_box=bbox_pct,
                     )
                 else:
-                    x, y = self.attention.extract_coordinates(current_image_path, target)
+                    x, y = attention.extract_coordinates(current_image_path, target)
                     return ClickAction(
                         action="click",
                         target_coordinates=[x, y],
@@ -851,6 +886,7 @@ class CaptchaSolver:
         source_desc = source_description or "movable item"
         assert self._image_size is not None
         img_w, img_h = self._image_size
+        attention = self._get_attention()
 
         # 1. Find source
         if source_bbox_override:
@@ -861,7 +897,7 @@ class CaptchaSolver:
         else:
             self.debug.log(f"Finding drag source: '{source_desc}'")
             # Try to find the specific item
-            detections = self.attention.detect_objects(image_path, source_desc, max_objects=1)
+            detections = attention.detect_objects(image_path, source_desc, max_objects=1)
             if detections:
                 bbox = detections[0]["bbox"] # [x_min, y_min, x_max, y_max]
                 source_x = (bbox[0] + bbox[2]) / 2
@@ -874,7 +910,7 @@ class CaptchaSolver:
                 ]
             else:
                 # Fallback to point() if detect fails (returns center only)
-                source_x, source_y = self.attention.extract_coordinates(image_path, source_desc)
+                source_x, source_y = attention.extract_coordinates(image_path, source_desc)
                 # Make a best-guess box around the point (e.g. 10% of image)
                 box_size = 0.1
                 source_bbox_px = [
@@ -940,7 +976,7 @@ class CaptchaSolver:
         if not target_found_via_hint and target_description and target_description != "matching slot":
              self.debug.log(f"Searching for drag target based on description: '{target_description}'")
              # Try detect first
-             detections = self.attention.detect_objects(image_path, target_description, max_objects=1)
+             detections = attention.detect_objects(image_path, target_description, max_objects=1)
              if detections:
                  b = detections[0]["bbox"] # [x_min, y_min, x_max, y_max]
                  
@@ -952,7 +988,7 @@ class CaptchaSolver:
              else:
                  # Fallback to point (CLIP/GradCAM)
                  try:
-                    tx, ty = self.attention.extract_coordinates(image_path, target_description)
+                    tx, ty = attention.extract_coordinates(image_path, target_description)
                     target_x, target_y = tx, ty
                     self.debug.log(f"CLIP extracted coordinates for target: ({target_x:.2f}, {target_y:.2f})")
                  except Exception as e:

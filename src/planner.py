@@ -15,6 +15,9 @@ import os
 import sys
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
+# Timing helper (opt-in via CAPTCHA_TIMINGS=1)
+from .timing import timed
+
 # Debug flag - set via CAPTCHA_DEBUG=1 environment variable
 DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
 
@@ -262,15 +265,16 @@ class ActionPlanner:
             import ollama
 
             self._log("Waiting for Ollama response...")
-            client = ollama.Client(host=self.ollama_host)
-            response = client.chat(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt, "images": [image_path]}],
-                options={
-                    "temperature": 0.0,
-                    "num_predict": 1024,  # Limit generation length to avoid infinite loops
-                },
-            )
+            with timed("planner.ollama.total", extra=f"model={self.model}"):
+                client = ollama.Client(host=self.ollama_host)
+                response = client.chat(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt, "images": [image_path]}],
+                    options={
+                        "temperature": 0.0,
+                        "num_predict": 1024,  # Limit generation length to avoid infinite loops
+                    },
+                )
             result = response["message"]["content"]
             self._log(f"=== RAW RESPONSE ===\n{result}\n=== END RESPONSE ===")
             return result
@@ -291,8 +295,9 @@ class ActionPlanner:
             if not mime_type:
                 mime_type = "image/png"
 
-            with open(image_path, "rb") as f:
-                image_bytes = f.read()
+            with timed("planner.gemini.read_image_bytes"):
+                with open(image_path, "rb") as f:
+                    image_bytes = f.read()
 
             # Configure response as JSON (planner expects JSON it can parse)
             config = GenerateContentConfig(
@@ -305,11 +310,12 @@ class ActionPlanner:
                 prompt,
             ]
 
-            response = self._genai_client.models.generate_content(  # type: ignore[union-attr]
-                model=self.model,
-                contents=contents,
-                config=config,
-            )
+            with timed("planner.gemini.generate_content", extra=f"model={self.model}"):
+                response = self._genai_client.models.generate_content(  # type: ignore[union-attr]
+                    model=self.model,
+                    contents=contents,
+                    config=config,
+                )
             result = response.text
             self._log(f"=== RAW RESPONSE ===\n{result}\n=== END RESPONSE ===")
             return result

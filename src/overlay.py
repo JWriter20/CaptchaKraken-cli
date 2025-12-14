@@ -46,36 +46,61 @@ def hex_to_rgba(hex_color, alpha=180):
         rgb = (255, 0, 0) # Fallback
     return rgb + (alpha,)
 
-def draw_enhanced_bounding_box(draw, bbox, text=None, number=None, image_size=None, color="#C0392B", label_position="top-left"):
+def draw_enhanced_bounding_box(
+    draw,
+    bbox,
+    text=None,
+    number=None,
+    image_size=None,
+    color="#C0392B",
+    label_position="top-left",
+    box_style: str = "dashed",
+):
     x1, y1, x2, y2 = bbox
     # color is passed as argument
 
-    # Draw dashed bounding box
-    dash_length = 8
-    gap_length = 4
-    line_width = 4
+    # Box style
+    # - dashed: good for multi-object overlays (keeps boxes distinct)
+    # - solid: match the 10% grid overlay aesthetic (green + black underlay)
+    shadow_color = (0, 0, 0, 210)  # strong underlay for contrast
 
-    def draw_dashed_line(start_x, start_y, end_x, end_y):
-        # Ensure we always draw from smaller to larger coordinate
-        if start_x == end_x:  # Vertical
-            y_min, y_max = min(start_y, end_y), max(start_y, end_y)
-            y = y_min
-            while y < y_max:
-                dash_end = min(y + dash_length, y_max)
-                draw.line([(start_x, y), (start_x, dash_end)], fill=color, width=line_width)
-                y += dash_length + gap_length
-        else:  # Horizontal
-            x_min, x_max = min(start_x, end_x), max(start_x, end_x)
-            x = x_min
-            while x < x_max:
-                dash_end = min(x + dash_length, x_max)
-                draw.line([(x, start_y), (dash_end, start_y)], fill=color, width=line_width)
-                x += dash_length + gap_length
+    if box_style == "solid":
+        line_width = 3
+        shadow_width = line_width + 4
+        # Underlay + main stroke to match the solid green/black grid overlay style
+        draw.rectangle([x1, y1, x2, y2], outline=shadow_color, width=shadow_width)
+        draw.rectangle([x1, y1, x2, y2], outline=color, width=line_width)
+    else:
+        # Dashed box (default)
+        dash_length = 10
+        gap_length = 5
+        line_width = 5
+        shadow_width = line_width + 3
 
-    draw_dashed_line(x1, y1, x2, y1)
-    draw_dashed_line(x2, y1, x2, y2)
-    draw_dashed_line(x2, y2, x1, y2)
-    draw_dashed_line(x1, y2, x1, y1)
+        def draw_dashed_line(start_x, start_y, end_x, end_y):
+            # Ensure we always draw from smaller to larger coordinate
+            if start_x == end_x:  # Vertical
+                y_min, y_max = min(start_y, end_y), max(start_y, end_y)
+                y = y_min
+                while y < y_max:
+                    dash_end = min(y + dash_length, y_max)
+                    # Underlay + main stroke makes the dash read clearly on any background.
+                    draw.line([(start_x, y), (start_x, dash_end)], fill=shadow_color, width=shadow_width)
+                    draw.line([(start_x, y), (start_x, dash_end)], fill=color, width=line_width)
+                    y += dash_length + gap_length
+            else:  # Horizontal
+                x_min, x_max = min(start_x, end_x), max(start_x, end_x)
+                x = x_min
+                while x < x_max:
+                    dash_end = min(x + dash_length, x_max)
+                    draw.line([(x, start_y), (dash_end, start_y)], fill=shadow_color, width=shadow_width)
+                    draw.line([(x, start_y), (dash_end, start_y)], fill=color, width=line_width)
+                    x += dash_length + gap_length
+
+        draw_dashed_line(x1, y1, x2, y1)
+        draw_dashed_line(x2, y1, x2, y2)
+        draw_dashed_line(x2, y2, x1, y2)
+        draw_dashed_line(x1, y2, x1, y1)
 
     label_text = ""
     if number is not None:
@@ -89,8 +114,9 @@ def draw_enhanced_bounding_box(draw, bbox, text=None, number=None, image_size=No
     if label_text and image_size:
         img_width, img_height = image_size
 
-        # Scale font based on image width - reduced size for visibility
-        base_font_size = max(12, min(40, int(img_width * 0.03)))
+        # Scale font based on image width (slightly larger for readability)
+        # Bump size a bit to make numbered overlays easier to read on captcha tiles.
+        base_font_size = max(16, min(64, int(img_width * 0.045)))
         font = get_cross_platform_font(base_font_size)
 
         # Get text size
@@ -172,12 +198,20 @@ def draw_enhanced_bounding_box(draw, bbox, text=None, number=None, image_size=No
             text_y -= offset
 
         # Draw background and text
-        # Make background semi-transparent
         # Use black background for labels to ensure high contrast for numbers
         fill_color = (0, 0, 0, 180)
 
-        draw.rectangle([bg_x1, bg_y1, bg_x2, bg_y2], fill=fill_color, outline="white", width=2)
-        draw.text((text_x, text_y), label_text, fill="white", font=font)
+        # Match label outline to the box color (instead of hardcoded white)
+        draw.rectangle([bg_x1, bg_y1, bg_x2, bg_y2], fill=fill_color, outline=color, width=3)
+        # Slight stroke helps keep text readable on busy backgrounds even at small sizes
+        draw.text(
+            (text_x, text_y),
+            label_text,
+            fill="white",
+            font=font,
+            stroke_width=2,
+            stroke_fill="black",
+        )
 
 
 def draw_red_border(draw, bbox, width=3):
@@ -248,9 +282,17 @@ def add_overlays_to_image(image_path: str, boxes: list[dict], output_path: str =
                 text = box.get("text")
                 number = box.get("number")
                 color = box.get("color", "#FF6B6B")
+                box_style = box.get("box_style") or box.get("style") or "dashed"
 
                 draw_enhanced_bounding_box(
-                    draw, bbox_coords, text=text, number=number, image_size=img.size, color=color, label_position=label_position
+                    draw,
+                    bbox_coords,
+                    text=text,
+                    number=number,
+                    image_size=img.size,
+                    color=color,
+                    label_position=label_position,
+                    box_style=box_style,
                 )
 
             img = img.convert("RGB")
@@ -265,16 +307,26 @@ def add_overlays_to_image(image_path: str, boxes: list[dict], output_path: str =
 def draw_grid_overlay(draw, image_size, step=0.1):
     """Draw a 10% grid overlay with labels (more readable)."""
     width, height = image_size
-    line_color = "#00FF00"  # Green
-    text_color = "#00FF00"
-    bg_color = (0, 32, 0, 180)  # Semi-transparent dark background for labels
-    font_size = max(10, min(18, int(width * 0.025)))
+    line_color = "#00FF00"  # Bright green
+    text_color = line_color
+    # Darker background + stronger opacity to keep labels readable on bright images
+    bg_color = (0, 0, 0, 230)
+    # Make labels more prominent
+    font_size = max(14, min(32, int(width * 0.04)))
     font = get_cross_platform_font(font_size)
+    # Thicker lines for a more pronounced overlay
+    line_width = 3
+    # Stronger underlay to keep grid visible over busy backgrounds
+    shadow_color = (0, 0, 0, 210)
+    label_outline_width = 3
+    label_pad = 8
 
     # Draw vertical lines and labels
     for i in range(1, int(1 / step)):
         x = int(i * step * width)
-        draw.line([(x, 0), (x, height)], fill=line_color, width=1)
+        # Add a subtle dark underlay to increase contrast on bright/green backgrounds
+        draw.line([(x, 0), (x, height)], fill=shadow_color, width=line_width + 4)
+        draw.line([(x, 0), (x, height)], fill=line_color, width=line_width)
         label = f"{int(i * step * 100)}%"
         if font:
             bbox = draw.textbbox((0, 0), label, font=font)
@@ -283,13 +335,26 @@ def draw_grid_overlay(draw, image_size, step=0.1):
         w = bbox[2] - bbox[0]
         h = bbox[3] - bbox[1]
         # Top label background
-        draw.rectangle([x + 2, 2, x + 2 + w + 4, 2 + h + 4], fill=bg_color)
-        draw.text((x + 4, 4), label, fill=text_color, font=font)
+        draw.rectangle(
+            [x + 2, 2, x + 2 + w + label_pad, 2 + h + label_pad],
+            fill=bg_color,
+            outline=line_color,
+            width=label_outline_width,
+        )
+        draw.text(
+            (x + 2 + label_pad // 2, 2 + label_pad // 2),
+            label,
+            fill=text_color,
+            font=font,
+            stroke_width=2,
+            stroke_fill="black",
+        )
 
     # Draw horizontal lines and labels
     for i in range(1, int(1 / step)):
         y = int(i * step * height)
-        draw.line([(0, y), (width, y)], fill=line_color, width=1)
+        draw.line([(0, y), (width, y)], fill=shadow_color, width=line_width + 4)
+        draw.line([(0, y), (width, y)], fill=line_color, width=line_width)
         label = f"{int(i * step * 100)}%"
         if font:
             bbox = draw.textbbox((0, 0), label, font=font)
@@ -298,8 +363,20 @@ def draw_grid_overlay(draw, image_size, step=0.1):
         w = bbox[2] - bbox[0]
         h = bbox[3] - bbox[1]
         # Left label background
-        draw.rectangle([2, y + 2, 2 + w + 4, y + 2 + h + 4], fill=bg_color)
-        draw.text((4, y + 4), label, fill=text_color, font=font)
+        draw.rectangle(
+            [2, y + 2, 2 + w + label_pad, y + 2 + h + label_pad],
+            fill=bg_color,
+            outline=line_color,
+            width=label_outline_width,
+        )
+        draw.text(
+            (2 + label_pad // 2, y + 2 + label_pad // 2),
+            label,
+            fill=text_color,
+            font=font,
+            stroke_width=2,
+            stroke_fill="black",
+        )
 
 
 def add_drag_overlay(
@@ -380,11 +457,13 @@ def add_drag_overlay(
         
         # 5. Highlight border (Draw with padding to avoid obscuring edges)
         draw = ImageDraw.Draw(background)
+        if show_grid:
+            draw_grid_overlay(draw, background.size, step=0.1)
         padding = 4
         draw.rectangle(
             [paste_x - padding, paste_y - padding, paste_x + cw + padding, paste_y + ch + padding],
             outline="#00FF00",
-            width=2
+            width=3
         )
 
         background = background.convert("RGB")
