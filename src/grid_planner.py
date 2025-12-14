@@ -45,7 +45,7 @@ Process:
 1. Scan the image to locate the target object(s).
 2. Check for "Already Selected" badges (Blue Checkmarks) - these are FORBIDDEN.
 3. For each remaining cell 1-{total}, decide if it contains a visible part of the target.
-4. Return the list of selected numbers.
+4. Return the list of selected numbers, return ALL of the tiles we need to select, this is very important do not miss any.
 
 Respond JSON ONLY:
 {{

@@ -245,6 +245,10 @@ class CaptchaSolver:
             cv_selected, cv_loading = self.image_processor.detect_selected_cells(image_path, grid_boxes)
             if cv_selected:
                 self.debug.log(f"CV Detected already selected cells: {cv_selected}")
+                # For grids most of the time we can select all of the tiles in one go, doing more often 
+                # confuses the model and leads it to select extraneous tiles. Since there are selected cells detected
+                # we know this is not one of the fading-in puzzles, so we can assume the first run through solved the puzzle.
+                return DoneAction(action="done")
             else:
                 self.debug.log("CV Detection: No selected cells detected")
             if cv_loading:
