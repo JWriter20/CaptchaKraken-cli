@@ -15,10 +15,7 @@ Image Grid: {rows}x{cols}
 {grid_hint}
 
 CRITICAL NEGATIVE CONSTRAINTS (MUST FOLLOW):
-1. IGNORE ALREADY SELECTED CELLS: If a cell has a BLUE CIRCLE with a CHECKMARK (usually top-left), or a thick white overlay, it is ALREADY SELECTED.
-   - DO NOT SELECT IT AGAIN.
-   - Even if it contains the target, if it has the blue checkmark, exclude it.
-2. IGNORE RIDERS/PEOPLE: If the target is a vehicle (motorcycle, bicycle, bus), DO NOT select cells that contain ONLY the rider (helmet, body, legs) or driver. Select ONLY the machine parts.
+1. Only select the item we are trying to find and its components, do not select associated object that are not part of the target. (ie. if the target is a motorcycle, do not select the rider, any coverings on the motorcycle etc.)
 
 Rules:
 1. TARGET IDENTIFICATION: Focus on the main object specified.
@@ -43,15 +40,14 @@ Instructions for specific targets:
 
 Process:
 1. Scan the image to locate the target object(s).
-2. Check for "Already Selected" badges (Blue Checkmarks) - these are FORBIDDEN.
-3. For each remaining cell 1-{total}, decide if it contains a visible part of the target.
-4. Return the list of selected numbers, return ALL of the tiles we need to select, this is very important do not miss any.
+2. For each remaining cell 1-{total}, decide if it contains a visible part of the target.
+3. Return the list of selected numbers, return ALL of the tiles we need to select, this is very important do not miss any.
 
 Respond JSON ONLY:
 {{
   "analysis": "Brief analysis",
   "cell_states": {{
-    "1": "Description. Contains target? [Yes/No]. Already selected? [Yes/No]",
+    "1": "Description. Contains target? [Yes/No].",
     ...
   }},
   "selected_numbers": [list of integers]
