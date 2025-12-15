@@ -1,0 +1,17 @@
+# Example sparse-checkout configuration for parent repository
+# 
+# To exclude captchaimages/ and tests/ when using this as a submodule,
+# in the parent repository, run:
+#
+#   git -C path/to/submodule config core.sparseCheckout true
+#   echo "/*" > path/to/submodule/.git/info/sparse-checkout
+#   echo "!/captchaimages/" >> path/to/submodule/.git/info/sparse-checkout
+#   echo "!/tests/" >> path/to/submodule/.git/info/sparse-checkout
+#   git -C path/to/submodule read-tree -mu HEAD
+#
+# Or use git sparse-checkout command (Git 2.25+):
+#
+#   cd path/to/submodule
+#   git sparse-checkout init --cone
+#   git sparse-checkout set --no-cone '/*' '!/captchaimages' '!/tests'
+

@@ -1,0 +1,7 @@
+# Exclude these directories from git archive exports
+# When used as a submodule, configure sparse-checkout in the parent repository
+# to exclude these directories during cloning.
+
+captchaimages/ export-ignore
+tests/ export-ignore
+
