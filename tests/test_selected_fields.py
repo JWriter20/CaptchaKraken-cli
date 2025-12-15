@@ -2,6 +2,8 @@ import os
 import sys
 import pytest
 import json
+import glob
+from pathlib import Path
 
 # Add project root to path before imports
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -30,10 +32,11 @@ def test_selected_fields_all_images():
         answers_data = json.load(f)
 
     # Initialize ImageProcessor with debug enabled
-    debug_manager = DebugManager(debug_enabled=False)
+    debug_manager = DebugManager(debug_enabled=True)
     processor = ImageProcessor(attention_extractor=None, planner=None, debug_manager=debug_manager)
     
     failures = []
+    debug_base_dir = Path("latestDebugRun").resolve()
     
     print(f"\nTesting images in {RECAPTCHA_DIR} against {ANSWERS_PATH}")
 
@@ -45,6 +48,9 @@ def test_selected_fields_all_images():
             continue
             
         print(f"Testing {filename}...")
+        
+        # Extract base filename for debug image matching
+        image_basename = os.path.splitext(filename)[0]
         
         # 1. Detect Grid
         grid_boxes = ImageProcessor.get_grid_bounding_boxes(image_path)
@@ -76,8 +82,20 @@ def test_selected_fields_all_images():
             error_msg = f"{filename}: Expected {expected_selected}, got {selected_indices}"
             print(f"  FAILED: {error_msg}")
             failures.append(error_msg)
+            # Keep debug images for failures
         else:
             print(f"  SUCCESS: Matches {expected_selected}")
+            # Clean up debug images for passing tests
+            if debug_base_dir.exists():
+                # Find all debug images for this test case
+                pattern = f"badge_analysis_{image_basename}_*"
+                debug_images = list(debug_base_dir.glob(pattern))
+                for debug_img in debug_images:
+                    try:
+                        debug_img.unlink()
+                        print(f"  Cleaned up debug image: {debug_img.name}")
+                    except Exception as e:
+                        print(f"  Warning: Could not delete {debug_img.name}: {e}")
 
     if failures:
         print(f"\n{'='*60}")

@@ -483,5 +483,15 @@
     "optional": [
       14
     ]
+  },
+  "crosswalksCVTesting.png": {
+    "reasoning": "",
+    "selectedCells": [],
+    "required": [
+      1,
+      6,
+      7
+    ],
+    "optional": []
   }
 }

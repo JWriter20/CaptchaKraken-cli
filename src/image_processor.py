@@ -272,17 +272,20 @@ class ImageProcessor:
         return boxes
 
     # --- Configuration ---
-    # HSV color ranges for detection
-    # Base blue: rgb(27, 115, 232) -> hsv(107, 225, 232)
-    # Actual blue badge analysis shows: hue 101-113, sat 51-226, val 114-252
-    # We want to capture ONLY the blue badge fill, NOT the white checkmark (white has low saturation).
-    # In practice the badge has a consistent "core" hue (median ~107) while edges can be noisy.
-    # So we use a tighter range for the *badge* and keep a broader blue for *loading/spinner* detection.
+    # Color detection using CIELAB color space with Delta E (perceptually uniform)
+    # Uses CIE1976 Delta E (Euclidean distance in Lab space) for perceptually uniform color matching
+    # Target blue: rgb(27, 115, 232) - the exact blue badge color
+    # Delta E thresholds (CIE1976):
+    #   < 1: Imperceptible difference
+    #   1-2: Barely noticeable
+    #   2-10: Noticeable but "close" for matching
+    # Note: CIE1976 is simpler than CIEDE2000 but still provides good perceptual uniformity
     COLORS = {
-        # Tight "badge blue" core (excludes many non-badge blues)
-        'BADGE_BLUE': {'lower': (104, 80, 120), 'upper': (111, 255, 255)},
+        # Target blue badge color in RGB (will be converted to Lab)
+        # Tight "badge blue" core - only very perceptually similar blues
+        'BADGE_BLUE': {'target_rgb': (27, 115, 232), 'max_delta_e': 8.0},
         # Broader blue for spinners/loading indicators
-        'BLUE':       {'lower': (100, 50, 100), 'upper': (114, 255, 255)},
+        'BLUE':       {'target_rgb': (27, 115, 232), 'max_delta_e': 12.0},
     }
 
     def detect_selected_cells(self, image_path: str, grid_boxes: List[Tuple[int, int, int, int]]) -> Tuple[List[int], List[int]]:
@@ -300,15 +303,16 @@ class ImageProcessor:
         if img is None:
             return [], []
 
-        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
         selected_indices = []
         loading_indices = []
+        
+        # Extract base filename for debug image naming
+        image_basename = os.path.splitext(os.path.basename(image_path))[0] if image_path else "unknown"
 
         if self.debug:
             self.debug.log(f"Starting CV detection for {len(grid_boxes)} cells")
 
         for i, (x1, y1, x2, y2) in enumerate(grid_boxes):
-            cell_hsv = hsv[y1:y2, x1:x2]
             cell_bgr = img[y1:y2, x1:x2]
             cell_id = i + 1
 
@@ -333,24 +337,18 @@ class ImageProcessor:
                 cv2.putText(overlay, "Center Loading", (cx + 5, cy + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
                 
             # 1. Check Top-Left (40% area) for a Selection Badge
-            tl_roi = self._get_roi(cell_hsv, 0, 0, 0.4, 0.4)
-            if tl_roi.size > 0:
-                # Get BGR version for debugging
-                tl_roi_bgr = self._get_roi(cell_bgr, 0, 0, 0.4, 0.4) if self.debug else None
-                
-                if self._has_badge(tl_roi, cell_id, tl_roi_bgr):
+            tl_roi_bgr = self._get_roi(cell_bgr, 0, 0, 0.4, 0.4)
+            if tl_roi_bgr.size > 0:
+                if self._has_badge(tl_roi_bgr, cell_id, tl_roi_bgr, image_basename):
                     selected_indices.append(cell_id)
                     if self.debug:
                         self.debug.log(f"Cell {cell_id}: Detected Selection Badge")
                 continue
 
             # 2. Check Center (40% area) for Spinner/Loading Badge
-            center_roi = self._get_roi(cell_hsv, 0.3, 0.3, 0.4, 0.4)
-            if center_roi.size > 0:
-                # Get BGR version for debugging
-                center_roi_bgr = self._get_roi(cell_bgr, 0.3, 0.3, 0.4, 0.4) if self.debug else None
-                
-                if self._is_loading(center_roi, cell_id, center_roi_bgr):
+            center_roi_bgr = self._get_roi(cell_bgr, 0.3, 0.3, 0.4, 0.4)
+            if center_roi_bgr.size > 0:
+                if self._is_loading(center_roi_bgr, cell_id, center_roi_bgr):
                     loading_indices.append(cell_id)
                     if self.debug:
                         self.debug.log(f"Cell {cell_id}: Detected Loading Indicator")
@@ -366,6 +364,12 @@ class ImageProcessor:
 
     # --- Helper Logic ---
 
+    def _take_debug_image(self, img, x_pct, y_pct, w_pct, h_pct, output_path: str):
+        """Takes a debug image of a region of the image."""
+        roi = self._get_roi(img, x_pct, y_pct, w_pct, h_pct)
+        cv2.imwrite(output_path, roi)
+        return output_path
+
     def _get_roi(self, img, x_pct, y_pct, w_pct, h_pct):
         """Extracts a sub-region of an image based on percentages."""
         h, w = img.shape[:2]
@@ -375,34 +379,106 @@ class ImageProcessor:
         x_end = int(w * (x_pct + w_pct))
         return img[y_start:y_end, x_start:x_end]
 
-    def _has_badge(self, hsv_roi, cell_id: int = None, bgr_roi = None) -> bool:
+    def _create_delta_e_mask(self, bgr_image, target_rgb: Tuple[int, int, int], max_delta_e: float) -> np.ndarray:
+        """
+        Creates a mask of pixels perceptually similar to target color using Delta E in CIELAB space.
+        Uses CIE1976 Delta E (Euclidean distance in Lab space) for perceptually uniform color matching.
+        This is faster than CIEDE2000 and still provides good perceptual uniformity.
+        
+        Args:
+            bgr_image: BGR image (OpenCV format)
+            target_rgb: Target color in RGB (0-255 range)
+            max_delta_e: Maximum Delta E threshold (CIE1976)
+            
+        Returns:
+            Binary mask (uint8, 0 or 255) where True indicates perceptually similar colors
+        """
+        # Convert target RGB to BGR for OpenCV
+        target_bgr = (target_rgb[2], target_rgb[1], target_rgb[0])
+        
+        # Create a 1x1 image with the target color and convert to Lab
+        target_bgr_array = np.array([[target_bgr]], dtype=np.uint8)
+        target_lab = cv2.cvtColor(target_bgr_array, cv2.COLOR_BGR2LAB)[0, 0]
+        
+        # Convert the input image to Lab color space (vectorized, fast)
+        image_lab = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2LAB)
+        
+        # Compute CIE1976 Delta E (Euclidean distance in Lab space)
+        # Delta E = sqrt((L1-L2)^2 + (a1-a2)^2 + (b1-b2)^2)
+        delta_e = np.sqrt(
+            np.sum((image_lab.astype(np.float32) - target_lab.astype(np.float32)) ** 2, axis=2)
+        )
+        
+        # Create mask where Delta E is within threshold
+        mask = (delta_e <= max_delta_e).astype(np.uint8) * 255
+        
+        return mask
+
+    def _has_badge(self, bgr_roi, cell_id: int = None, bgr_roi_debug = None, image_basename: str = "unknown") -> bool:
         """
         Checks if a region contains a Blue checkmark badge with circularity check.
+        Uses CIELAB color space with Delta E (CIEDE2000) for perceptually uniform color matching.
         Requires: pixel count > threshold AND circularity > 0.85
+        
+        Args:
+            bgr_roi: BGR region of interest
+            cell_id: Cell identifier for debugging
+            bgr_roi_debug: BGR region of interest for debug visualization (same as bgr_roi, kept for compatibility)
+            image_basename: Base filename for debug image naming
         """
         color_name = 'BADGE_BLUE'
         color = self.COLORS[color_name]
-        mask = cv2.inRange(hsv_roi, np.array(color['lower']), np.array(color['upper']))
+        mask = self._create_delta_e_mask(bgr_roi, color['target_rgb'], color['max_delta_e'])
         pixel_count = cv2.countNonZero(mask)
-        threshold = hsv_roi.size * 0.003
+        threshold = bgr_roi.size * 0.003
+        
+        # Save debug images if enabled and we have a cell_id
+        debug_images = []
+        if self.debug and cell_id is not None and bgr_roi_debug is not None:
+            # 1. Save original ROI
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+                roi_path = tf.name
+            self._temp_files.append(roi_path)
+            cv2.imwrite(roi_path, bgr_roi_debug)
+            debug_images.append(("original_roi", roi_path))
+            
+            # 2. Save blue mask (color filter result)
+            mask_colored = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+                mask_path = tf.name
+            self._temp_files.append(mask_path)
+            cv2.imwrite(mask_path, mask_colored)
+            debug_images.append(("blue_mask", mask_path))
         
         # Check pixel count threshold first
         if pixel_count <= threshold:
             if self.debug and cell_id is not None:
                 self.debug.log(f"Cell {cell_id}: Pixel count below threshold, {pixel_count} <= {threshold}")
+                # Save debug images even on failure
+                self._save_badge_debug_images(debug_images, image_basename, cell_id, "pixel_count_fail")
             return False
         
         # Morphology: close small gaps in the blue circle caused by anti-aliasing / compression.
-        # IMPORTANT: the white checkmark should *not* be included in the mask (low saturation), so
+        # IMPORTANT: the white checkmark should *not* be included in the mask (white has different BGR values), so
         # we compute circularity on the convex hull of the blue pixels to ignore the checkmark cut-out.
         kernel = np.ones((3, 3), np.uint8)
         cleaned = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+        
+        if self.debug and cell_id is not None and bgr_roi_debug is not None:
+            # 3. Save cleaned mask (after morphology)
+            cleaned_colored = cv2.cvtColor(cleaned, cv2.COLOR_GRAY2BGR)
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+                cleaned_path = tf.name
+            self._temp_files.append(cleaned_path)
+            cv2.imwrite(cleaned_path, cleaned_colored)
+            debug_images.append(("cleaned_mask", cleaned_path))
 
         # Check circularity - badge should be circular (on convex hull)
         contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             if self.debug and cell_id is not None:
                 self.debug.log(f"Cell {cell_id}: No blue contours found")
+                self._save_badge_debug_images(debug_images, image_basename, cell_id, "no_contours")
             return False
         
         # Find the largest contour (should be the badge)
@@ -410,22 +486,53 @@ class ImageProcessor:
         hull = cv2.convexHull(max_cnt)
         area = cv2.contourArea(hull)
         perimeter = cv2.arcLength(hull, True)
+        
+        # Compute centroid early for visualization
+        h, w = bgr_roi.shape[:2]
+        M = cv2.moments(hull)
+        centroid_x = M["m10"] / M["m00"] if M["m00"] != 0 else 0
+        centroid_y = M["m01"] / M["m00"] if M["m00"] != 0 else 0
+        circularity = 4 * np.pi * area / (perimeter * perimeter) if perimeter > 0 else 0
+        
+        # Create visualization with hull and centroid overlay early (for all subsequent checks)
+        if self.debug and cell_id is not None and bgr_roi_debug is not None:
+            # 4. Create visualization with convex hull and centroid
+            viz = bgr_roi_debug.copy()
+            # Draw convex hull
+            cv2.drawContours(viz, [hull], -1, (0, 255, 0), 2)
+            # Draw centroid (if valid)
+            if M["m00"] != 0:
+                cv2.circle(viz, (int(centroid_x), int(centroid_y)), 5, (0, 0, 255), -1)
+            # Draw top-left region boundary (60% of width and height)
+            cv2.rectangle(viz, (0, 0), (int(w * 0.6), int(h * 0.6)), (255, 255, 0), 1)
+            # Add text annotations
+            cv2.putText(viz, f"Circ: {circularity:.2f}", (5, h - 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+            if M["m00"] != 0:
+                cv2.putText(viz, f"Cent: ({int(centroid_x)}, {int(centroid_y)})", (5, h - 15), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+            
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+                viz_path = tf.name
+            self._temp_files.append(viz_path)
+            cv2.imwrite(viz_path, viz)
+            debug_images.append(("analysis_viz", viz_path))
 
         # Area sanity check: badge should be a reasonably-sized blob within the ROI
-        roi_area = hsv_roi.shape[0] * hsv_roi.shape[1]
+        roi_area = bgr_roi.shape[0] * bgr_roi.shape[1]
         if roi_area > 0:
             area_ratio = area / roi_area
             if area_ratio < 0.05:
                 if self.debug and cell_id is not None:
                     self.debug.log(f"Cell {cell_id}: Blue area too small ({area_ratio:.3f} of ROI)")
+                    self._save_badge_debug_images(debug_images, image_basename, cell_id, "area_too_small")
                 return False
         
         if perimeter == 0:
             if self.debug and cell_id is not None:
                 self.debug.log(f"Cell {cell_id}: Zero perimeter")
+                self._save_badge_debug_images(debug_images, image_basename, cell_id, "zero_perimeter")
             return False
-        
-        circularity = 4 * np.pi * area / (perimeter * perimeter)
         
         if self.debug and cell_id is not None:
             self.debug.log(f"Cell {cell_id}: Circularity = {circularity:.3f} (required: >0.85)")
@@ -434,42 +541,63 @@ class ImageProcessor:
         if circularity < 0.85:
             if self.debug and cell_id is not None:
                 self.debug.log(f"Cell {cell_id}: Circularity too low")
+                self._save_badge_debug_images(debug_images, image_basename, cell_id, "circularity_fail")
             return False
         
         # Check that the badge is positioned in the top-left corner
         # Badges should be near the corner, not in the center or elsewhere
-        h, w = hsv_roi.shape[:2]
-        M = cv2.moments(hull)
         if M["m00"] == 0:
             if self.debug and cell_id is not None:
                 self.debug.log(f"Cell {cell_id}: Zero moment")
+                self._save_badge_debug_images(debug_images, image_basename, cell_id, "zero_moment")
             return False
-        
-        centroid_x = M["m10"] / M["m00"]
-        centroid_y = M["m01"] / M["m00"]
         
         # Badge should be in top-left region (first 60% of width and height)
         # Using 60% instead of 50% to account for slight positioning variations
         if centroid_x > w * 0.6 or centroid_y > h * 0.6:
             if self.debug and cell_id is not None:
                 self.debug.log(f"Cell {cell_id}: Badge centroid ({centroid_x:.1f}, {centroid_y:.1f}) not in top-left region")
+                self._save_badge_debug_images(debug_images, image_basename, cell_id, "centroid_fail")
             return False
         
         if self.debug and cell_id is not None:
             self.debug.log(f"Cell {cell_id}: Badge centroid ({centroid_x:.1f}, {centroid_y:.1f}) in top-left region")
+            # Save debug images for successful detection
+            self._save_badge_debug_images(debug_images, image_basename, cell_id, "success")
         
         return True  # Found a circular badge in the top-left corner
+    
+    def _save_badge_debug_images(self, debug_images: List[Tuple[str, str]], image_basename: str, cell_id: int, status: str):
+        """
+        Save debug images for badge detection analysis.
+        
+        Args:
+            debug_images: List of (name, path) tuples for debug images
+            image_basename: Base filename for naming
+            cell_id: Cell identifier
+            status: Status string (success, pixel_count_fail, etc.)
+        """
+        if not self.debug or not debug_images:
+            return
+        
+        for name, path in debug_images:
+            if os.path.exists(path):
+                debug_name = f"badge_analysis_{image_basename}_cell{cell_id}_{name}_{status}.png"
+                self.debug.save_image(path, debug_name)
 
-    def _is_loading(self, hsv_roi, cell_id: int = None, bgr_roi = None) -> bool:
-        """Detects blue movement/spinners in the center of the cell."""
-        blue_mask = cv2.inRange(hsv_roi, 
-                                np.array(self.COLORS['BLUE']['lower']), 
-                                np.array(self.COLORS['BLUE']['upper']))
+    def _is_loading(self, bgr_roi, cell_id: int = None, bgr_roi_debug = None) -> bool:
+        """
+        Detects blue movement/spinners in the center of the cell.
+        Uses CIELAB color space with Delta E (CIEDE2000) for perceptually uniform color matching.
+        """
+        color = self.COLORS['BLUE']
+        blue_mask = self._create_delta_e_mask(bgr_roi, color['target_rgb'], color['max_delta_e'])
         pixel_count = cv2.countNonZero(blue_mask)
-        total_pixels = hsv_roi.shape[0] * hsv_roi.shape[1]
+        total_pixels = bgr_roi.shape[0] * bgr_roi.shape[1]
         density = pixel_count / total_pixels if total_pixels > 0 else 0
             
-        self.debug.log(f"Cell {cell_id}: Center blue density = {density:.3f} ({pixel_count}/{total_pixels} pixels)")
+        if self.debug and cell_id is not None:
+            self.debug.log(f"Cell {cell_id}: Center blue density = {density:.3f} ({pixel_count}/{total_pixels} pixels)")
         
         return 0.05 < density < 0.60  # Spinners are rings, so density is moderate
 
