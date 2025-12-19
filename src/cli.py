@@ -68,8 +68,8 @@ Examples:
     )
     parser.add_argument(
         "api_provider",
-        choices=["ollama", "gemini"],
-        help="API provider to use one of: ollama, gemini",
+        choices=["ollama", "gemini", "openrouter"],
+        help="API provider to use one of: ollama, gemini, openrouter",
     )
     parser.add_argument("api_key", nargs="?", help="API key (not required for ollama)")
 
@@ -103,9 +103,19 @@ Examples:
         # solve() returns either a single action or a list of ClickActions (for grids)
         if isinstance(result, list):
             action_data = [action.model_dump() for action in result]
-        else:
+        elif hasattr(result, "model_dump"):
             action_data = result.model_dump()
-        print(json.dumps(action_data))
+        else:
+            action_data = result
+
+        # Combine token usage from both planners
+        all_token_usage = solver.planner.token_usage + solver.grid_planner.token_usage
+        
+        output = {
+            "actions": action_data,
+            "token_usage": all_token_usage
+        }
+        print(json.dumps(output))
 
     except Exception as e:
         # Always print traceback for debugging purposes now

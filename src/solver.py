@@ -118,8 +118,8 @@ class CaptchaSolver:
         self.debug = DebugManager(DEBUG)
         
         # Restrict providers to the supported set
-        if provider not in {"ollama", "gemini"}:
-            raise ValueError(f"Unsupported provider '{provider}'. Supported providers are: 'ollama', 'gemini'.")
+        if provider not in {"ollama", "gemini", "openrouter"}:
+            raise ValueError(f"Unsupported provider '{provider}'. Supported providers are: 'ollama', 'gemini', 'openrouter'.")
 
         # Set default model based on provider
         if model is None:
@@ -127,6 +127,8 @@ class CaptchaSolver:
                 model = "qwen3-vl:4b"
             elif provider == "gemini":
                 model = "gemini-2.5-flash-lite"
+            elif provider == "openrouter":
+                model = "google/gemini-2.0-flash-lite-preview-02-05:free"
 
         # Validate required parameters
         if provider != "ollama" and not api_key:
@@ -140,6 +142,8 @@ class CaptchaSolver:
 
         if provider == "gemini" and api_key:
             planner_kwargs["gemini_api_key"] = api_key
+        elif provider == "openrouter" and api_key:
+            planner_kwargs["openrouter_key"] = api_key
 
         planner_kwargs["debug_callback"] = self.debug.log
 
@@ -183,7 +187,7 @@ class CaptchaSolver:
         self,
         image_path: str,
         instruction: str = "",
-    ) -> Union[CaptchaAction, List[ClickAction]]:
+    ) -> Union[CaptchaAction, List[ClickAction], Dict[str, Any]]:
         """
         Solve a captcha image.
 
@@ -192,7 +196,7 @@ class CaptchaSolver:
             instruction: Optional instruction text (e.g., "Select all traffic lights")
 
         Returns:
-            CaptchaAction or List[ClickAction] for grid selections
+            CaptchaAction, List[ClickAction], or a dict with actions and metadata
         """
         with timed("solver.solve.total"):
             # Resolve path and get image size

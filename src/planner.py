@@ -13,6 +13,7 @@ Backends: ollama, gemini
 import json
 import os
 import sys
+import base64
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 # Timing helper (opt-in via CAPTCHA_TIMINGS=1)
@@ -207,17 +208,20 @@ class ActionPlanner:
 
     def __init__(
         self,
-        backend: Literal["ollama", "gemini"] = "gemini",
+        backend: Literal["ollama", "gemini", "openrouter"] = "gemini",
         model: Optional[str] = None,
         ollama_host: Optional[str] = None,
         gemini_api_key: Optional[str] = None,
+        openrouter_key: Optional[str] = None,
         debug_callback: Optional[Any] = None,
     ):
         self.backend = backend
         self.ollama_host = ollama_host or os.getenv("OLLAMA_HOST", "http://localhost:11434")
         self.gemini_api_key = gemini_api_key or os.getenv("GEMINI_API_KEY")
+        self.openrouter_key = openrouter_key or os.getenv("OPENROUTER_KEY")
         self.debug_callback = debug_callback
         self._genai_client = None
+        self.token_usage: List[Dict[str, Any]] = []
 
         # Configure Gemini if selected
         if self.backend == "gemini":
@@ -237,6 +241,8 @@ class ActionPlanner:
             elif backend == "gemini":
                 # Default Gemini model; can be overridden by caller
                 self.model = "gemini-2.5-flash-lite"
+            elif backend == "openrouter":
+                self.model = "google/gemini-2.0-flash-lite-preview-02-05:free"
             else:
                 raise ValueError(f"Unknown backend: {backend}")
         else:
@@ -255,11 +261,13 @@ class ActionPlanner:
     # ------------------------------------------------------------------
     # Core helper: chat with image
     # ------------------------------------------------------------------
-    def _chat_with_image(self, prompt: str, image_path: str) -> str:
+    def _chat_with_image(self, prompt: str, image_path: str) -> Tuple[str, Optional[Dict[str, Any]]]:
         """Send a prompt + image to the LLM backend, get response."""
         self._log(f"Backend: {self.backend}, Model: {self.model}")
         self._log(f"Image path: {image_path}")
         self._log(f"=== PROMPT START ===\n{prompt}\n=== PROMPT END ===")
+
+        usage = None
 
         if self.backend == "ollama":
             import ollama
@@ -276,8 +284,18 @@ class ActionPlanner:
                     },
                 )
             result = response["message"]["content"]
+            
+            # Ollama usage (if available)
+            if "prompt_eval_count" in response:
+                usage = {
+                    "input_tokens": response["prompt_eval_count"],
+                    "output_tokens": response["eval_count"],
+                    "model": self.model
+                }
+                self.token_usage.append(usage)
+            
             self._log(f"=== RAW RESPONSE ===\n{result}\n=== END RESPONSE ===")
-            return result
+            return result, usage
 
         if self.backend == "gemini":
             if not genai or not GenerateContentConfig or not Part:
@@ -317,8 +335,85 @@ class ActionPlanner:
                     config=config,
                 )
             result = response.text
+            
+            # Gemini usage
+            if response.usage_metadata:
+                usage = {
+                    "input_tokens": response.usage_metadata.prompt_token_count,
+                    "output_tokens": response.usage_metadata.candidates_token_count,
+                    "cached_input_tokens": getattr(response.usage_metadata, "cached_content_token_count", 0),
+                    "model": self.model
+                }
+                self.token_usage.append(usage)
+
             self._log(f"=== RAW RESPONSE ===\n{result}\n=== END RESPONSE ===")
-            return result
+            return result, usage
+
+        if self.backend == "openrouter":
+            import requests
+
+            if not self.openrouter_key:
+                raise ValueError("OPENROUTER_KEY is required for openrouter backend.")
+
+            # Load image and encode to base64
+            import mimetypes
+
+            mime_type, _ = mimetypes.guess_type(image_path)
+            if not mime_type:
+                mime_type = "image/png"
+
+            with open(image_path, "rb") as f:
+                image_base64 = base64.b64encode(f.read()).decode("utf-8")
+
+            url = "https://openrouter.ai/api/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {self.openrouter_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://github.com/jakewriter/PlaywrightCaptchaKrakenJS", # Optional
+                "X-Title": "CaptchaKraken", # Optional
+            }
+
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:{mime_type};base64,{image_base64}"},
+                            },
+                        ],
+                    }
+                ],
+                "temperature": 0.0,
+                "response_format": {"type": "json_object"} if "json" in prompt.lower() else None,
+            }
+
+            self._log(f"Waiting for OpenRouter response ({self.model})...")
+            with timed("planner.openrouter.generate_content", extra=f"model={self.model}"):
+                response = requests.post(url, headers=headers, json=payload)
+                response.raise_for_status()
+                data = response.json()
+
+            if "choices" in data and len(data["choices"]) > 0:
+                result = data["choices"][0]["message"]["content"]
+            else:
+                self._log(f"OpenRouter Error: {data}")
+                raise ValueError(f"OpenRouter returned no results: {data}")
+
+            # Token usage
+            if "usage" in data:
+                usage = {
+                    "input_tokens": data["usage"].get("prompt_tokens", 0),
+                    "output_tokens": data["usage"].get("completion_tokens", 0),
+                    "model": self.model,
+                }
+                self.token_usage.append(usage)
+
+            self._log(f"=== RAW RESPONSE ===\n{result}\n=== END RESPONSE ===")
+            return result, usage
 
         raise ValueError(f"Unknown backend: {self.backend}")
 
@@ -388,7 +483,7 @@ class ActionPlanner:
             object_list_section=object_list_section,
             history_section=history_section,
         )
-        response = self._chat_with_image(prompt, image_path)
+        response, _ = self._chat_with_image(prompt, image_path)
         return self._parse_json(response)
 
     # ------------------------------------------------------------------
@@ -451,7 +546,7 @@ class ActionPlanner:
             history_text=history_text,
         )
 
-        response = self._chat_with_image(prompt, image_path)
+        response, _ = self._chat_with_image(prompt, image_path)
         result = self._parse_json(response)
 
         # Ensure we have valid adjustment values
@@ -478,7 +573,7 @@ class ActionPlanner:
             id=source_object.get("id"),
             instruction=instruction
         )
-        response = self._chat_with_image(prompt, image_path)
+        response, _ = self._chat_with_image(prompt, image_path)
         return self._parse_json(response)
 
     # ------------------------------------------------------------------
@@ -491,7 +586,7 @@ class ActionPlanner:
         Returns:
             The text to type
         """
-        response = self._chat_with_image(TEXT_READ_PROMPT, image_path)
+        response, _ = self._chat_with_image(TEXT_READ_PROMPT, image_path)
         result = self._parse_json(response)
         return result.get("text", "")
 
@@ -530,7 +625,7 @@ Respond ONLY with JSON:
   "reasoning": "Why these IDs match the description"
 }}"""
         
-        response = self._chat_with_image(prompt, image_path)
+        response, _ = self._chat_with_image(prompt, image_path)
         result = self._parse_json(response)
         
         self._log(f"Selection reasoning: {result.get('reasoning')}")

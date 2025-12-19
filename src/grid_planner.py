@@ -83,7 +83,7 @@ class GridPlanner(ActionPlanner):
             grid_hint=grid_hint
         )
         
-        response = self._chat_with_image(prompt, image_path)
+        response, _ = self._chat_with_image(prompt, image_path)
         result = self._parse_json(response)
 
         selected = result.get("selected_numbers", [])

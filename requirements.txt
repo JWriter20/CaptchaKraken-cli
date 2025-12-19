@@ -7,6 +7,7 @@ opencv-python-headless>=4.10.0
 # LLM backends
 ollama>=0.3.0          # Local LLM inference via Ollama
 google-genai>=0.4.0    # New Gemini / Vertex AI SDK
+requests>=2.31.0       # For OpenRouter and other HTTP APIs
 
 # Vision models (GroundingDINO, CLIP, FastSAM)
 torch>=2.0.0
