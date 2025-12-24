@@ -49,6 +49,26 @@ def main():
             print("Is the server running?", file=sys.stderr)
         return
 
+    # Handle check-movement command
+    if len(sys.argv) > 1 and sys.argv[1] == "check-movement":
+        if len(sys.argv) < 4:
+            print(json.dumps({"error": "Usage: python -m src.cli check-movement img1.png img2.png [threshold]"}), file=sys.stderr)
+            sys.exit(1)
+        
+        from src.image_processor import ImageProcessor
+        img1 = sys.argv[2]
+        img2 = sys.argv[3]
+        threshold = 0.005
+        if len(sys.argv) > 4:
+            try:
+                threshold = float(sys.argv[4])
+            except ValueError:
+                pass
+        
+        has_movement = ImageProcessor.detect_movement(img1, img2, threshold)
+        print(json.dumps({"has_movement": has_movement}))
+        return
+
     parser = argparse.ArgumentParser(
         description="CaptchaKraken - AI-powered captcha solver",
         formatter_class=argparse.RawDescriptionHelpFormatter,

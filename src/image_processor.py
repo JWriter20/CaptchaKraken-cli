@@ -39,6 +39,42 @@ class ImageProcessor:
     # =========================================================================
 
     @staticmethod
+    def detect_movement(image1_path: str, image2_path: str, threshold: float = 0.005) -> bool:
+        """
+        Compare two images and return True if they are significantly different.
+        
+        Args:
+            image1_path: Path to the first image.
+            image2_path: Path to the second image.
+            threshold: Percentage of pixels that must change to be considered movement.
+        """
+        img1 = cv2.imread(image1_path)
+        img2 = cv2.imread(image2_path)
+        
+        if img1 is None or img2 is None:
+            return False
+            
+        if img1.shape != img2.shape:
+            # If resolution changed, something definitely changed
+            return True
+            
+        # Compute absolute difference
+        diff = cv2.absdiff(img1, img2)
+        # Convert to grayscale to simplify
+        gray_diff = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+        
+        # Threshold the difference to ignore minor noise (compression artifacts, etc.)
+        # 30 is a reasonable threshold for significant pixel change
+        _, thresh = cv2.threshold(gray_diff, 30, 255, cv2.THRESH_BINARY)
+        
+        # Calculate percentage of changed pixels
+        changed_pixels = cv2.countNonZero(thresh)
+        total_pixels = thresh.shape[0] * thresh.shape[1]
+        change_ratio = changed_pixels / total_pixels
+        
+        return change_ratio > threshold
+
+    @staticmethod
     def to_greyscale(image_path: str, output_path: str) -> None:
         """Convert an image to greyscale and save it."""
         img = cv2.imread(image_path)

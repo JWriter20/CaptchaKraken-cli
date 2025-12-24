@@ -261,10 +261,12 @@ class ActionPlanner:
     # ------------------------------------------------------------------
     # Core helper: chat with image
     # ------------------------------------------------------------------
-    def _chat_with_image(self, prompt: str, image_path: str) -> Tuple[str, Optional[Dict[str, Any]]]:
-        """Send a prompt + image to the LLM backend, get response."""
+    def _chat_with_image(self, prompt: str, image_path: Union[str, List[str]]) -> Tuple[str, Optional[Dict[str, Any]]]:
+        """Send a prompt + image(s)/video(s) to the LLM backend, get response."""
         self._log(f"Backend: {self.backend}, Model: {self.model}")
-        self._log(f"Image path: {image_path}")
+        
+        image_paths = [image_path] if isinstance(image_path, str) else image_path
+        self._log(f"Input paths: {image_paths}")
         self._log(f"=== PROMPT START ===\n{prompt}\n=== PROMPT END ===")
 
         usage = None
@@ -275,17 +277,18 @@ class ActionPlanner:
             self._log("Waiting for Ollama response...")
             with timed("planner.ollama.total", extra=f"model={self.model}"):
                 client = ollama.Client(host=self.ollama_host)
+                # Ollama chat supports multiple images in the 'images' list
                 response = client.chat(
                     model=self.model,
-                    messages=[{"role": "user", "content": prompt, "images": [image_path]}],
+                    messages=[{"role": "user", "content": prompt, "images": image_paths}],
                     options={
                         "temperature": 0.0,
-                        "num_predict": 1024,  # Limit generation length to avoid infinite loops
+                        "num_predict": 1024,
                     },
                 )
             result = response["message"]["content"]
             
-            # Ollama usage (if available)
+            # ... token usage ...
             if "prompt_eval_count" in response:
                 usage = {
                     "input_tokens": response["prompt_eval_count"],
@@ -306,27 +309,26 @@ class ActionPlanner:
                     raise ValueError("GEMINI_API_KEY is required for Gemini backend when not using Vertex AI.")
                 self._genai_client = genai.Client(api_key=self.gemini_api_key)  # type: ignore[call-arg]
 
-            # Load image bytes
             import mimetypes
+            contents: List[Any] = []
 
-            mime_type, _ = mimetypes.guess_type(image_path)
-            if not mime_type:
-                mime_type = "image/png"
-
-            with timed("planner.gemini.read_image_bytes"):
-                with open(image_path, "rb") as f:
-                    image_bytes = f.read()
+            with timed("planner.gemini.prepare_content"):
+                for path in image_paths:
+                    mime_type, _ = mimetypes.guess_type(path)
+                    if not mime_type:
+                        mime_type = "image/png"
+                    
+                    with open(path, "rb") as f:
+                        data = f.read()
+                        contents.append(Part.from_bytes(data=data, mime_type=mime_type))
+            
+            contents.append(prompt)
 
             # Configure response as JSON (planner expects JSON it can parse)
             config = GenerateContentConfig(
                 temperature=0.0,
                 response_mime_type="application/json",
             )
-
-            contents = [
-                Part.from_bytes(data=image_bytes, mime_type=mime_type),
-                prompt,
-            ]
 
             with timed("planner.gemini.generate_content", extra=f"model={self.model}"):
                 response = self._genai_client.models.generate_content(  # type: ignore[union-attr]
@@ -336,7 +338,7 @@ class ActionPlanner:
                 )
             result = response.text
             
-            # Gemini usage
+            # ... usage ...
             if response.usage_metadata:
                 usage = {
                     "input_tokens": response.usage_metadata.prompt_token_count,
@@ -355,38 +357,32 @@ class ActionPlanner:
             if not self.openrouter_key:
                 raise ValueError("OPENROUTER_KEY is required for openrouter backend.")
 
-            # Load image and encode to base64
             import mimetypes
+            message_content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
 
-            mime_type, _ = mimetypes.guess_type(image_path)
-            if not mime_type:
-                mime_type = "image/png"
+            for path in image_paths:
+                mime_type, _ = mimetypes.guess_type(path)
+                if not mime_type:
+                    mime_type = "image/png"
 
-            with open(image_path, "rb") as f:
-                image_base64 = base64.b64encode(f.read()).decode("utf-8")
+                with open(path, "rb") as f:
+                    image_base64 = base64.b64encode(f.read()).decode("utf-8")
+                    message_content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime_type};base64,{image_base64}"},
+                    })
 
             url = "https://openrouter.ai/api/v1/chat/completions"
             headers = {
                 "Authorization": f"Bearer {self.openrouter_key}",
                 "Content-Type": "application/json",
-                "HTTP-Referer": "https://github.com/jakewriter/PlaywrightCaptchaKrakenJS", # Optional
-                "X-Title": "CaptchaKraken", # Optional
+                "HTTP-Referer": "https://github.com/jakewriter/PlaywrightCaptchaKrakenJS",
+                "X-Title": "CaptchaKraken",
             }
 
             payload = {
                 "model": self.model,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": f"data:{mime_type};base64,{image_base64}"},
-                            },
-                        ],
-                    }
-                ],
+                "messages": [{"role": "user", "content": message_content}],
                 "temperature": 0.0,
                 "response_format": {"type": "json_object"} if "json" in prompt.lower() else None,
             }
@@ -403,7 +399,7 @@ class ActionPlanner:
                 self._log(f"OpenRouter Error: {data}")
                 raise ValueError(f"OpenRouter returned no results: {data}")
 
-            # Token usage
+            # ... usage ...
             if "usage" in data:
                 usage = {
                     "input_tokens": data["usage"].get("prompt_tokens", 0),
@@ -414,6 +410,8 @@ class ActionPlanner:
 
             self._log(f"=== RAW RESPONSE ===\n{result}\n=== END RESPONSE ===")
             return result, usage
+
+        raise ValueError(f"Unknown backend: {self.backend}")
 
         raise ValueError(f"Unknown backend: {self.backend}")
 
@@ -447,15 +445,17 @@ class ActionPlanner:
         instruction: str = "",
         objects: Optional[List[Dict[str, Any]]] = None,
         history: Optional[List[str]] = None,
+        context_image_path: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Plan the next action, potentially requesting a tool call.
 
         Args:
-            image_path: Path to the captcha image
+            image_path: Path to the captcha image or video
             instruction: Optional instruction text
             objects: Optional list of detected objects
             history: Optional list of previous actions
+            context_image_path: Optional path to a static image with overlays/labels
 
         Returns:
             Dict with either:
@@ -483,7 +483,13 @@ class ActionPlanner:
             object_list_section=object_list_section,
             history_section=history_section,
         )
-        response, _ = self._chat_with_image(prompt, image_path)
+        
+        images = [image_path]
+        if context_image_path and context_image_path != image_path:
+            images.append(context_image_path)
+            prompt += "\n\nNOTE: Multiple images/media provided. The first item is the raw captcha (could be video), the second is a static frame with red boxes and Object IDs for reference."
+
+        response, _ = self._chat_with_image(prompt, images)
         return self._parse_json(response)
 
     # ------------------------------------------------------------------

@@ -189,10 +189,10 @@ class CaptchaSolver:
         instruction: str = "",
     ) -> Union[CaptchaAction, List[ClickAction], Dict[str, Any]]:
         """
-        Solve a captcha image.
+        Solve a captcha image or video.
 
         Args:
-            image_path: Path to the captcha image
+            image_path: Path to the captcha image or video
             instruction: Optional instruction text (e.g., "Select all traffic lights")
 
         Returns:
@@ -205,28 +205,53 @@ class CaptchaSolver:
                 if not os.path.exists(image_path):
                     raise FileNotFoundError(f"Image not found: {image_path}")
 
-            with timed("solver.open_image"):
-                with Image.open(image_path) as img:
-                    self._image_size = img.size
+            # Check if input is video
+            is_video = any(image_path.lower().endswith(ext) for ext in [".mp4", ".webm", ".gif", ".avi"])
+            
+            # For CV processing, we need a static image. 
+            # If it's a video, we extract the first frame.
+            cv_image_path = image_path
+            if is_video:
+                with timed("solver.video.extract_first_frame"):
+                    import cv2
+                    cap = cv2.VideoCapture(image_path)
+                    ret, frame = cap.read()
+                    if not ret:
+                        cap.release()
+                        raise ValueError(f"Could not read video from {image_path}")
+                    
+                    self._image_size = (frame.shape[1], frame.shape[0])
+                    cap.release()
+                    
+                    # Save first frame to temp file for CV tools
+                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+                        cv_image_path = tf.name
+                    self._temp_files.append(cv_image_path)
+                    cv2.imwrite(cv_image_path, frame)
+                    self.debug.log(f"Extracted first frame of video for CV processing: {cv_image_path}")
+            else:
+                with timed("solver.open_image"):
+                    with Image.open(image_path) as img:
+                        self._image_size = img.size
 
-            # Debug: Save base image
+            # Debug: Save base image/frame
             with timed("solver.debug.save_base_image"):
-                self.debug.save_image(image_path, "00_base_image.png")
+                self.debug.save_image(cv_image_path, "00_base_image.png")
 
             # 1. Check for grid structure
             with timed("solver.grid.detect_grid_boxes"):
-                grid_boxes = self.image_processor.get_grid_bounding_boxes(image_path)
+                grid_boxes = self.image_processor.get_grid_bounding_boxes(cv_image_path)
             if grid_boxes:
                 self.debug.log(f"Detected grid with {len(grid_boxes)} cells")
-                return self._solve_grid(image_path, instruction, grid_boxes)
+                # For grid, we usually just need the static image, but we can pass the video path
+                # to the grid planner if needed. For now, use the static image for grid.
+                return self._solve_grid(cv_image_path, instruction, grid_boxes)
 
             # 2. Check for simple checkbox (lightweight)
-            # Optimization: Only run fast checkbox detection on small/wide images (likely the checkbox widget).
-            # Large/tall images are likely challenge windows where we should use the planner to avoid false positives (like footer icons).
             img_w, img_h = self._image_size
             if img_h < 400:
                 with timed("solver.checkbox.detect_checkbox"):
-                    checkbox_box = self.image_processor.detect_checkbox(image_path)
+                    checkbox_box = self.image_processor.detect_checkbox(cv_image_path)
                 if checkbox_box:
                     self.debug.log(f"Detected checkbox at {checkbox_box}")
                     x, y, w, h = checkbox_box
@@ -237,8 +262,9 @@ class CaptchaSolver:
                     )
 
             # 3. General solving with tool use
-            self.debug.log("Using general solving flow")
-            return self._solve_general(image_path, instruction)
+            # Pass the ORIGINAL image_path (could be video) to _solve_general
+            self.debug.log(f"Using general solving flow (is_video={is_video})")
+            return self._solve_general(image_path, instruction, cv_image_path=cv_image_path)
 
     def _solve_grid(
         self,
@@ -507,28 +533,33 @@ class CaptchaSolver:
         self,
         image_path: str,
         instruction: str,
+        cv_image_path: Optional[str] = None,
     ) -> Union[CaptchaAction, List[ClickAction]]:
         """
         General solving using planner with detect/point tools.
         """
         max_tool_calls = 5
         history: List[str] = []
+        cv_path = cv_image_path or image_path
 
         # General solving relies on detect/point/segmentation -> needs heavyweight vision stack.
         attention = self._get_attention()
         
-        # Run initial segmentation immediately
-        current_image_path, current_objects = self._handle_segmentation(image_path)
+        # Run initial segmentation immediately (use static image)
+        current_cv_image_path, current_objects = self._handle_segmentation(cv_path)
         if current_objects:
             history.append(f"Initial segmentation found {len(current_objects)} objects.")
 
         for i in range(max_tool_calls):
             self.debug.log(f"Planning step {i+1}/{max_tool_calls}")
+            # IMPORTANT: Pass the ORIGINAL image_path (could be video) to the planner
+            # but use the segmented/labeled static image (current_cv_image_path) for context
             result = self.planner.plan_with_tools(
-                current_image_path, 
+                image_path, # Could be video
                 instruction, 
                 objects=current_objects,
-                history=history
+                history=history,
+                context_image_path=current_cv_image_path # Static image with labels
             )
 
             # Log analysis
@@ -555,7 +586,7 @@ class CaptchaSolver:
                     if tool == "detect":
                         object_class = args.get("object_class", "target")
                         self.debug.log(f"Tool call: detect('{object_class}')")
-                        detections = attention.detect_objects(current_image_path, object_class)
+                        detections = attention.detect_objects(current_cv_image_path, object_class)
 
                         if detections:
                             for det in detections:
@@ -569,7 +600,7 @@ class CaptchaSolver:
                         else:
                             # Fallback to point
                             self.debug.log("No detections, falling back to point()")
-                            x, y = attention.extract_coordinates(current_image_path, object_class)
+                            x, y = attention.extract_coordinates(current_cv_image_path, object_class)
                             collected_actions.append(
                                 ClickAction(
                                     action="click",
@@ -619,7 +650,7 @@ class CaptchaSolver:
                         if obj and source_quality == "includes-source":
                             self.debug.log(f"Object {obj.get('id')} contains source. Cropping and refining...")
                             try:
-                                with Image.open(image_path) as img:
+                                with Image.open(cv_path) as img:
                                     b = obj["bbox"] # [x, y, w, h]
                                     # Ensure crop box is valid
                                     crop_box = (
@@ -681,8 +712,8 @@ class CaptchaSolver:
                             search_term = refined_source or source
                             self.debug.log(f"Running detect for '{search_term}'...")
                             
-                            # Run detect on CLEAN image
-                            detect_result = attention.detect(image_path, search_term, max_objects=1)
+                            # Run detect on CLEAN image (use static image)
+                            detect_result = attention.detect(cv_path, search_term, max_objects=1)
                             detections = detect_result.get("objects", [])
                             
                             if detections:
@@ -699,7 +730,7 @@ class CaptchaSolver:
                                 # Visualize this detection
                                 debug_det_path = str(self.debug.base_dir / "03_detected_source.png")
                                 self.attention.visualize_detections(
-                                    image_path, 
+                                    cv_path, 
                                     vis_detections, 
                                     output_path=debug_det_path
                                 )
@@ -717,12 +748,12 @@ class CaptchaSolver:
                                 self.debug.log("detect failed to find source.")
                         
                         # Execute drag simulation immediately and return result
-                        # NOTE: Use image_path (clean) for drag simulation to avoid artifacts from labels
+                        # NOTE: Use cv_path (clean static) for drag simulation to avoid artifacts from labels
                         # Use refined_source for the description if available, as it's more descriptive than "Object N"
                         description_to_use = refined_source if refined_source else source
                         
                         return self._solve_drag(
-                            image_path,
+                            cv_path,
                             instruction,
                             description_to_use,
                             target_hint,
@@ -738,7 +769,7 @@ class CaptchaSolver:
                         # Check if target is an object ID
                         obj = self._get_object_by_id(target, current_objects)
                         if obj:
-                            img_w, img_h = self._image_size if self._image_size else Image.open(image_path).size
+                            img_w, img_h = self._image_size if self._image_size else Image.open(cv_path).size
                             bbox = obj["bbox"] # [x, y, w, h]
                             # Normalize to [x1, y1, x2, y2]
                             bbox_pct = [
@@ -754,7 +785,7 @@ class CaptchaSolver:
                                 )
                             )
                         else:
-                            x, y = attention.extract_coordinates(current_image_path, target)
+                            x, y = attention.extract_coordinates(current_cv_image_path, target)
                             collected_actions.append(
                                 ClickAction(
                                     action="click",
