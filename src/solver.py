@@ -39,6 +39,12 @@ from .planner import ActionPlanner
 from .grid_planner import GridPlanner
 from .image_processor import ImageProcessor
 from .timing import timed
+from .tool_calls.find_grid import find_grid, detect_selected_cells
+from .tool_calls.find_checkbox import find_checkbox
+from .tool_calls.segment import segment
+from .tool_calls.detect import detect
+from .tool_calls.simulate_drag import simulate_drag
+from .tool_calls.find_connected_elems import find_connected_elems
 
 # Debug flag - set via CAPTCHA_DEBUG=1 environment variable
 DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
@@ -240,7 +246,7 @@ class CaptchaSolver:
 
             # 1. Check for grid structure
             with timed("solver.grid.detect_grid_boxes"):
-                grid_boxes = self.image_processor.get_grid_bounding_boxes(cv_image_path)
+                grid_boxes = find_grid(cv_image_path)
             if grid_boxes:
                 self.debug.log(f"Detected grid with {len(grid_boxes)} cells")
                 # For grid, we usually just need the static image, but we can pass the video path
@@ -251,7 +257,7 @@ class CaptchaSolver:
             img_w, img_h = self._image_size
             if img_h < 400:
                 with timed("solver.checkbox.detect_checkbox"):
-                    checkbox_box = self.image_processor.detect_checkbox(cv_image_path)
+                    checkbox_box = find_checkbox(cv_image_path)
                 if checkbox_box:
                     self.debug.log(f"Detected checkbox at {checkbox_box}")
                     x, y, w, h = checkbox_box
@@ -292,13 +298,11 @@ class CaptchaSolver:
         cv_loading = []
         try:
             with timed("solver.grid.cv_detect_selected_cells", extra=f"cells={len(grid_boxes)}"):
-                cv_selected, cv_loading = self.image_processor.detect_selected_cells(image_path, grid_boxes)
+                cv_selected, cv_loading = detect_selected_cells(image_path, grid_boxes, self.debug)
             if cv_selected:
                 self.debug.log(f"CV Detected already selected cells: {cv_selected}")
-                # For grids most of the time we can select all of the tiles in one go, doing more often 
-                # confuses the model and leads it to select extraneous tiles. Since there are selected cells detected
-                # we know this is not one of the fading-in puzzles, so we can assume the first run through solved the puzzle.
-                return DoneAction(action="done")
+                # We don't return DoneAction immediately anymore, to allow for multi-round selection
+                # if the puzzle requires it. The selected cells will be filtered out of the overlay.
             else:
                 self.debug.log("CV Detection: No selected cells detected")
             if cv_loading:
@@ -371,7 +375,16 @@ class CaptchaSolver:
             # (The model shouldn't see numbers that aren't there, but good for safety)
             before_filter = selected_numbers.copy()
             with timed("solver.grid.filter_llm_numbers"):
-                selected_numbers = [n for n in selected_numbers if n in valid_indices]
+                # Ensure they are ints and in valid_indices
+                converted_numbers = []
+                for n in selected_numbers:
+                    try:
+                        val = int(n)
+                        if val in valid_indices:
+                            converted_numbers.append(val)
+                    except (ValueError, TypeError):
+                        continue
+                selected_numbers = converted_numbers
             
             if len(before_filter) != len(selected_numbers):
                 filtered = set(before_filter) - set(selected_numbers)
@@ -423,97 +436,6 @@ class CaptchaSolver:
             if os.path.exists(overlay_path):
                 os.unlink(overlay_path)
 
-    def _handle_segmentation(self, image_path: str) -> Tuple[str, List[Dict[str, Any]]]:
-        """
-        Sharpen image, segment with SAM2 via detectInteractable, and create numbered overlay.
-        Returns (path to new image, list of objects found).
-        """
-        self.debug.log("Running segmentation and labeling...")
-        
-        ext = os.path.splitext(image_path)[1] or ".png"
-        
-        # 1. Pre-process: Merge similar colors
-        with tempfile.NamedTemporaryFile(suffix=f"_merged{ext}", delete=False) as tf:
-            merged_path = tf.name
-        self._temp_files.append(merged_path)
-        
-        sharpen_input = image_path
-        try:
-            self.debug.log("Merging similar colors...")
-            self.image_processor.merge_similar_colors(image_path, merged_path, k=12)
-        except Exception as e:
-            self.debug.log(f"Color merging failed: {e}")
-
-        # 2. Greyscale image
-        with tempfile.NamedTemporaryFile(suffix=f"_greyscale{ext}", delete=False) as tf:
-            greyscale_path = tf.name
-        self._temp_files.append(greyscale_path)
-        try:
-            self.image_processor.to_greyscale(merged_path, greyscale_path)
-        except Exception as e:
-            self.debug.log(f"Greyscale conversion failed: {e}")
-            shutil.copy2(merged_path, greyscale_path)
-            sharpen_input = greyscale_path
-        else:
-            sharpen_input = merged_path
-
-        # 3. Sharpen image
-        with tempfile.NamedTemporaryFile(suffix=f"_sharp{ext}", delete=False) as tf:
-            sharp_path = tf.name
-        self._temp_files.append(sharp_path)
-        
-        try:
-            self.image_processor.sharpen_image(sharpen_input, sharp_path)
-        except Exception as e:
-            self.debug.log(f"Sharpening failed: {e}")
-            shutil.copy2(sharpen_input, sharp_path)
-
-        # Ensure heavyweight vision stack is available for segmentation.
-        attention = self._get_attention()
-
-        # 2. Segment with SAM2 using detectInteractable (better sensitivity/filtering)
-        # detectInteractable returns objects with pixel bboxes [x, y, w, h]
-        result = attention.detectInteractable(sharp_path)
-        objects = result.get("objects", [])
-        
-        if not objects:
-            self.debug.log("No objects found during segmentation.")
-            return image_path, []
-
-        # 3. Create overlays
-        overlays = []
-        # Use high-contrast colors
-        colors = ["#E74C3C", "#3498DB", "#2ECC71", "#F1C40F", "#9B59B6", "#E67E22"]
-        
-        # Keep track of objects with ID for later lookup
-        labeled_objects = []
-        
-        for i, obj in enumerate(objects):
-            bbox = obj["bbox"] # [x, y, w, h]
-            
-            # Create overlay item
-            overlays.append({
-                "bbox": bbox,
-                "number": i + 1,
-                "color": colors[i % len(colors)]
-            })
-            
-            # Store with ID
-            obj_with_id = obj.copy()
-            obj_with_id["id"] = i + 1
-            labeled_objects.append(obj_with_id)
-
-        # 4. Save overlay image
-        with tempfile.NamedTemporaryFile(suffix=f"_labeled{ext}", delete=False) as tf:
-            labeled_path = tf.name
-        self._temp_files.append(labeled_path)
-        
-        add_overlays_to_image(image_path, overlays, output_path=labeled_path)
-        self.debug.log(f"Segmented {len(overlays)} objects.")
-        self.debug.save_image(labeled_path, "02_segmented_overlay.png")
-        
-        return labeled_path, labeled_objects
-
     def _get_object_by_id(self, target: str, objects: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """Try to find an object by ID in the target string (e.g. "item 5")."""
         import re
@@ -546,7 +468,7 @@ class CaptchaSolver:
         attention = self._get_attention()
         
         # Run initial segmentation immediately (use static image)
-        current_cv_image_path, current_objects = self._handle_segmentation(cv_path)
+        current_cv_image_path, current_objects = segment(self.image_processor, attention, cv_path, self.debug)
         if current_objects:
             history.append(f"Initial segmentation found {len(current_objects)} objects.")
 
@@ -586,7 +508,7 @@ class CaptchaSolver:
                     if tool == "detect":
                         object_class = args.get("object_class", "target")
                         self.debug.log(f"Tool call: detect('{object_class}')")
-                        detections = attention.detect_objects(current_cv_image_path, object_class)
+                        detections = detect(attention, current_cv_image_path, object_class)
 
                         if detections:
                             for det in detections:
@@ -598,15 +520,26 @@ class CaptchaSolver:
                                     )
                                 )
                         else:
-                            # Fallback to point
-                            self.debug.log("No detections, falling back to point()")
-                            x, y = attention.extract_coordinates(current_cv_image_path, object_class)
-                            collected_actions.append(
-                                ClickAction(
-                                    action="click",
-                                    target_coordinates=[x, y],
+                            # Fallback to detect with max_objects=1
+                            self.debug.log("No detections, trying fallback...")
+                            fallback_detections = attention.detect(current_cv_image_path, object_class, max_objects=1)
+                            if fallback_detections:
+                                obj = fallback_detections[0]
+                                x = (obj["x_min"] + obj["x_max"]) / 2
+                                y = (obj["y_min"] + obj["y_max"]) / 2
+                                collected_actions.append(
+                                    ClickAction(
+                                        action="click",
+                                        target_coordinates=[x, y],
+                                    )
                                 )
-                            )
+                            else:
+                                collected_actions.append(
+                                    ClickAction(
+                                        action="click",
+                                        target_coordinates=[0.5, 0.5],
+                                    )
+                                )
 
                     elif tool == "simulate_drag":
                         source = args.get("source", "movable item")
@@ -617,142 +550,28 @@ class CaptchaSolver:
                         location_hint = args.get("location_hint")
 
                         self.debug.log(f"Tool call: simulate_drag('{source}', '{target_hint}')")
-                        if target_object_id:
-                            self.debug.log(f"  Target Object ID: {target_object_id}")
-                        if source_quality:
-                            self.debug.log(f"  Quality: {source_quality}, Refined: {refined_source}")
-                        if location_hint:
-                            self.debug.log(f"  Location Hint: {location_hint}")
-                        
-                        source_bbox = None
                         
                         # 0. Adjust location_hint if target_object_id is provided
                         if target_object_id:
                             # Try to treat as int, or string "Object N"
                             tgt_obj = self._get_object_by_id(str(target_object_id), current_objects)
                             if tgt_obj:
-                                # Use center of target object as the starting location hint
-                                t_bbox = tgt_obj["bbox"] # [x, y, w, h]
+                                t_bbox = tgt_obj["bbox"]
                                 img_w, img_h = self._image_size
-                                
-                                # Calculate center in normalized coords
                                 t_cx = (t_bbox[0] + t_bbox[2] / 2) / img_w
                                 t_cy = (t_bbox[1] + t_bbox[3] / 2) / img_h
-                                
                                 location_hint = [t_cx, t_cy]
-                                self.debug.log(f"Using center of Target Object {tgt_obj['id']} as start: {location_hint}")
-                            else:
-                                self.debug.log(f"Target object ID '{target_object_id}' not found.")
-
-                        # 1. Check if source is an object ID
-                        obj = self._get_object_by_id(source, current_objects)
                         
-                        if obj and source_quality == "includes-source":
-                            self.debug.log(f"Object {obj.get('id')} contains source. Cropping and refining...")
-                            try:
-                                with Image.open(cv_path) as img:
-                                    b = obj["bbox"] # [x, y, w, h]
-                                    # Ensure crop box is valid
-                                    crop_box = (
-                                        int(b[0]), 
-                                        int(b[1]), 
-                                        int(b[0] + b[2]), 
-                                        int(b[1] + b[3])
-                                    )
-                                    crop_img = img.crop(crop_box)
-                                    
-                                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                                        crop_path = tf.name
-                                    self._temp_files.append(crop_path)
-                                    crop_img.save(crop_path)
-                                    
-                                    search_term = refined_source or source
-                                    # Run detect on the crop
-                                    detect_result = self.attention.detect(crop_path, search_term, max_objects=1)
-                                    detections = detect_result.get("objects", [])
-                                    
-                                    if detections:
-                                        # Convert from {x_min, y_min, x_max, y_max} to [x1, y1, x2, y2]
-                                        obj = detections[0]
-                                        d = [obj["x_min"], obj["y_min"], obj["x_max"], obj["y_max"]] # [x1, y1, x2, y2] normalized to CROP
-                                        cw, ch = crop_img.size
-                                        
-                                        # Convert to pixel coords in CROP
-                                        cx1 = d[0] * cw
-                                        cy1 = d[1] * ch
-                                        cx2 = d[2] * cw
-                                        cy2 = d[3] * ch
-                                        
-                                        # Translate to full image
-                                        fx1 = cx1 + b[0]
-                                        fy1 = cy1 + b[1]
-                                        fx2 = cx2 + b[0]
-                                        fy2 = cy2 + b[1]
-                                        
-                                        source_bbox = [fx1, fy1, fx2, fy2]
-                                        self.debug.log(f"Refined source bbox: {source_bbox}")
-                                    else:
-                                        self.debug.log("Refinement failed in crop. Falling back to object bbox.")
-                                        source_bbox = [b[0], b[1], b[0] + b[2], b[1] + b[3]]
-                                        
-                            except Exception as e:
-                                self.debug.log(f"Error during crop refinement: {e}")
-                                # Fallback
-                                b = obj["bbox"]
-                                source_bbox = [b[0], b[1], b[0] + b[2], b[1] + b[3]]
-
-                        elif obj:
-                            # Default case: "properly-cropped" or unspecified
-                            self.debug.log(f"Source identified as existing Object {obj.get('id')} (Assuming Tight)")
+                        source_bbox = None
+                        obj = self._get_object_by_id(source, current_objects)
+                        if obj:
                             b = obj["bbox"]
                             source_bbox = [b[0], b[1], b[0] + b[2], b[1] + b[3]]
-                        
-                        if not source_bbox:
-                            # 2. Run detect (either not found, or explicit "not-bounded")
-                            search_term = refined_source or source
-                            self.debug.log(f"Running detect for '{search_term}'...")
-                            
-                            # Run detect on CLEAN image (use static image)
-                            detect_result = attention.detect(cv_path, search_term, max_objects=1)
-                            detections = detect_result.get("objects", [])
-                            
-                            if detections:
-                                obj = detections[0]
-                                self.debug.log(f"detect found: {obj}")
-                                
-                                # Convert to visualization format (bbox as [x_min, y_min, x_max, y_max])
-                                vis_detections = [{
-                                    "bbox": [obj["x_min"], obj["y_min"], obj["x_max"], obj["y_max"]],
-                                    "label": obj.get("label", search_term),
-                                    "score": obj.get("score", 0.0)
-                                }]
-                                
-                                # Visualize this detection
-                                debug_det_path = str(self.debug.base_dir / "03_detected_source.png")
-                                self.attention.visualize_detections(
-                                    cv_path, 
-                                    vis_detections, 
-                                    output_path=debug_det_path
-                                )
-                                self.debug.log(f"Saved detection visualization to {debug_det_path}")
-                                
-                                # Convert normalized bbox to pixels [x1, y1, x2, y2]
-                                img_w, img_h = self._image_size
-                                source_bbox = [
-                                    obj["x_min"] * img_w,
-                                    obj["y_min"] * img_h,
-                                    obj["x_max"] * img_w,
-                                    obj["y_max"] * img_h
-                                ]
-                            else:
-                                self.debug.log("detect failed to find source.")
-                        
-                        # Execute drag simulation immediately and return result
-                        # NOTE: Use cv_path (clean static) for drag simulation to avoid artifacts from labels
-                        # Use refined_source for the description if available, as it's more descriptive than "Object N"
+
+                        # Execute drag simulation
                         description_to_use = refined_source if refined_source else source
-                        
-                        return self._solve_drag(
+                        drag_result = simulate_drag(
+                            self,
                             cv_path,
                             instruction,
                             description_to_use,
@@ -761,35 +580,27 @@ class CaptchaSolver:
                             initial_location_hint=location_hint,
                             primary_goal=result.get("goal"),
                         )
-                            
-                    elif tool == "point":
-                        target = args.get("target", "target")
-                        self.debug.log(f"Tool call: point('{target}')")
+                        return DragAction(**drag_result)
+
+                    elif tool == "find_connected_elems":
+                        conn_instruction = args.get("instruction", instruction)
+                        self.debug.log(f"Tool call: find_connected_elems('{conn_instruction}')")
+                        connected_detections = find_connected_elems(cv_path, conn_instruction)
                         
-                        # Check if target is an object ID
-                        obj = self._get_object_by_id(target, current_objects)
-                        if obj:
-                            img_w, img_h = self._image_size if self._image_size else Image.open(cv_path).size
-                            bbox = obj["bbox"] # [x, y, w, h]
-                            # Normalize to [x1, y1, x2, y2]
-                            bbox_pct = [
-                                bbox[0] / img_w,
-                                bbox[1] / img_h,
-                                (bbox[0] + bbox[2]) / img_w,
-                                (bbox[1] + bbox[3]) / img_h
-                            ]
-                            collected_actions.append(
-                                ClickAction(
-                                    action="click",
-                                    target_bounding_box=bbox_pct,
+                        if connected_detections:
+                            for det in connected_detections:
+                                collected_actions.append(
+                                    ClickAction(
+                                        action="click",
+                                        target_bounding_box=det.get("bbox"),
+                                    )
                                 )
-                            )
                         else:
-                            x, y = attention.extract_coordinates(current_cv_image_path, target)
+                            # If not implemented or no results, fallback to center click
                             collected_actions.append(
                                 ClickAction(
                                     action="click",
-                                    target_coordinates=[x, y],
+                                    target_coordinates=[0.5, 0.5],
                                 )
                             )
 
@@ -829,34 +640,22 @@ class CaptchaSolver:
                 if source_obj and target_obj:
                     self.debug.log(f"Direct drag from Object {source_obj['id']} to Object {target_obj['id']}")
                     img_w, img_h = self._image_size
-                    
                     s_bbox = source_obj["bbox"]
                     t_bbox = target_obj["bbox"]
+                    s_center = [(s_bbox[0] + s_bbox[2] / 2) / img_w, (s_bbox[1] + s_bbox[3] / 2) / img_h]
+                    t_center = [(t_bbox[0] + t_bbox[2] / 2) / img_w, (t_bbox[1] + t_bbox[3] / 2) / img_h]
                     
-                    # Calculate centers (normalized)
-                    # bboxes are [x, y, w, h] in pixels
-                    s_center = [
-                        (s_bbox[0] + s_bbox[2] / 2) / img_w,
-                        (s_bbox[1] + s_bbox[3] / 2) / img_h
-                    ]
-                    t_center = [
-                        (t_bbox[0] + t_bbox[2] / 2) / img_w,
-                        (t_bbox[1] + t_bbox[3] / 2) / img_h
-                    ]
-                    
-                    return DragAction(
-                        action="drag",
-                        source_coordinates=s_center,
-                        target_coordinates=t_center
-                    )
+                    return DragAction(action="drag", source_coordinates=s_center, target_coordinates=t_center)
 
-                return self._solve_drag(
-                    current_image_path, # Use current image path (might be segmented)
+                drag_result = simulate_drag(
+                    self,
+                    current_cv_image_path,
                     instruction,
                     source_desc,
                     target_desc,
                     primary_goal=result.get("goal"),
                 )
+                return DragAction(**drag_result)
 
             elif action_type == "click":
                 target = result.get("target_description", "target")
@@ -878,7 +677,14 @@ class CaptchaSolver:
                         target_bounding_box=bbox_pct,
                     )
                 else:
-                    x, y = attention.extract_coordinates(current_image_path, target)
+                    detections = attention.detect(current_image_path, target, max_objects=1)
+                    if detections:
+                        obj = detections[0]
+                        x = (obj["x_min"] + obj["x_max"]) / 2
+                        y = (obj["y_min"] + obj["y_max"]) / 2
+                    else:
+                        x, y = 0.5, 0.5
+                    
                     return ClickAction(
                         action="click",
                         target_coordinates=[x, y],
@@ -889,244 +695,6 @@ class CaptchaSolver:
 
         # Fallback after max tool calls
         return DoneAction(action="done")
-
-    def _remove_background(self, image_path: str, prompt: str) -> Optional[Image.Image]:
-        """
-        Remove background from an image (crop) by selecting the segment matching the prompt.
-        Returns RGBA image with transparent background.
-        """
-        return self.image_processor.remove_background(
-            image_path,
-            prompt,
-            k=5,
-            merge_components=False,
-            min_area_ratio=0.005,
-            pre_merge_colors=True
-        )
-
-    def _solve_drag(
-        self,
-        image_path: str,
-        instruction: str,
-        source_description: Optional[str],
-        target_description: Optional[str],
-        max_iterations: int = 5,
-        source_bbox_override: Optional[List[float]] = None,
-        initial_location_hint: Optional[List[float]] = None,
-        primary_goal: Optional[str] = None,
-    ) -> DragAction:
-        """
-        Solve drag puzzle with iterative refinement.
-        """
-        source_desc = source_description or "movable item"
-        assert self._image_size is not None
-        img_w, img_h = self._image_size
-        attention = self._get_attention()
-
-        # 1. Find source
-        if source_bbox_override:
-            self.debug.log(f"Using provided source bbox: {source_bbox_override}")
-            source_bbox_px = source_bbox_override
-            source_x = (source_bbox_px[0] + source_bbox_px[2]) / 2 / img_w
-            source_y = (source_bbox_px[1] + source_bbox_px[3]) / 2 / img_h
-        else:
-            self.debug.log(f"Finding drag source: '{source_desc}'")
-            # Try to find the specific item
-            detections = attention.detect_objects(image_path, source_desc, max_objects=1)
-            if detections:
-                bbox = detections[0]["bbox"] # [x_min, y_min, x_max, y_max]
-                source_x = (bbox[0] + bbox[2]) / 2
-                source_y = (bbox[1] + bbox[3]) / 2
-                source_bbox_px = [
-                    bbox[0] * img_w,
-                    bbox[1] * img_h,
-                    bbox[2] * img_w,
-                    bbox[3] * img_h
-                ]
-            else:
-                # Fallback to point() if detect fails (returns center only)
-                source_x, source_y = attention.extract_coordinates(image_path, source_desc)
-                # Make a best-guess box around the point (e.g. 10% of image)
-                box_size = 0.1
-                source_bbox_px = [
-                    (source_x - box_size/2) * img_w,
-                    (source_y - box_size/2) * img_h,
-                    (source_x + box_size/2) * img_w,
-                    (source_y + box_size/2) * img_h
-                ]
-
-        source_coords = [source_x, source_y]
-        self.debug.log(f"Drag source at: ({source_x:.2%}, {source_y:.2%})")
-
-        # --- NEW LOGIC START ---
-        # Prepare foreground image (remove background from source) using simplified color segmentation
-        foreground_image = None
-        try:
-            # Crop source
-            x1, y1, x2, y2 = map(int, source_bbox_px)
-            with Image.open(image_path) as img:
-                w, h = img.size
-                x1 = max(0, x1); y1 = max(0, y1)
-                x2 = min(w, x2); y2 = min(h, y2)
-                if x2 > x1 and y2 > y1:
-                    source_crop = img.crop((x1, y1, x2, y2))
-                    
-                    # Save temp crop
-                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                        crop_path = tf.name
-                    self._temp_files.append(crop_path)
-                    source_crop.save(crop_path)
-                    
-                    # Use ImageProcessor
-                    # Settings from original code: k=3, merge=True, min_area=0.01
-                    foreground_image = self.image_processor.remove_background(
-                        crop_path, 
-                        prompt=source_desc,
-                        k=3,
-                        merge_components=True,
-                        min_area_ratio=0.01
-                    )
-                    
-                    if foreground_image:
-                         self.debug.log("Successfully created foreground image for drag source.")
-                    else:
-                         self.debug.log("Background removal failed or returned no image.")
-        except Exception as e:
-            self.debug.log(f"Failed to prepare foreground image: {e}")
-        # --- NEW LOGIC END ---
-
-        # 2. Initial target estimate
-        # Force start at center (0.5, 0.5) to ensure the model actively looks for the target
-        # Update: If initial_location_hint is provided (e.g. from target object ID), use it
-        target_x, target_y = 0.5, 0.5
-        
-        target_found_via_hint = False
-        if initial_location_hint:
-            target_x, target_y = initial_location_hint
-            target_found_via_hint = True
-            self.debug.log(f"Using provided initial location hint: ({target_x:.2%}, {target_y:.2%})")
-        
-        # We only override if we have a robust detection of the target already
-        
-        if not target_found_via_hint and target_description and target_description != "matching slot":
-             self.debug.log(f"Searching for drag target based on description: '{target_description}'")
-             # Try detect first
-             detections = attention.detect_objects(image_path, target_description, max_objects=1)
-             if detections:
-                 b = detections[0]["bbox"] # [x_min, y_min, x_max, y_max]
-                 
-                 # Calculate center from [x1, y1, x2, y2]
-                 cx = (b[0] + b[2]) / 2
-                 cy = (b[1] + b[3]) / 2
-                 target_x, target_y = cx, cy
-                 self.debug.log(f"Found target candidate at ({target_x:.2f}, {target_y:.2f})")
-             else:
-                 # Fallback to point (CLIP/GradCAM)
-                 try:
-                    tx, ty = attention.extract_coordinates(image_path, target_description)
-                    target_x, target_y = tx, ty
-                    self.debug.log(f"CLIP extracted coordinates for target: ({target_x:.2f}, {target_y:.2f})")
-                 except Exception as e:
-                     self.debug.log(f"Failed to extract target coordinates: {e}")
-
-        current_target = [target_x, target_y]
-        self.debug.log(f"Starting drag target at: ({target_x:.2%}, {target_y:.2%})")
-
-        # 3. Iterative refinement with visual feedback
-        history: List[dict] = []
-
-        work_ext = os.path.splitext(image_path)[1] or ".png"
-        with tempfile.NamedTemporaryFile(suffix=work_ext, delete=False) as tf:
-            work_path = tf.name
-        self._temp_files.append(work_path)
-
-
-        try:
-            for i in range(max_iterations):
-                shutil.copy2(image_path, work_path)
-
-                # Convert to pixels for overlay
-                # Target bbox (for visual box, not segmentation)
-                target_px = [current_target[0] * img_w, current_target[1] * img_h]
-                box_w = source_bbox_px[2] - source_bbox_px[0]
-                box_h = source_bbox_px[3] - source_bbox_px[1]
-                
-                target_bbox_px = [
-                    target_px[0] - box_w/2,
-                    target_px[1] - box_h/2,
-                    target_px[0] + box_w/2,
-                    target_px[1] + box_h/2,
-                ]
-
-                # Draw overlay (with crop and paste)
-                add_drag_overlay(
-                    work_path,
-                    source_bbox_px,
-                    target_bbox=target_bbox_px,
-                    target_center=tuple(target_px),
-                    foreground_image=foreground_image,
-                )
-
-                # Save step image to debug
-                self.debug.save_image(work_path, f"04_drag_step_{i+1}.png")
-
-                # Ask for refinement with history
-                result = self.planner.refine_drag(
-                    work_path,
-                    instruction,
-                    current_target,
-                    history,
-                    source_description=source_desc,
-                    target_description=target_description or "matching slot",
-                    primary_goal=primary_goal or f"Drag {source_desc} to {target_description}",
-                )
-
-                conclusion = result.get("conclusion", "")
-                decision = result.get("decision", "accept")
-                dx = result.get("dx", 0)
-                dy = result.get("dy", 0)
-
-                # Clamp adjustment to avoid wild jumps
-                max_step = 0.05
-                if abs(dx) > max_step:
-                    dx = math.copysign(max_step, dx)
-                if abs(dy) > max_step:
-                    dy = math.copysign(max_step, dy)
-
-                self.debug.log(f"Iteration {i + 1}: '{conclusion}' -> {decision} (dx={dx:+.1%}, dy={dy:+.1%})")
-
-                # Record history
-                history.append(
-                    {
-                        "destination": current_target.copy(),
-                        "conclusion": conclusion,
-                        "decision": decision,
-                    }
-                )
-
-                # Check if done
-                if decision == "accept" or (abs(dx) < 0.005 and abs(dy) < 0.005):
-                    self.debug.log("Drag target accepted")
-                    break
-
-                # Apply adjustment (relative)
-                current_target[0] = max(0.0, min(1.0, current_target[0] + dx))
-                current_target[1] = max(0.0, min(1.0, current_target[1] + dy))
-
-            # After refinement loop, save final overlay image
-            if os.path.exists(work_path):
-                self.debug.save_image(work_path, "05_drag_final.png")
-
-        finally:
-            if os.path.exists(work_path):
-                os.unlink(work_path)
-
-        return DragAction(
-            action="drag",
-            source_coordinates=source_coords,
-            target_coordinates=current_target,
-        )
-
 
 # Convenience function
 def solve_captcha(image_path: str, instruction: str = "", **kwargs) -> Union[CaptchaAction, List[ClickAction]]:

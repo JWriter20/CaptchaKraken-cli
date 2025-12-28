@@ -18,7 +18,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "s
 from src.planner import ActionPlanner
 from src.grid_planner import GridPlanner
 from src.overlay import add_overlays_to_image
-from src.image_processor import ImageProcessor
+from src.tool_calls.find_grid import find_grid
 
 # Paths
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -106,7 +106,7 @@ class TestGridSelection:
             pytest.skip(f"Image not found: {image_path}")
         
         # Check if it's actually a grid
-        grid_boxes = ImageProcessor.get_grid_bounding_boxes(image_path)
+        grid_boxes = find_grid(image_path)
         if not grid_boxes:
             pytest.skip("No grid detected in image")
         
@@ -136,7 +136,7 @@ class TestGridSelection:
         rows = cols = int(n ** 0.5)
         
         grid_planner = GridPlanner(backend=planner.backend, gemini_api_key=planner.gemini_api_key)
-        selected, _ = grid_planner.get_grid_selection(overlay_path, rows=rows, cols=cols, instruction=instruction)
+        selected = grid_planner.get_grid_selection(overlay_path, rows=rows, cols=cols, instruction=instruction)
         print(f"  Selected numbers: {selected}")
         
         # Basic validation

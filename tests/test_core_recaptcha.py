@@ -11,7 +11,7 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from src.solver import CaptchaSolver
 from src.action_types import ClickAction, DoneAction, WaitAction
-from src.image_processor import ImageProcessor
+from src.tool_calls.find_grid import find_grid, detect_selected_cells
 
 SYSTEM_INSTRUCTION = (
     "Select the image tiles needed to solve the captcha puzzle. "
@@ -142,13 +142,12 @@ class TestCoreRecaptcha(unittest.TestCase):
                 selected_numbers = _extract_selected_numbers(result)
 
                 # --- HYBRID FILTERING START ---
-                # Use ImageProcessor to detect already-selected cells and filter them out.
+                # Use find_grid/detect_selected_cells to detect already-selected cells and filter them out.
                 # This mimics the "post-processing" step we want to validate.
                 try:
-                    processor = ImageProcessor()
-                    grid_boxes = processor.get_grid_bounding_boxes(str(image_path))
+                    grid_boxes = find_grid(str(image_path))
                     if grid_boxes:
-                        already_selected_indices, _ = processor.detect_selected_cells(str(image_path), grid_boxes)
+                        already_selected_indices, _ = detect_selected_cells(str(image_path), grid_boxes)
                         if already_selected_indices:
                             original_count = len(selected_numbers)
                             # Remove any LLM-selected number that is also visually detected as already selected

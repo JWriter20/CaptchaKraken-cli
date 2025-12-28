@@ -29,17 +29,22 @@ def test_detection(extractor: AttentionExtractor, image_path: str, object_class:
     
     try:
         # Detect objects using detect() method
-        detections = extractor.detect_objects(image_path, object_class, max_objects=max_objects)
+        detections = extractor.detect(image_path, object_class, max_objects=max_objects)
         print(f"\n✓ Found {len(detections)} detection(s)")
         
         # Print detection details
+        formatted_detections = []
         for i, det in enumerate(detections):
-            bbox = det['bbox']
-            label = det.get('label', object_class)
+            bbox = [det['x_min'], det['y_min'], det['x_max'], det['y_max']]
+            label = object_class
             print(f"  Detection {i+1}:")
             print(f"    Label: {label}")
             print(f"    BBox: [{bbox[0]:.4f}, {bbox[1]:.4f}, {bbox[2]:.4f}, {bbox[3]:.4f}]")
             print(f"    Center: ({(bbox[0] + bbox[2])/2:.4f}, {(bbox[1] + bbox[3])/2:.4f})")
+            formatted_detections.append({
+                "bbox": bbox,
+                "score": det["score"]
+            })
         
         # Generate visualization
         if output_path is None:
@@ -52,12 +57,12 @@ def test_detection(extractor: AttentionExtractor, image_path: str, object_class:
             
         vis_path = extractor.visualize_detections(
             image_path,
-            detections,
+            formatted_detections,
             output_path=output_name
         )
         print(f"✓ Visualization saved: {vis_path}")
         
-        return True, detections
+        return True, formatted_detections
         
     except Exception as e:
         print(f"\n✗ Error: {e}")

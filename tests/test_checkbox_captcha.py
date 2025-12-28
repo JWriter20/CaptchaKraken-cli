@@ -76,15 +76,14 @@ def test_checkbox_accuracy(extractor, filename, prompt, key):
     if not expected_box:
         pytest.fail(f"Key '{key}' not found in config for {filename}")
         
-    # Execute point
-    result = extractor.point(image_path, prompt)
-    points = result.get('points', [])
+    # Execute detect
+    detections = extractor.detect(image_path, prompt, max_objects=1)
     
-    if not points:
-        pytest.fail(f"No points returned for '{prompt}' in {filename}")
+    if not detections:
+        pytest.fail(f"No objects returned for '{prompt}' in {filename}")
         
-    point_dict = points[0]
-    point = (point_dict['x'], point_dict['y'])
+    obj = detections[0]
+    point = ((obj['x_min'] + obj['x_max']) / 2, (obj['y_min'] + obj['y_max']) / 2)
     print(f"  Result point: {point}")
     print(f"  Expected box: {expected_box}")
     

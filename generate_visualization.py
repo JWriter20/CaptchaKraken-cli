@@ -417,15 +417,20 @@ def main():
             )
             
             if method == "focus":
-                point = extractor.focus(str(image_path), prompt)
+                detections = extractor.detect(str(image_path), prompt, max_objects=1)
+                if detections:
+                    obj = detections[0]
+                    point = ((obj["x_min"] + obj["x_max"]) / 2, (obj["y_min"] + obj["y_max"]) / 2)
+                else:
+                    point = (0.5, 0.5)
                 result.focus_point = point
                 print(f"  → Point: {point}")
                 
             elif method == "detect":
                 # Use explicit detection_prompt if provided, else use prompt
                 detect_prompt = detection_prompt if detection_prompt else prompt
-                detections = extractor.detect_objects(str(image_path), detect_prompt)
-                boxes = [d['bbox'] for d in detections]
+                detections = extractor.detect(str(image_path), detect_prompt)
+                boxes = [[d['x_min'], d['y_min'], d['x_max'], d['y_max']] for d in detections]
                 result.bounding_boxes = boxes
                 print(f"  → Found {len(boxes)} detections")
                 
@@ -454,8 +459,8 @@ def main():
                 print(f"  → Planner identified target: '{target_description}'")
                 
                 # 2. Detect that target
-                detections = extractor.detect_objects(str(image_path), target_description)
-                boxes = [d['bbox'] for d in detections]
+                detections = extractor.detect(str(image_path), target_description)
+                boxes = [[d['x_min'], d['y_min'], d['x_max'], d['y_max']] for d in detections]
                 result.bounding_boxes = boxes
                 print(f"  → Found {len(boxes)} destination candidates")
                 
@@ -501,13 +506,14 @@ def main():
                 detect_prompt = detection_prompt if detection_prompt else prompt
                 print(f"  → Detecting source with prompt: '{detect_prompt}'")
                 
-                detections = extractor.detect_objects(str(image_path), detect_prompt)
+                detections = extractor.detect(str(image_path), detect_prompt)
                 if not detections:
                     result.error = "Could not find draggable"
                     results.append(result)
                     continue
                     
-                source_bbox_pct = detections[0]['bbox']
+                source_obj = detections[0]
+                source_bbox_pct = [source_obj['x_min'], source_obj['y_min'], source_obj['x_max'], source_obj['y_max']]
                 source_center_pct = (
                     (source_bbox_pct[0] + source_bbox_pct[2]) / 2,
                     (source_bbox_pct[1] + source_bbox_pct[3]) / 2,
@@ -552,11 +558,11 @@ def main():
                 initial_plan = {}
                 if dest_prompt:
                     print(f"  → Initializing with detection: '{dest_prompt}'")
-                    dest_detections = extractor.detect_objects(str(image_path), dest_prompt)
+                    dest_detections = extractor.detect(str(image_path), dest_prompt)
                     if dest_detections:
-                        d_bbox = dest_detections[0]['bbox']
-                        cx = (d_bbox[0] + d_bbox[2]) / 2
-                        cy = (d_bbox[1] + d_bbox[3]) / 2
+                        d_obj = dest_detections[0]
+                        cx = (d_obj['x_min'] + d_obj['x_max']) / 2
+                        cy = (d_obj['y_min'] + d_obj['y_max']) / 2
                         initial_plan = {"target_x": cx, "target_y": cy, "reasoning": f"Detected {dest_prompt}"}
                         print(f"  → Detected target at {cx:.2f}, {cy:.2f}")
                 

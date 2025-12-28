@@ -1,11 +1,10 @@
 """
-AttentionExtractor - Wrapper around GroundingDINO and SAM 2.
+AttentionExtractor - Wrapper around SAM 3 for detection and masking.
 
 Exposes:
-- point(): Find coordinates of a target element (center of detected box)
-- detect(): Find all instances of an object class (with sensitivity adjustment)
+- detect(): Find all instances of an object class using SAM 3 (returns bounding boxes)
+- get_mask(): Get segmentation masks for an object class using SAM 3
 - clusterDetections(): Merge overlapping/close detection boxes
-- detectInteractable(): Detect interactable objects using SAM 2 segmentation and heuristic filtering
 """
 
 from __future__ import annotations
@@ -26,6 +25,7 @@ def clusterDetections(
     iou_threshold: float = 0.5,
     distance_threshold: Optional[float] = None,
 ) -> List[Dict[str, float]]:
+# ... (rest of clusterDetections remains the same)
     """
     Cluster and merge overlapping or very close detection bounding boxes.
 
@@ -131,11 +131,12 @@ def clusterDetections(
 
 
 class AttentionExtractor:
-    """Wrapper around GroundingDINO and SAM 2 for pointing and detection."""
+    """Wrapper around SAM 3 for pointing and detection."""
 
     def __init__(
         self,
         device: Optional[str] = None,
+        **kwargs,
     ):
         # Auto-detect device
         if device is None:
@@ -152,25 +153,22 @@ class AttentionExtractor:
         else:
             self.device = device
 
-        self._gd_model = None
-        self._gd_processor = None
-        self._sam2_model = None
-        self._sam2_processor = None
+        self._sam3_model = None
+        self._sam3_processor = None
 
     def unload_models(self, models: Optional[List[str]] = None):
         """
         Unload specific models or all models to free memory.
         
         Args:
-            models: List of model names to unload ("sam2", "gd").
+            models: List of model names to unload ("sam3").
                    If None, unloads all.
         """
         import gc
         import torch
 
         all_models = {
-            "sam2": ["_sam2_model", "_sam2_processor"],
-            "gd": ["_gd_model", "_gd_processor"],
+            "sam3": ["_sam3_model", "_sam3_processor"],
         }
         
         targets = models if models else all_models.keys()
@@ -190,307 +188,134 @@ class AttentionExtractor:
                  torch.mps.empty_cache()
 
     def load_models(self):
-        """Eagerly load all models (GroundingDINO and SAM 2)."""
-        self._load_grounding_dino()
-        self._load_sam2()
+        """Eagerly load all models (SAM 3)."""
+        self._load_sam3()
 
-    def detectInteractable(
-        self,
-        image_path: str,
-        points_per_side: int = 9,
-        score_threshold: float = 0.3,
-        max_area_ratio: float = 0.2,
-        aspect_ratio_threshold: float = 2.5,
-    ) -> Dict[str, Any]:
-        """
-        Detect interactable objects using SAM 2 segmentation and heuristic filtering.
-        
-        Args:
-            image_path: Path to image
-            points_per_side: Density of point grid for SAM 2 (default: 9, high sensitivity)
-            score_threshold: Minimum IoU score for SAM 2 masks (default: 0.3, high sensitivity)
-            max_area_ratio: Maximum fraction of image area a mask can cover
-            aspect_ratio_threshold: Maximum allowed aspect ratio (longer side / shorter side)
-            
-        Returns:
-            {'objects': [{'bbox': [x, y, w, h], 'area': float, 'solidity': float, ...}]}
-            Bounding boxes are in pixels.
-        """
-        # Run SAM 2 with automatic grid prompts
-        sam_result = self.segment_with_sam2(
-            image_path,
-            points_per_side=points_per_side,
-            score_threshold=score_threshold
-        )
-        
-        masks = sam_result.get("masks", [])
-        if not masks:
-            return {"objects": []}
-            
-        with Image.open(image_path) as img:
-            img_w, img_h = img.size
-            
-        total_area = img_w * img_h
-        valid_objects = []
-        
-        for i, mask in enumerate(masks):
-            if not isinstance(mask, np.ndarray):
-                continue
-                
-            y_indices, x_indices = np.where(mask > 0)
-            if len(y_indices) == 0 or len(x_indices) == 0:
-                continue
-                
-            x1, x2 = np.min(x_indices), np.max(x_indices)
-            y1, y2 = np.min(y_indices), np.max(y_indices)
-            w = x2 - x1
-            h = y2 - y1
-            
-            # Filter tiny things
-            if w < 10 or h < 10:
-                continue
-                
-            area = w * h
-            
-            # Filter massive things (background)
-            if area > (total_area * max_area_ratio):
-                # print(f"  - Dropping mask {i} (too large)")
-                continue
-            
-            # Filter long skinny things (extreme aspect ratio)
-            aspect_ratio = max(w, h) / min(w, h) if min(w, h) > 0 else 999
-            if aspect_ratio > aspect_ratio_threshold:
-                # print(f"  - Dropping mask {i} (extreme aspect ratio: {w}x{h}, ratio={aspect_ratio:.2f})")
-                continue
-                
-            valid_objects.append({
-                "bbox": [int(x1), int(y1), int(w), int(h)],
-                "area": int(area),
-                "aspect_ratio": float(aspect_ratio),
-                "mask_index": i
-            })
-            
-        # Sort by area descending
-        valid_objects.sort(key=lambda x: x["area"], reverse=True)
-        
-        # Filter duplicates/overlaps
-        final_objects = []
-        
-        def compute_iou_bbox(b1, b2):
-            x1 = max(b1[0], b2[0])
-            y1 = max(b1[1], b2[1])
-            x2 = min(b1[0]+b1[2], b2[0]+b2[2])
-            y2 = min(b1[1]+b1[3], b2[1]+b2[3])
-            
-            w_inter = max(0, x2 - x1)
-            h_inter = max(0, y2 - y1)
-            inter = w_inter * h_inter
-            
-            area1 = b1[2] * b1[3]
-            area2 = b2[2] * b2[3]
-            union = area1 + area2 - inter
-            
-            return inter / union if union > 0 else 0
-            
-        for obj in valid_objects:
-            is_overlap = False
-            for k in final_objects:
-                if compute_iou_bbox(obj["bbox"], k["bbox"]) > 0.6: 
-                    is_overlap = True
-                    break
-            if not is_overlap:
-                final_objects.append(obj)
-                
-        return {"objects": final_objects}
+    def _load_sam3(self):
+        """Lazy load SAM 3 model."""
+        if self._sam3_model is not None:
+            return
 
-    def point(
-        self,
-        image_path: str,
-        target: str,
-    ) -> Dict[str, Any]:
-        """
-        Find coordinates of target element using GroundingDINO.
-        Returns the center of the detected bounding box.
+        t0 = time.time()
+        import torch
+        from transformers import Sam3Model, Sam3Processor
 
-        Args:
-            image_path: Path to image
-            target: What to find (e.g., "the checkbox")
+        model_id = "facebook/sam3"
+        print(f"[AttentionExtractor] Loading {model_id}...", file=sys.stderr)
 
-        Returns:
-            {'points': [{'x': float, 'y': float}, ...]}
-            Coordinates are percentages in [0.0, 1.0]
-        """
-        # Use detect (which has sensitivity loop)
-        result = self.detect(image_path, target, max_objects=1)
-        
-        if result.get("objects"):
-            obj = result["objects"][0]
-            # Calculate center
-            center_x = (obj["x_min"] + obj["x_max"]) / 2
-            center_y = (obj["y_min"] + obj["y_max"]) / 2
-            return {"points": [{"x": center_x, "y": center_y}]}
-        
-        return {"points": []}
+        self._sam3_processor = Sam3Processor.from_pretrained(model_id)
+        self._sam3_model = Sam3Model.from_pretrained(model_id).to(self.device)
+        self._sam3_model.eval()
+
+        t1 = time.time()
+        print(f"[AttentionExtractor] Loaded SAM 3 in {t1 - t0:.2f}s", file=sys.stderr)
 
     def detect(
         self,
         image_path: str,
         object_class: str,
         max_objects: int = 24,
-        box_threshold: Optional[float] = None,
-        text_threshold: Optional[float] = None,
-    ) -> Dict[str, Any]:
+    ) -> List[Dict[str, Any]]:
         """
-        Detect all instances of object class using GroundingDINO.
-        
-        Automatically adjusts sensitivity (thresholds) if no objects are found,
-        UNLESS specific thresholds are provided.
+        Detect all instances of object class using SAM 3.
 
         Args:
             image_path: Path to image
             object_class: What to detect (e.g., "bird", "car")
             max_objects: Maximum objects to detect
-            box_threshold: Override box threshold
-            text_threshold: Override text threshold
 
         Returns:
-            {'objects': [{'x_min': float, 'y_min': float, 'x_max': float, 'y_max': float}, ...]}
+            List of dictionaries: [{'x_min': float, 'y_min': float, 'x_max': float, 'y_max': float, 'score': float}, ...]
             Coordinates are percentages in [0.0, 1.0]
         """
-        # If explicit thresholds provided, use them directly
-        if box_threshold is not None and text_threshold is not None:
-            result = self.detect_with_grounding_dino(
-                image_path, 
-                object_class, 
-                box_threshold=box_threshold, 
-                text_threshold=text_threshold
-            )
-            # Sort by score descending
-            objects = sorted(result["objects"], key=lambda x: x.get("score", 0), reverse=True)
-            return {"objects": objects[:max_objects]}
-
-        # Sensitivity loop: try progressively lower thresholds
-        thresholds = [
-            (0.35, 0.25),  # Default
-            (0.30, 0.25),
-            (0.25, 0.20),
-            (0.20, 0.15),
-            (0.15, 0.10),
-            (0.10, 0.05),  # Very sensitive
-        ]
-
-        for i, (box_th, text_th) in enumerate(thresholds):
-            result = self.detect_with_grounding_dino(
-                image_path, 
-                object_class, 
-                box_threshold=box_th, 
-                text_threshold=text_th
-            )
-            
-            if result.get("objects"):
-                if i > 0:
-                    print(f"[AttentionExtractor] Detected '{object_class}' at sensitivity level {i+1} (box_th={box_th}, text_th={text_th})", file=sys.stderr)
-                
-                # Sort by score descending
-                objects = sorted(result["objects"], key=lambda x: x.get("score", 0), reverse=True)
-                return {"objects": objects[:max_objects]}
-        
-        print(f"[AttentionExtractor] No objects found for '{object_class}' even at highest sensitivity.", file=sys.stderr)
-        return {"objects": []}
-
-    def _load_grounding_dino(self):
-        """Lazy load GroundingDINO model."""
-        if self._gd_model is not None:
-            return
-
-        t0 = time.time()
+        self._load_sam3()
         import torch
-        from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
-
-        model_id = "IDEA-Research/grounding-dino-tiny"
-        print(f"[AttentionExtractor] Loading {model_id}...", file=sys.stderr)
         
-        self._gd_processor = AutoProcessor.from_pretrained(model_id)
-        self._gd_model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id).to(self.device)
-        self._gd_model.eval()
-        
-        t1 = time.time()
-        print(f"[AttentionExtractor] Loaded GroundingDINO in {t1 - t0:.2f}s", file=sys.stderr)
-
-    def _load_sam2(self):
-        """Lazy load SAM 2 model."""
-        if self._sam2_model is not None:
-            return
-
-        t0 = time.time()
-        import torch
-        from transformers import Sam2Model, Sam2Processor
-
-        model_id = "facebook/sam2-hiera-large"
-        print(f"[AttentionExtractor] Loading {model_id}...", file=sys.stderr)
-
-        self._sam2_processor = Sam2Processor.from_pretrained(model_id)
-        self._sam2_model = Sam2Model.from_pretrained(model_id).to(self.device)
-        self._sam2_model.eval()
-
-        t1 = time.time()
-        print(f"[AttentionExtractor] Loaded SAM 2 in {t1 - t0:.2f}s", file=sys.stderr)
-
-    def detect_with_grounding_dino(
-        self,
-        image_path: str,
-        text_prompt: str,
-        box_threshold: float = 0.35,
-        text_threshold: float = 0.25,
-    ) -> Dict[str, Any]:
-        """
-        Detect objects using GroundingDINO.
-        
-        Args:
-            image_path: Path to image
-            text_prompt: Text description of objects (e.g. "a cat. a dog.")
-            box_threshold: Confidence threshold for boxes
-            text_threshold: Confidence threshold for text
-            
-        Returns:
-            {'objects': [{'x_min': float, 'y_min': float, 'x_max': float, 'y_max': float, 'label': str, 'score': float}, ...]}
-        """
-        self._load_grounding_dino()
-        import torch
-
         t0 = time.time()
         image = Image.open(image_path).convert("RGB")
+        width, height = image.size
         
-        inputs = self._gd_processor(images=image, text=text_prompt, return_tensors="pt").to(self.device)
+        inputs = self._sam3_processor(images=image, text=object_class, return_tensors="pt").to(self.device)
         with torch.no_grad():
-            outputs = self._gd_model(**inputs)
-
-        results = self._gd_processor.post_process_grounded_object_detection(
-            outputs,
-            inputs.input_ids,
-            threshold=box_threshold,
-            text_threshold=text_threshold,
+            outputs = self._sam3_model(**inputs)
+            
+        results = self._sam3_processor.post_process_instance_segmentation(
+            outputs, 
             target_sizes=[image.size[::-1]]
         )[0]
         
+        masks = results["masks"]
+        scores = results["scores"]
+                
+                # Sort by score descending
+        top_indices = scores.argsort(descending=True)[:max_objects]
+        
         objects = []
-        width, height = image.size
-        for score, label, box in zip(results["scores"], results["labels"], results["boxes"]):
-            # box is [x_min, y_min, x_max, y_max] in pixels
-            x_min, y_min, x_max, y_max = box.tolist()
+        for idx in top_indices:
+            score = scores[idx].item()
+            mask = masks[idx].cpu().numpy()
+            
+            # Find bounding box from mask
+            y_indices, x_indices = np.where(mask > 0)
+            if len(y_indices) == 0 or len(x_indices) == 0:
+                continue
+                
+            x_min, x_max = np.min(x_indices), np.max(x_indices)
+            y_min, y_max = np.min(y_indices), np.max(y_indices)
+            
             objects.append({
                 "x_min": x_min / width,
                 "y_min": y_min / height,
                 "x_max": x_max / width,
                 "y_max": y_max / height,
-                "score": score.item(),
-                "label": label
+                "score": score
             })
-            
         
         t1 = time.time()
-        # print(f"[AttentionExtractor] GroundingDINO detect('{text_prompt}') took {t1 - t0:.2f}s", file=sys.stderr)
-        return {"objects": objects}
+        print(f"[AttentionExtractor] SAM 3 detect('{object_class}') took {t1 - t0:.2f}s, found {len(objects)} objects", file=sys.stderr)
+        return objects
+
+    def get_mask(
+        self,
+        image_path: str,
+        object_class: str,
+        max_objects: int = 24,
+    ) -> List[np.ndarray]:
+        """
+        Get segmentation masks for an object class using SAM 3.
+        
+        Args:
+            image_path: Path to image
+            object_class: What to segment (e.g., "bird", "car")
+            max_objects: Maximum masks to return
+            
+        Returns:
+            List of binary masks (numpy arrays)
+        """
+        self._load_sam3()
+        import torch
+
+        image = Image.open(image_path).convert("RGB")
+        
+        inputs = self._sam3_processor(images=image, text=object_class, return_tensors="pt").to(self.device)
+        with torch.no_grad():
+            outputs = self._sam3_model(**inputs)
+
+        results = self._sam3_processor.post_process_instance_segmentation(
+            outputs,
+            target_sizes=[image.size[::-1]]
+        )[0]
+        
+        masks = results["masks"]
+        scores = results["scores"]
+        
+        top_indices = scores.argsort(descending=True)[:max_objects]
+        
+        final_masks = []
+        for idx in top_indices:
+            final_masks.append(masks[idx].cpu().numpy())
+            
+        return final_masks
 
     def segment_by_color(
         self,
@@ -595,247 +420,6 @@ class AttentionExtractor:
         
         return {"masks": masks, "colors": mask_colors}
 
-    def segment_with_sam2(
-        self,
-        image_path: str,
-        input_boxes: Optional[List[List[float]]] = None,
-        input_points: Optional[List[List[float]]] = None,
-        input_labels: Optional[List[int]] = None,
-        points_per_side: Optional[int] = None,
-        score_threshold: float = 0.0,
-        group_points: bool = False,
-    ) -> Dict[str, Any]:
-        """
-        Segment objects using SAM 2.
-        
-        Args:
-            image_path: Path to image
-            input_boxes: List of [x_min, y_min, x_max, y_max] (normalized 0-1)
-            points_per_side: If no prompts provided, use this many points per side for grid (default: 6)
-            score_threshold: Minimum IoU score to keep a mask (default: 0.0)
-            
-        Returns:
-            {'masks': List[numpy.ndarray]} - Binary masks (H, W)
-        """
-        self._load_sam2()
-        import torch
-
-        t0 = time.time()
-        image = Image.open(image_path).convert("RGB")
-        width, height = image.size
-        
-        inputs_kwargs = {}
-        
-        if input_boxes:
-            # Scale boxes to pixels
-            # SAM 2 processor expects input_boxes shape: (batch_size, num_boxes, 4)
-            # For single image: input_boxes=[[[x1, y1, x2, y2], [x3, y3, x4, y4], ...]]
-            pixel_boxes = [[
-                b[0] * width, b[1] * height, b[2] * width, b[3] * height
-            ] for b in input_boxes]
-            
-            inputs_kwargs["input_boxes"] = [pixel_boxes]
-
-        if input_points:
-            # Handle input_points directly
-            # Shape: (batch_size=1, num_prompts=N, num_points_per_prompt=1, 2)
-            # input_points is List[List[float]] -> [[x, y], [x, y], ...]
-            # We treat each point as a separate prompt.
-            points_np = np.array(input_points) # (N, 2) normalized?
-            
-            # Check if normalized
-            if np.all(points_np <= 1.0):
-                # Scale to pixels
-                points_px = points_np * np.array([width, height])
-            else:
-                # Already pixels
-                points_px = points_np
-                
-            if group_points:
-                # Create a single prompt with all points
-                # Shape: (batch_size=1, num_prompts=1, num_points=N, 2)
-                reshaped_points = points_px.reshape(1, len(points_px), 2)
-                inputs_kwargs["input_points"] = [reshaped_points.tolist()]
-                
-                if input_labels:
-                    labels = np.array(input_labels)
-                    reshaped_labels = labels.reshape(1, len(labels))
-                    inputs_kwargs["input_labels"] = [reshaped_labels.tolist()]
-                else:
-                    # Default all to 1
-                    inputs_kwargs["input_labels"] = [[[1] * len(points_px)]]
-                    
-                print(f"[AttentionExtractor] Using {len(points_px)} input points as SINGLE prompt.", file=sys.stderr)
-            else:
-                # Existing grid behavior (N prompts, 1 point each)
-                reshaped_points = points_px.reshape(len(points_px), 1, 2)
-                inputs_kwargs["input_points"] = [reshaped_points.tolist()]
-                
-                if input_labels:
-                    # Not really supported for separate prompts unless list of lists passed?
-                    # Assuming default 1 for now if not grouped, or repeat labels if len matches?
-                    # The current API expects input_labels as simple list.
-                    # We'll just default to 1 for separate prompts as before.
-                    inputs_kwargs["input_labels"] = [[[1]] * len(points_px)]
-                else:
-                    inputs_kwargs["input_labels"] = [[[1]] * len(points_px)]
-                
-                print(f"[AttentionExtractor] Using {len(points_px)} input points as SEPARATE prompts.", file=sys.stderr)
-
-        if not inputs_kwargs:
-             # If no prompts provided, generate grid of points for automatic segmentation
-             print("[AttentionExtractor] No prompts provided, generating grid of points...", file=sys.stderr)
-             
-             # Generate grid of points
-             n_points = points_per_side if points_per_side else 6
-             x = np.linspace(0, width, n_points)
-             y = np.linspace(0, height, n_points)
-             xv, yv = np.meshgrid(x, y)
-             points = np.stack([xv.flatten(), yv.flatten()], axis=1)
-             
-             # We want each point to be a SEPARATE prompt.
-             # Shape: (batch_size=1, num_prompts=N, num_points_per_prompt=1, 2)
-             
-             reshaped_points = points.reshape(len(points), 1, 2)
-             inputs_kwargs["input_points"] = [reshaped_points.tolist()]
-             
-             inputs_kwargs["input_labels"] = [[[1]] * len(points)]
-             
-             print(f"[AttentionExtractor] Generated {len(points)} point prompts ({n_points}x{n_points}).", file=sys.stderr)
-             
-             # Keep track of points for debugging/return
-             generated_points = points
-
-        try:
-            # Clear cache before heavy operation
-            if self.device == "mps":
-                import torch
-                if hasattr(torch.mps, "empty_cache"):
-                    torch.mps.empty_cache()
-
-            inputs = self._sam2_processor(images=image, return_tensors="pt", **inputs_kwargs)
-            
-            # Move to device
-            for k, v in inputs.items():
-                if isinstance(v, torch.Tensor):
-                    if self.device == "mps" and v.dtype == torch.float64:
-                        v = v.to(torch.float32)
-                    inputs[k] = v.to(self.device)
-
-            with torch.no_grad():
-                outputs = self._sam2_model(**inputs)
-            
-            reshaped_input_sizes = inputs.get("reshaped_input_sizes")
-            if reshaped_input_sizes is None:
-                reshaped_input_sizes = inputs["original_sizes"]
-
-            try:
-                masks = self._sam2_processor.post_process_masks(
-                    outputs.pred_masks.cpu(),
-                    inputs["original_sizes"].cpu(),
-                    reshaped_input_sizes.cpu()
-                )[0]
-            except RuntimeError as re:
-                # If dimension mismatch, try manual resize
-                pred_masks = outputs.pred_masks[0] # (num_boxes, num_masks, H, W)
-                orig_h, orig_w = inputs["original_sizes"][0].tolist()
-                
-                import torch.nn.functional as F
-                num_boxes, num_masks, h, w = pred_masks.shape
-                
-                flat_masks = pred_masks.reshape(1, num_boxes * num_masks, h, w)
-                
-                resized_masks = F.interpolate(
-                    flat_masks,
-                    size=(orig_h, orig_w),
-                    mode="bilinear",
-                    align_corners=False
-                )
-                
-                masks = resized_masks.reshape(num_boxes, num_masks, orig_h, orig_w)
-                masks = masks > 0.0
-
-            scores = outputs.iou_scores.cpu() # (batch, num_boxes, num_masks)
-            
-            final_masks = []
-            batch_idx = 0 
-            
-            num_queries = masks.shape[0]
-            
-            for i in range(num_queries):
-                # Iterate over all 3 masks returned for each prompt (multi-mask output)
-                # SAM 2 usually predicts 3 masks (whole, part, sub-part)
-                # We keep all valid ones to ensure we don't miss small objects
-                # even if the larger container has a higher score.
-                num_masks_per_query = scores.shape[2]
-                
-                for m_idx in range(num_masks_per_query):
-                    score = scores[batch_idx, i, m_idx].item()
-                    
-                    if score < score_threshold:
-                        continue
-                        
-                    mask = masks[i][m_idx].cpu().numpy() # (H, W) boolean
-                    final_masks.append(mask)
-
-            t1 = time.time()
-            print(f"[AttentionExtractor] SAM 2 segmentation took {t1 - t0:.2f}s", file=sys.stderr)
-            
-            return {
-                "masks": final_masks,
-                "points": generated_points if 'generated_points' in locals() else None
-            }
-
-        except Exception as e:
-            print(f"[AttentionExtractor] SAM 2 error: {e}", file=sys.stderr)
-            import traceback
-            traceback.print_exc()
-            return {"masks": []}
-
-    # =========================================================================
-    # COMPATIBILITY METHODS
-    # =========================================================================
-
-    def detect_objects(
-        self,
-        image_path: str,
-        object_class: str,
-        max_objects: int = 24,
-        box_threshold: Optional[float] = None,
-        text_threshold: Optional[float] = None,
-    ) -> List[Dict[str, Any]]:
-        """Wrapper for detect() that returns the list of detections directly."""
-        result = self.detect(
-            image_path, 
-            object_class, 
-            max_objects=max_objects,
-            box_threshold=box_threshold,
-            text_threshold=text_threshold
-        )
-        detections = []
-        if result and "objects" in result:
-            for obj in result["objects"]:
-                detections.append(
-                    {
-                        "label": object_class,
-                        "bbox": [obj["x_min"], obj["y_min"], obj["x_max"], obj["y_max"]],
-                        "score": obj.get("score", 0.0),
-                    }
-                )
-        return detections
-
-    def extract_coordinates(
-        self,
-        image_path: str,
-        target_description: str,
-    ) -> Tuple[float, float]:
-        """Wrapper for point() that returns a single (x, y) tuple."""
-        result = self.point(image_path, target_description)
-        if result and "points" in result and len(result["points"]) > 0:
-            p = result["points"][0]
-            return (p["x"], p["y"])
-        return (0.5, 0.5)
-
     # =========================================================================
     # VISUALIZATION
     # =========================================================================
@@ -850,7 +434,13 @@ class AttentionExtractor:
         """Generate visualization showing detected point."""
         import matplotlib.pyplot as plt
 
-        x_pct, y_pct = self.extract_coordinates(image_path, target_description)
+        detections = self.detect(image_path, target_description, max_objects=1)
+        if detections:
+            obj = detections[0]
+            x_pct = (obj["x_min"] + obj["x_max"]) / 2
+            y_pct = (obj["y_min"] + obj["y_max"]) / 2
+        else:
+            x_pct, y_pct = 0.5, 0.5
 
         image = Image.open(image_path).convert("RGB")
         img_array = np.array(image)

@@ -14,7 +14,7 @@ import json
 import os
 import sys
 import base64
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 # Timing helper (opt-in via CAPTCHA_TIMINGS=1)
 from .timing import timed
@@ -35,76 +35,71 @@ except ImportError:  # pragma: no cover - optional dependency
 
 
 # For general planning with tool support
-PLAN_WITH_TOOLS_PROMPT = """You are a captcha solver. Analyze this image and decide the next action.
+PLAN_WITH_TOOLS_PROMPT = """You are an expert captcha solver. Solve this captcha image by analyzing its type and using the available tools.
 
 {instruction}
+
+Types of captchas you support:
+- Clicking described objects (e.g. "click the two similar shapes")
+- Text captchas (e.g. "type the text in the image")
+- Drag puzzles (e.g. "drag the puzzle piece to the correct position", "complete the image")
+- Analyzing connected lines (e.g. "which watermelon is connected to the bird?")
 
 {object_list_section}
 
 {history_section}
 
 Step 1: VISUAL ANALYSIS
-Briefly describe the objects you see in the image.
+Briefly describe the objects you see in the image. Identify the captcha type.
 If the goal involves "similar objects", "matching shapes", or "odd one out", explicitly IDENTIFY the specific shape or object class.
-Example: "I see three wireframe cubes and one solid cube." or "I see multiple traffic lights."
 
 Step 2: GOAL IDENTIFICATION
 Identify the *goal* in concrete visual terms.
 BE SPECIFIC about locations and explicitly state where exactly any action should take place (e.g. "top right", "center left").
 Explain WHY this is the correct target (matching rotation, shape, color, etc).
-(e.g., "drag the moveable letter 'W' in the top right to the center-right 'W' shaped outline because it matches the rotation and shape of the draggable W").
 
 Step 3: ACTION PLANNING
 Decide on the best tool or action.
 
 You have three tools available:
-1. detect(object_class) - Find all instances of an object (e.g., "traffic light", "bus", "open-frame cube")
-   Use when: You need to find/click multiple instances of a specific object class.
+1. detect(object_class, max_items) - Find instances of an object (e.g., "traffic light", "bus", "checkbox", "verify button").
+   - object_class: Description of what to find.
+   - max_items: (Optional) Maximum number of items to return. Use 1 if you only need one specific thing.
 
-2. point(target) - Find a single element (e.g., "checkbox", "verify button", "slider handle", "wireframe cube on the left")
-   Use when: You need to click/interact with one specific element.
+2. simulate_drag(source, target_hint, target_object_id, source_quality, refined_source, location_hint) - Simulate a drag operation with visual feedback.
+       Use when: You need to drag an item to a target that requires precise visual alignment (e.g., "fit the puzzle piece", "complete the image").
+       - source: The ID of the object to drag (e.g. "Object 4") OR a description.
+       - target_hint: description of where it roughly should go (e.g., "matching slot").
+       - target_object_id: (Optional) The ID of the object that acts as the target base.
+       - location_hint: [x, y] (0.0-1.0) indicating the rough center of the target destination.
 
-    3. simulate_drag(source, target_hint, target_object_id, source_quality, refined_source, location_hint) - Simulate a drag operation with visual feedback.
-       Use when: You need to drag an item to a target that requires precise visual alignment (e.g., "fit the puzzle piece", "complete the line") and you don't have exact coordinates yet.
-       - source: The ID of the object to drag (e.g. "Object 4") OR a description if not found.
-       - target_hint: description of where it roughly should go (e.g., "matching slot", "center of Object 1")
-       - target_object_id: (Optional) The ID of the object that acts as the target base (e.g. if dragging a hat to a head (Object 5), set this to 5).
-       - source_quality: "properly-cropped" (if the Object ID is a tight crop of the item), "includes-source" (if the Object ID contains the item but also extra background), or "not-bounded" (if source is not an ID).
-       - refined_source: If "includes-source", provide a visual description of the inner item (e.g. "white letter W").
-       - location_hint: A 2-element list [x, y] (0.0-1.0) indicating the rough center of the target destination. E.g. [0.8, 0.2] is top-right.
+3. find_connected_elems(instruction) - Analyze lines or connections between elements.
+       Use when: The puzzle asks which items are connected or follow a path.
+       - instruction: The connection to look for (e.g., "watermelon connected to bird").
 
     NOTE: The image has already been segmented and objects are labeled with red boxes and IDs (if any were found).
     Use the "Detected Objects" list above to refer to specific items by their ID (e.g., "Object 1").
 
-    If you need to interact with multiple specific items (e.g., "click the two similar shapes"), PREFER using multiple point() or detect() calls to ensure all targets are hit.
-    Example: instead of detect("wireframe cube"), use:
-      point("wireframe cube on the left"),
-      point("wireframe cube on the right")
+    If you need to interact with multiple specific items (e.g., "click the two similar shapes"), PREFER using multiple detect() calls with max_items=1.
 
-    You can also return a direct action if you know exactly what to do:
-    - click: Click on something (provide target_description for point() to find it). Do NOT click "Skip" or "Reload" unless you are 100% certain the puzzle is unsolvable.
-    - drag: Drag something. Use this ONLY if you know the exact source and destination (e.g. "drag slider to the end"). For puzzle alignment, use simulate_drag() instead.
-    - type: Type text (provide the text to type, maintain casing, typically 6 characters, ignore reflections, noise, etc.)
-    - wait: Wait for loading
-    - done: Captcha is already solved
+    You can also return a direct action:
+    - click: Click on something (provide target_description).
+    - drag: Drag something (provide source and target descriptions). Use this ONLY for simple sliders.
+    - type: Type text (provide the text to type, typically 6 characters).
+    - wait: Wait for loading.
+    - done: Captcha is already solved.
 
-    IMPORTANT:
-    1. Do not give up easily. If the target is abstract or unclear, look for the BEST MATCHING shape or outline.
-    2. For drag puzzles, if you see a movable piece, there IS a target. It might be a faint outline, a shadow, or a matching background pattern.
-    3. If there is a MAIN BODY or BASE object (like a puzzle frame or a body needing a head), IDENTIFY IT and use it as 'target_object_id'.
-    4. If you are unsure of the exact coordinates, use 'simulate_drag' with a descriptive target_hint so the vision system can find it.
-
-    Respond ONLY with JSON. Either request tool(s):
-    {{
-      "analysis": "Your visual analysis of the objects and the puzzle type",
-      "goal": "The specific goal you identified. MUST SPECIFY LOCATION (e.g. 'drag Object 4 to the W-shaped outline in the top-right')",
+    Respond ONLY with JSON:
+    {
+      "analysis": "Your visual analysis and captcha type identification",
+      "goal": "The specific goal you identified",
       "tool_calls": [
-        {{
-          "name": "detect" | "point" | "simulate_drag",
-          "args": {{"object_class": "..."}} or {{"target": "..."}} or {{"source": "...", "target_hint": "...", "target_object_id": 1, "source_quality": "...", "refined_source": "...", "location_hint": [x, y]}}
-        }}
+        {
+          "name": "detect" | "simulate_drag" | "find_connected_elems",
+          "args": {...}
+        }
       ]
-    }}
+    }
 
 Or return an action:
 {{

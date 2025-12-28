@@ -69,6 +69,92 @@ def main():
         print(json.dumps({"has_movement": has_movement}))
         return
 
+    # Handle individual tool calls
+    if len(sys.argv) > 1 and sys.argv[1] in ["detect", "find-checkbox", "find-grid", "segment", "simulate-drag", "find-connected-elems", "detect-selected", "get-numbered-grid"]:
+        command = sys.argv[1]
+        if len(sys.argv) < 3:
+            print(json.dumps({"error": f"Usage: python -m src.cli {command} image.png [args...]"}), file=sys.stderr)
+            sys.exit(1)
+        
+        image_path = sys.argv[2]
+        if not os.path.exists(image_path):
+            print(json.dumps({"error": f"Image not found: {image_path}"}), file=sys.stderr)
+            sys.exit(1)
+
+        try:
+            result = None
+            if command == "find-grid":
+                from src.tool_calls.find_grid import find_grid
+                result = find_grid(image_path)
+            
+            elif command == "detect-selected":
+                from src.tool_calls.find_grid import find_grid, detect_selected_cells
+                grid_boxes = find_grid(image_path)
+                if not grid_boxes:
+                    result = {"error": "No grid detected"}
+                else:
+                    selected, loading = detect_selected_cells(image_path, grid_boxes)
+                    result = {"selected": selected, "loading": loading}
+
+            elif command == "get-numbered-grid":
+                from src.tool_calls.find_grid import find_grid, get_numbered_grid_overlay
+                grid_boxes = find_grid(image_path)
+                if not grid_boxes:
+                    result = {"error": "No grid detected"}
+                else:
+                    overlay_path = get_numbered_grid_overlay(image_path, grid_boxes)
+                    result = {"overlay_image": overlay_path}
+            
+            elif command == "find-checkbox":
+                from src.tool_calls.find_checkbox import find_checkbox
+                result = find_checkbox(image_path)
+            
+            elif command == "segment":
+                from src.solver import CaptchaSolver
+                from src.tool_calls.segment import segment
+                # Need a solver instance for image_processor and attention
+                solver = CaptchaSolver(provider="ollama", model="qwen3-vl:4b")
+                labeled_path, objects = segment(solver.image_processor, solver._get_attention(), image_path, solver.debug)
+                result = {"labeled_image": labeled_path, "objects": objects}
+            
+            elif command == "detect":
+                if len(sys.argv) < 4:
+                    print(json.dumps({"error": "Usage: python -m src.cli detect image.png object_class"}), file=sys.stderr)
+                    sys.exit(1)
+                object_class = sys.argv[3]
+                from src.solver import CaptchaSolver
+                from src.tool_calls.detect import detect
+                solver = CaptchaSolver(provider="ollama", model="qwen3-vl:4b")
+                result = detect(solver._get_attention(), image_path, object_class)
+            
+            elif command == "simulate-drag":
+                if len(sys.argv) < 5:
+                    print(json.dumps({"error": "Usage: python -m src.cli simulate-drag image.png source_desc target_desc"}), file=sys.stderr)
+                    sys.exit(1)
+                source_desc = sys.argv[3]
+                target_desc = sys.argv[4]
+                from src.solver import CaptchaSolver
+                from src.tool_calls.simulate_drag import simulate_drag
+                # Note: This might need more setup for a full drag simulation (instruction, etc.)
+                solver = CaptchaSolver(provider="ollama", model="qwen3-vl:4b")
+                result = simulate_drag(solver, image_path, "Simulated drag", source_desc, target_desc)
+            
+            elif command == "find-connected-elems":
+                if len(sys.argv) < 4:
+                    print(json.dumps({"error": "Usage: python -m src.cli find-connected-elems image.png instruction"}), file=sys.stderr)
+                    sys.exit(1)
+                instruction = sys.argv[3]
+                from src.tool_calls.find_connected_elems import find_connected_elems
+                result = find_connected_elems(image_path, instruction)
+
+            print(json.dumps(result))
+            return
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(json.dumps({"error": str(e)}), file=sys.stderr)
+            sys.exit(1)
+
     parser = argparse.ArgumentParser(
         description="CaptchaKraken - AI-powered captcha solver",
         formatter_class=argparse.RawDescriptionHelpFormatter,

@@ -9,8 +9,8 @@ from pathlib import Path
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
-from src.image_processor import ImageProcessor
 from src.solver import DebugManager
+from src.tool_calls.find_grid import find_grid, detect_selected_cells
 
 # Paths
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -31,9 +31,8 @@ def test_selected_fields_all_images():
     with open(ANSWERS_PATH, 'r') as f:
         answers_data = json.load(f)
 
-    # Initialize ImageProcessor with debug enabled
+    # Initialize DebugManager
     debug_manager = DebugManager(debug_enabled=True)
-    processor = ImageProcessor(attention_extractor=None, planner=None, debug_manager=debug_manager)
     
     failures = []
     debug_base_dir = Path("latestDebugRun").resolve()
@@ -53,7 +52,7 @@ def test_selected_fields_all_images():
         image_basename = os.path.splitext(filename)[0]
         
         # 1. Detect Grid
-        grid_boxes = ImageProcessor.get_grid_bounding_boxes(image_path)
+        grid_boxes = find_grid(image_path)
         
         if not grid_boxes:
             # If we expect selections, but can't find a grid, that's a failure.
@@ -68,7 +67,7 @@ def test_selected_fields_all_images():
             continue
             
         # 2. Detect Selections
-        selected_indices, loading_indices = processor.detect_selected_cells(image_path, grid_boxes)
+        selected_indices, loading_indices = detect_selected_cells(image_path, grid_boxes, debug_manager)
         selected_indices.sort()
         
         expected_selected = data.get("selectedCells", [])

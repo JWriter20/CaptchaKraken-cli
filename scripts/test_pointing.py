@@ -26,7 +26,14 @@ def test_pointing(extractor: AttentionExtractor, image_path: str, target: str, o
     
     try:
         # Extract coordinates (now returns percentages 0-1)
-        x_pct, y_pct = extractor.extract_coordinates(image_path, target)
+        detections = extractor.detect(image_path, target, max_objects=1)
+        if detections:
+            obj = detections[0]
+            x_pct = (obj["x_min"] + obj["x_max"]) / 2
+            y_pct = (obj["y_min"] + obj["y_max"]) / 2
+        else:
+            x_pct, y_pct = 0.5, 0.5
+
         print(f"\n✓ Position: ({x_pct:.2%}, {y_pct:.2%})")
         
         # Generate visualization

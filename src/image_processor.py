@@ -190,521 +190,134 @@ class ImageProcessor:
         cv2.imwrite(output_path, quantized_bgr)
 
     @staticmethod
-    def get_grid_bounding_boxes(image_path: str) -> Optional[List[Tuple[int, int, int, int]]]:
-        """Detects a grid of images separated by white spacing."""
-        img = cv2.imread(image_path)
-        if img is None:
-            return None
+    def get_color_similarity_score(color1: Any, color2: Any, use_cie2000: bool = True, is_lab: bool = False) -> int:
+        """
+        Returns a similarity score from 1 to 100 (100 being identical).
+        
+        Uses CIELAB color space and Delta E formula. Optimized with math module.
+        
+        Args:
+            color1: RGB or LAB tuple.
+            color2: RGB or LAB tuple.
+            use_cie2000: If True, use the complex CIEDE2000 formula (most accurate).
+            is_lab: Set to True if colors are already in LAB space.
+        """
+        # Identity check
+        if color1[0] == color2[0] and color1[1] == color2[1] and color1[2] == color2[2]:
+            return 100
 
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        _, binary = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY)
-        h, w = binary.shape
-
-        row_sums = np.sum(binary, axis=1) / 255
-        row_ratio = row_sums / w
-        threshold_ratio = 0.85
-        row_indices = np.where(row_ratio > threshold_ratio)[0]
-
-        def group_indices(indices):
-            if len(indices) == 0:
-                return []
-            groups = []
-            current_group = [indices[0]]
-            for i in range(1, len(indices)):
-                if indices[i] == indices[i - 1] + 1:
-                    current_group.append(indices[i])
-                else:
-                    groups.append(int(np.mean(current_group)))
-                    current_group = [indices[i]]
-            groups.append(int(np.mean(current_group)))
-            return groups
-
-        h_lines = group_indices(row_indices)
-        if len(h_lines) < 3:
-            return None
-
-        possible_grids = []
-        for i in range(len(h_lines)):
-            for j in range(i + 2, len(h_lines) + 1):
-                subset = h_lines[i:j]
-                if len(subset) < 3:
-                    continue
-                spacings = [subset[k] - subset[k - 1] for k in range(1, len(subset))]
-                avg_spacing = np.mean(spacings)
-                std_spacing = np.std(spacings)
-                if std_spacing < max(5, avg_spacing * 0.1):
-                    n_rows = len(subset) - 1
-                    if n_rows in [3, 4]:
-                        possible_grids.append((subset, n_rows))
-
-        valid_grids = []
-        for lines, n_rows in possible_grids:
-            y_min = lines[0]
-            y_max = lines[-1]
-            crop = binary[y_min:y_max, :]
-            crop_h, crop_w = crop.shape
-            col_sums = np.sum(crop, axis=0) / 255
-            col_ratio = col_sums / crop_h
-            v_indices = np.where(col_ratio > threshold_ratio)[0]
-            v_lines_cand = group_indices(v_indices)
-            v_lines_internal = [x for x in v_lines_cand if x > crop_w * 0.05 and x < crop_w * 0.95]
-            n_cols = len(v_lines_internal) + 1
-            
-            is_valid = False
-            if (n_rows, n_cols) in [(3, 3), (4, 4), (3, 4), (4, 3)]:
-                is_valid = True
-
-            if is_valid:
-                valid_grids.append({
-                    "h_lines": lines,
-                    "v_lines_internal": v_lines_internal,
-                    "rows": n_rows,
-                    "cols": n_cols,
-                    "area": (lines[-1] - lines[0]) * w,
-                })
-
-        if not valid_grids:
-            return None
-
-        best_grid = max(valid_grids, key=lambda x: (x["rows"] * x["cols"], x["area"]))
-        h_lines_found = best_grid["h_lines"]
-        v_lines_internal = best_grid["v_lines_internal"]
-        rows = best_grid["rows"]
-        cols = best_grid["cols"]
-
-        if rows >= 3:
-            internal_h_lines = h_lines_found[1:-1]
-            if len(internal_h_lines) >= 2:
-                spacings_h = [internal_h_lines[i] - internal_h_lines[i - 1] for i in range(1, len(internal_h_lines))]
-                avg_h_spacing = np.mean(spacings_h)
-            else:
-                avg_h_spacing = internal_h_lines[-1] - internal_h_lines[0]
-            new_top = int(internal_h_lines[0] - avg_h_spacing)
-            new_bottom = int(internal_h_lines[-1] + avg_h_spacing)
-            h_lines_found = [new_top] + list(internal_h_lines) + [new_bottom]
-
-        if len(v_lines_internal) > 1:
-            avg_v_spacing = np.mean([v_lines_internal[k] - v_lines_internal[k - 1] for k in range(1, len(v_lines_internal))])
+        if is_lab:
+            l1, a1, b1 = color1
+            l2, a2, b2 = color2
         else:
-            avg_v_spacing = w / cols
-
-        left_border = max(0, int(v_lines_internal[0] - avg_v_spacing))
-        right_border = min(w, int(v_lines_internal[-1] + avg_v_spacing))
-        x_coords = [left_border] + v_lines_internal + [right_border]
-        
-        if len(x_coords) != cols + 1:
-            x_step = (right_border - left_border) / cols
-            x_coords = [int(left_border + k * x_step) for k in range(cols + 1)]
-
-        boxes = []
-        for r in range(rows):
-            for c in range(cols):
-                y1 = int(h_lines_found[r])
-                y2 = int(h_lines_found[r + 1])
-                x1 = int(x_coords[c])
-                x2 = int(x_coords[c + 1])
-                boxes.append((x1, y1, x2, y2))
-
-        return boxes
-
-    # --- Configuration ---
-    # Color detection using CIELAB color space with Delta E (perceptually uniform)
-    # Uses CIE1976 Delta E (Euclidean distance in Lab space) for perceptually uniform color matching
-    # Target blue: rgb(27, 115, 232) - the exact blue badge color
-    # Delta E thresholds (CIE1976):
-    #   < 1: Imperceptible difference
-    #   1-2: Barely noticeable
-    #   2-10: Noticeable but "close" for matching
-    # Note: CIE1976 is simpler than CIEDE2000 but still provides good perceptual uniformity
-    COLORS = {
-        # Target blue badge color in RGB (will be converted to Lab)
-        # Tight "badge blue" core - only very perceptually similar blues
-        'BADGE_BLUE': {'target_rgb': (27, 115, 232), 'max_delta_e': 8.0},
-        # Broader blue for spinners/loading indicators
-        'BLUE':       {'target_rgb': (27, 115, 232), 'max_delta_e': 12.0},
-    }
-
-    def detect_selected_cells(self, image_path: str, grid_boxes: List[Tuple[int, int, int, int]]) -> Tuple[List[int], List[int]]:
-        """
-        Detects grid cells status using Computer Vision.
-        Returns a tuple of two lists:
-        1. selected_indices: Cells with a checkmark badge (Completed selection).
-        2. loading_indices: Cells with a spinner or center checkmark (Loading/Fading).
-
-        Differentiation:
-        - Selected: Small circular badge with checkmark in Top-Left.
-        - Loading: Spinner or Large Badge with checkmark in the Center.
-        """
-        img = cv2.imread(image_path)
-        if img is None:
-            return [], []
-
-        selected_indices = []
-        loading_indices = []
-        
-        # Extract base filename for debug image naming
-        image_basename = os.path.splitext(os.path.basename(image_path))[0] if image_path else "unknown"
-
-        if self.debug:
-            self.debug.log(f"Starting CV detection for {len(grid_boxes)} cells")
-
-        for i, (x1, y1, x2, y2) in enumerate(grid_boxes):
-            cell_bgr = img[y1:y2, x1:x2]
-            cell_id = i + 1
-
-            # Save full cell image with ROI overlays for debugging
-            if self.debug:
-                # Create overlay showing ROI regions
-                overlay = cell_bgr.copy()
-                h, w = cell_bgr.shape[:2]
-                
-                # Draw top-left ROI rectangle (40% x 40%)
-                tl_w = int(w * 0.4)
-                tl_h = int(h * 0.4)
-                cv2.rectangle(overlay, (0, 0), (tl_w, tl_h), (0, 255, 0), 2)  # Green for badge detection
-                cv2.putText(overlay, "TL Badge", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-                
-                # Draw center ROI rectangle (40% x 40%, starting at 30%)
-                cx = int(w * 0.3)
-                cy = int(h * 0.3)
-                cw = int(w * 0.4)
-                ch = int(h * 0.4)
-                cv2.rectangle(overlay, (cx, cy), (cx + cw, cy + ch), (255, 0, 0), 2)  # Blue for loading detection
-                cv2.putText(overlay, "Center Loading", (cx + 5, cy + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
-                
-            # 1. Check Top-Left (40% area) for a Selection Badge
-            tl_roi_bgr = self._get_roi(cell_bgr, 0, 0, 0.4, 0.4)
-            if tl_roi_bgr.size > 0:
-                if self._has_badge(tl_roi_bgr, cell_id, tl_roi_bgr, image_basename):
-                    selected_indices.append(cell_id)
-                    if self.debug:
-                        self.debug.log(f"Cell {cell_id}: Detected Selection Badge")
-                continue
-
-            # 2. Check Center (40% area) for Spinner/Loading Badge
-            center_roi_bgr = self._get_roi(cell_bgr, 0.3, 0.3, 0.4, 0.4)
-            if center_roi_bgr.size > 0:
-                if self._is_loading(center_roi_bgr, cell_id, center_roi_bgr):
-                    loading_indices.append(cell_id)
-                    if self.debug:
-                        self.debug.log(f"Cell {cell_id}: Detected Loading Indicator")
-
-        if self.debug:
-            self.debug.log(f"CV Detection complete: {len(selected_indices)} selected, {len(loading_indices)} loading")
-            if selected_indices:
-                self.debug.log(f"Selected cell IDs: {selected_indices}")
-            if loading_indices:
-                self.debug.log(f"Loading cell IDs: {loading_indices}")
-
-        return selected_indices, loading_indices
-
-    # --- Helper Logic ---
-
-    def _take_debug_image(self, img, x_pct, y_pct, w_pct, h_pct, output_path: str):
-        """Takes a debug image of a region of the image."""
-        roi = self._get_roi(img, x_pct, y_pct, w_pct, h_pct)
-        cv2.imwrite(output_path, roi)
-        return output_path
-
-    def _get_roi(self, img, x_pct, y_pct, w_pct, h_pct):
-        """Extracts a sub-region of an image based on percentages."""
-        h, w = img.shape[:2]
-        y_start = int(h * y_pct)
-        y_end = int(h * (y_pct + h_pct))
-        x_start = int(w * x_pct)
-        x_end = int(w * (x_pct + w_pct))
-        return img[y_start:y_end, x_start:x_end]
-
-    def _create_delta_e_mask(self, bgr_image, target_rgb: Tuple[int, int, int], max_delta_e: float) -> np.ndarray:
-        """
-        Creates a mask of pixels perceptually similar to target color using Delta E in CIELAB space.
-        Uses CIE1976 Delta E (Euclidean distance in Lab space) for perceptually uniform color matching.
-        This is faster than CIEDE2000 and still provides good perceptual uniformity.
-        
-        Args:
-            bgr_image: BGR image (OpenCV format)
-            target_rgb: Target color in RGB (0-255 range)
-            max_delta_e: Maximum Delta E threshold (CIE1976)
+            # Convert RGB to LAB
+            # OpenCV expects BGR and uint8 for cvtColor
+            c1_bgr = np.array([[[color1[2], color1[1], color1[0]]]], dtype=np.uint8)
+            c2_bgr = np.array([[[color2[2], color2[1], color2[0]]]], dtype=np.uint8)
             
-        Returns:
-            Binary mask (uint8, 0 or 255) where True indicates perceptually similar colors
-        """
-        # Convert target RGB to BGR for OpenCV
-        target_bgr = (target_rgb[2], target_rgb[1], target_rgb[0])
-        
-        # Create a 1x1 image with the target color and convert to Lab
-        target_bgr_array = np.array([[target_bgr]], dtype=np.uint8)
-        target_lab = cv2.cvtColor(target_bgr_array, cv2.COLOR_BGR2LAB)[0, 0]
-        
-        # Convert the input image to Lab color space (vectorized, fast)
-        image_lab = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2LAB)
-        
-        # Compute CIE1976 Delta E (Euclidean distance in Lab space)
-        # Delta E = sqrt((L1-L2)^2 + (a1-a2)^2 + (b1-b2)^2)
-        delta_e = np.sqrt(
-            np.sum((image_lab.astype(np.float32) - target_lab.astype(np.float32)) ** 2, axis=2)
-        )
-        
-        # Create mask where Delta E is within threshold
-        mask = (delta_e <= max_delta_e).astype(np.uint8) * 255
-        
-        return mask
-
-    def _has_badge(self, bgr_roi, cell_id: int = None, bgr_roi_debug = None, image_basename: str = "unknown") -> bool:
-        """
-        Checks if a region contains a Blue checkmark badge with circularity check.
-        Uses CIELAB color space with Delta E (CIEDE2000) for perceptually uniform color matching.
-        Requires: pixel count > threshold AND circularity > 0.85
-        
-        Args:
-            bgr_roi: BGR region of interest
-            cell_id: Cell identifier for debugging
-            bgr_roi_debug: BGR region of interest for debug visualization (same as bgr_roi, kept for compatibility)
-            image_basename: Base filename for debug image naming
-        """
-        color_name = 'BADGE_BLUE'
-        color = self.COLORS[color_name]
-        mask = self._create_delta_e_mask(bgr_roi, color['target_rgb'], color['max_delta_e'])
-        pixel_count = cv2.countNonZero(mask)
-        threshold = bgr_roi.size * 0.003
-        
-        # Save debug images if enabled and we have a cell_id
-        debug_images = []
-        if self.debug and cell_id is not None and bgr_roi_debug is not None:
-            # 1. Save original ROI
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                roi_path = tf.name
-            self._temp_files.append(roi_path)
-            cv2.imwrite(roi_path, bgr_roi_debug)
-            debug_images.append(("original_roi", roi_path))
+            lab1 = cv2.cvtColor(c1_bgr, cv2.COLOR_BGR2LAB)[0, 0].astype(np.float32)
+            lab2 = cv2.cvtColor(c2_bgr, cv2.COLOR_BGR2LAB)[0, 0].astype(np.float32)
             
-            # 2. Save blue mask (color filter result)
-            mask_colored = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                mask_path = tf.name
-            self._temp_files.append(mask_path)
-            cv2.imwrite(mask_path, mask_colored)
-            debug_images.append(("blue_mask", mask_path))
+            # Adjust LAB values to standard scales (L: 0-100, a,b: -128-127)
+            l1, a1, b1 = lab1[0] * 100.0 / 255.0, lab1[1] - 128.0, lab1[2] - 128.0
+            l2, a2, b2 = lab2[0] * 100.0 / 255.0, lab2[1] - 128.0, lab2[2] - 128.0
         
-        # Check pixel count threshold first
-        if pixel_count <= threshold:
-            if self.debug and cell_id is not None:
-                self.debug.log(f"Cell {cell_id}: Pixel count below threshold, {pixel_count} <= {threshold}")
-                # Save debug images even on failure
-                self._save_badge_debug_images(debug_images, image_basename, cell_id, "pixel_count_fail")
-            return False
-        
-        # Morphology: close small gaps in the blue circle caused by anti-aliasing / compression.
-        # IMPORTANT: the white checkmark should *not* be included in the mask (white has different BGR values), so
-        # we compute circularity on the convex hull of the blue pixels to ignore the checkmark cut-out.
-        kernel = np.ones((3, 3), np.uint8)
-        cleaned = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
-        
-        if self.debug and cell_id is not None and bgr_roi_debug is not None:
-            # 3. Save cleaned mask (after morphology)
-            cleaned_colored = cv2.cvtColor(cleaned, cv2.COLOR_GRAY2BGR)
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                cleaned_path = tf.name
-            self._temp_files.append(cleaned_path)
-            cv2.imwrite(cleaned_path, cleaned_colored)
-            debug_images.append(("cleaned_mask", cleaned_path))
-
-        # Check circularity - badge should be circular (on convex hull)
-        contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            if self.debug and cell_id is not None:
-                self.debug.log(f"Cell {cell_id}: No blue contours found")
-                self._save_badge_debug_images(debug_images, image_basename, cell_id, "no_contours")
-            return False
-        
-        # Find the largest contour (should be the badge)
-        max_cnt = max(contours, key=cv2.contourArea)
-        hull = cv2.convexHull(max_cnt)
-        area = cv2.contourArea(hull)
-        perimeter = cv2.arcLength(hull, True)
-        
-        # Compute centroid early for visualization
-        h, w = bgr_roi.shape[:2]
-        M = cv2.moments(hull)
-        centroid_x = M["m10"] / M["m00"] if M["m00"] != 0 else 0
-        centroid_y = M["m01"] / M["m00"] if M["m00"] != 0 else 0
-        circularity = 4 * np.pi * area / (perimeter * perimeter) if perimeter > 0 else 0
-        
-        # Create visualization with hull and centroid overlay early (for all subsequent checks)
-        if self.debug and cell_id is not None and bgr_roi_debug is not None:
-            # 4. Create visualization with convex hull and centroid
-            viz = bgr_roi_debug.copy()
-            # Draw convex hull
-            cv2.drawContours(viz, [hull], -1, (0, 255, 0), 2)
-            # Draw centroid (if valid)
-            if M["m00"] != 0:
-                cv2.circle(viz, (int(centroid_x), int(centroid_y)), 5, (0, 0, 255), -1)
-            # Draw top-left region boundary (60% of width and height)
-            cv2.rectangle(viz, (0, 0), (int(w * 0.6), int(h * 0.6)), (255, 255, 0), 1)
-            # Add text annotations
-            cv2.putText(viz, f"Circ: {circularity:.2f}", (5, h - 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-            if M["m00"] != 0:
-                cv2.putText(viz, f"Cent: ({int(centroid_x)}, {int(centroid_y)})", (5, h - 15), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        if use_cie2000:
+            delta_e = ImageProcessor.calculate_delta_e_cie2000((l1, a1, b1), (l2, a2, b2))
+        else:
+            # CIE76: Euclidean distance in LAB space (much faster)
+            delta_e = math.sqrt((l1 - l2)**2 + (a1 - a2)**2 + (b1 - b2)**2)
             
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                viz_path = tf.name
-            self._temp_files.append(viz_path)
-            cv2.imwrite(viz_path, viz)
-            debug_images.append(("analysis_viz", viz_path))
-
-        # Area sanity check: badge should be a reasonably-sized blob within the ROI
-        roi_area = bgr_roi.shape[0] * bgr_roi.shape[1]
-        if roi_area > 0:
-            area_ratio = area / roi_area
-            if area_ratio < 0.05:
-                if self.debug and cell_id is not None:
-                    self.debug.log(f"Cell {cell_id}: Blue area too small ({area_ratio:.3f} of ROI)")
-                    self._save_badge_debug_images(debug_images, image_basename, cell_id, "area_too_small")
-                return False
-        
-        if perimeter == 0:
-            if self.debug and cell_id is not None:
-                self.debug.log(f"Cell {cell_id}: Zero perimeter")
-                self._save_badge_debug_images(debug_images, image_basename, cell_id, "zero_perimeter")
-            return False
-        
-        if self.debug and cell_id is not None:
-            self.debug.log(f"Cell {cell_id}: Circularity = {circularity:.3f} (required: >0.85)")
-        
-        # Require circularity > 0.85 for badge detection
-        if circularity < 0.85:
-            if self.debug and cell_id is not None:
-                self.debug.log(f"Cell {cell_id}: Circularity too low")
-                self._save_badge_debug_images(debug_images, image_basename, cell_id, "circularity_fail")
-            return False
-        
-        # Check that the badge is positioned in the top-left corner
-        # Badges should be near the corner, not in the center or elsewhere
-        if M["m00"] == 0:
-            if self.debug and cell_id is not None:
-                self.debug.log(f"Cell {cell_id}: Zero moment")
-                self._save_badge_debug_images(debug_images, image_basename, cell_id, "zero_moment")
-            return False
-        
-        # Badge should be in top-left region (first 60% of width and height)
-        # Using 60% instead of 50% to account for slight positioning variations
-        if centroid_x > w * 0.6 or centroid_y > h * 0.6:
-            if self.debug and cell_id is not None:
-                self.debug.log(f"Cell {cell_id}: Badge centroid ({centroid_x:.1f}, {centroid_y:.1f}) not in top-left region")
-                self._save_badge_debug_images(debug_images, image_basename, cell_id, "centroid_fail")
-            return False
-        
-        if self.debug and cell_id is not None:
-            self.debug.log(f"Cell {cell_id}: Badge centroid ({centroid_x:.1f}, {centroid_y:.1f}) in top-left region")
-            # Save debug images for successful detection
-            self._save_badge_debug_images(debug_images, image_basename, cell_id, "success")
-        
-        return True  # Found a circular badge in the top-left corner
-    
-    def _save_badge_debug_images(self, debug_images: List[Tuple[str, str]], image_basename: str, cell_id: int, status: str):
-        """
-        Save debug images for badge detection analysis.
-        
-        Args:
-            debug_images: List of (name, path) tuples for debug images
-            image_basename: Base filename for naming
-            cell_id: Cell identifier
-            status: Status string (success, pixel_count_fail, etc.)
-        """
-        if not self.debug or not debug_images:
-            return
-        
-        for name, path in debug_images:
-            if os.path.exists(path):
-                debug_name = f"badge_analysis_{image_basename}_cell{cell_id}_{name}_{status}.png"
-                self.debug.save_image(path, debug_name)
-
-    def _is_loading(self, bgr_roi, cell_id: int = None, bgr_roi_debug = None) -> bool:
-        """
-        Detects blue movement/spinners in the center of the cell.
-        Uses CIELAB color space with Delta E (CIEDE2000) for perceptually uniform color matching.
-        """
-        color = self.COLORS['BLUE']
-        blue_mask = self._create_delta_e_mask(bgr_roi, color['target_rgb'], color['max_delta_e'])
-        pixel_count = cv2.countNonZero(blue_mask)
-        total_pixels = bgr_roi.shape[0] * bgr_roi.shape[1]
-        density = pixel_count / total_pixels if total_pixels > 0 else 0
-            
-        if self.debug and cell_id is not None:
-            self.debug.log(f"Cell {cell_id}: Center blue density = {density:.3f} ({pixel_count}/{total_pixels} pixels)")
-        
-        return 0.05 < density < 0.60  # Spinners are rings, so density is moderate
+        # Map Delta E to 1-100 score. 
+        score = 100.0 - delta_e
+        return int(max(1, min(100, round(score))))
 
     @staticmethod
-    def detect_checkbox(image_path: str) -> Optional[Tuple[int, int, int, int]]:
+    def calculate_delta_e_cie2000(lab1: Tuple[float, float, float], lab2: Tuple[float, float, float]) -> float:
         """
-        Detects a checkbox in the image using lightweight computer vision techniques.
-        Returns the (x, y, w, h) of the best candidate or None.
+        Calculate CIEDE2000 Delta E.
+        Highly optimized implementation using the math module for scalar performance.
         """
-        img = cv2.imread(image_path)
-        if img is None:
-            return None
+        L1, a1, b1 = lab1
+        L2, a2, b2 = lab2
 
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        
-        # Simple thresholding - efficient and works well for high contrast line art like checkboxes
-        _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
-        
-        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        height, width = img.shape[:2]
-        image_area = width * height
-        
-        candidates = []
-        
-        for cnt in contours:
-            x, y, w, h = cv2.boundingRect(cnt)
-            area = w * h
-            aspect_ratio = float(w) / h
-            
-            # Filter based on properties
-            
-            # 1. Aspect ratio should be close to 1 (square)
-            if not (0.8 < aspect_ratio < 1.2):
-                continue
-                
-            # 2. Minimum absolute size (to avoid noise/text periods)
-            if w < 20 or h < 20:
-                continue
+        # Step 1: Calculate C' and h'
+        C1 = math.sqrt(a1**2 + b1**2)
+        C2 = math.sqrt(a2**2 + b2**2)
+        C_bar = (C1 + C2) / 2.0
 
-            # 3. Area relative to image size
-            if not (0.001 * image_area < area < 0.05 * image_area):
-                continue
-                
-            # 4. Solidity/Extent
-            contour_area = cv2.contourArea(cnt)
-            extent = contour_area / area
-            if extent < 0.8: # Stricter extent to avoid complex shapes
-                continue
+        # Precompute C_bar^7
+        C_bar7 = C_bar**7
+        G = 0.5 * (1 - math.sqrt(C_bar7 / (C_bar7 + 6103515625))) # 25**7 = 6103515625
 
-            # 5. Content check - Checkboxes are usually empty (white/solid)
-            # Crop margin to avoid border
-            roi = gray[y+5:y+h-5, x+5:x+w-5] 
-            if roi.size > 0:
-                std_dev = np.std(roi)
-                if std_dev > 35.0: # High variance means complex content (image)
-                    continue
+        a1_prime = (1 + G) * a1
+        a2_prime = (1 + G) * a2
 
-            candidates.append((x, y, w, h))
-            
-        # Heuristic: Checkbox captchas typically have 1 single checkbox.
-        # If we find many candidates, it's likely a grid or something else.
-        if len(candidates) > 2:
-            return None
-            
-        if not candidates:
-            return None
-            
-        # Return the largest candidate (most likely the main checkbox)
-        best_candidate = max(candidates, key=lambda c: c[2] * c[3])
-        return best_candidate
+        C1_prime = math.sqrt(a1_prime**2 + b1**2)
+        C2_prime = math.sqrt(a2_prime**2 + b2**2)
+
+        def get_h_prime(b, a_p):
+            if b == 0 and a_p == 0: return 0
+            h = math.degrees(math.atan2(b, a_p))
+            return h if h >= 0 else h + 360
+
+        h1_prime = get_h_prime(b1, a1_prime)
+        h2_prime = get_h_prime(b2, a2_prime)
+
+        # Step 2: Calculate Delta L', Delta C', and Delta h'
+        delta_L_prime = L2 - L1
+        delta_C_prime = C2_prime - C1_prime
+
+        if C1_prime * C2_prime == 0:
+            delta_h_prime = 0
+        else:
+            delta_h_prime = h2_prime - h1_prime
+            if delta_h_prime > 180:
+                delta_h_prime -= 360
+            elif delta_h_prime < -180:
+                delta_h_prime += 360
+
+        delta_H_prime = 2 * math.sqrt(C1_prime * C2_prime) * math.sin(math.radians(delta_h_prime / 2.0))
+
+        # Step 3: Calculate S_L, S_C, S_H and T
+        L_bar_prime = (L1 + L2) / 2.0
+        C_bar_prime = (C1_prime + C2_prime) / 2.0
+
+        if C1_prime * C2_prime == 0:
+            h_bar_prime = h1_prime + h2_prime
+        else:
+            h_bar_prime = (h1_prime + h2_prime) / 2.0
+            if abs(h1_prime - h2_prime) > 180:
+                if h1_prime + h2_prime < 360:
+                    h_bar_prime += 180
+                else:
+                    h_bar_prime -= 180
+
+        h_bar_rad = math.radians(h_bar_prime)
+        T = (1 - 0.17 * math.cos(h_bar_rad - math.radians(30))
+               + 0.24 * math.cos(2 * h_bar_rad)
+               + 0.32 * math.cos(3 * h_bar_rad + math.radians(6))
+               - 0.20 * math.cos(4 * h_bar_rad - math.radians(63)))
+
+        S_L = 1 + (0.015 * (L_bar_prime - 50)**2) / math.sqrt(20 + (L_bar_prime - 50)**2)
+        S_C = 1 + 0.045 * C_bar_prime
+        S_H = 1 + 0.015 * C_bar_prime * T
+
+        # Step 4: Calculate R_T
+        delta_theta = 30 * math.exp(-((h_bar_prime - 275) / 25)**2)
+        C_bar_prime7 = C_bar_prime**7
+        R_C = 2 * math.sqrt(C_bar_prime7 / (C_bar_prime7 + 6103515625))
+        R_T = -math.sin(math.radians(2 * delta_theta)) * R_C
+
+        # Step 5: Final calculation
+        delta_E = math.sqrt(
+            (delta_L_prime / S_L)**2 +
+            (delta_C_prime / S_C)**2 +
+            (delta_H_prime / S_H)**2 +
+            R_T * (delta_C_prime / S_C) * (delta_H_prime / S_H)
+        )
+
+        return delta_E
 
     # =========================================================================
     # Background Removal Logic (Stateful)
@@ -714,173 +327,78 @@ class ImageProcessor:
         self, 
         image_path: str, 
         prompt: str,
-        k: int = 3,
-        merge_components: bool = True,
-        min_area_ratio: float = 0.01,
-        pre_merge_colors: bool = False
+        max_objects: int = 1,
     ) -> Optional[Image.Image]:
         """
         Remove background from an image by selecting the segment matching the prompt.
         Returns RGBA image with transparent background.
+        
+        Args:
+            image_path: Path to the image
+            prompt: Description of the object to keep (e.g., "a puzzle piece")
+            max_objects: How many objects to consider (defaults to 1 for cleanest removal)
         """
         if not self.attention:
             raise RuntimeError("Background removal requires attention_extractor.")
 
         if self.debug:
-            self.debug.log(f"Removing background for '{prompt}' using color segmentation...")
+            self.debug.log(f"Removing background for '{prompt}' using SAM 3...")
         
-        masks = []
-        process_path = image_path
-
-        # 1. Optional Preprocessing
-        if pre_merge_colors:
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                quant_path = tf.name
-            self._temp_files.append(quant_path)
-            try:
-                self.merge_similar_colors(image_path, quant_path, k=5)
-                process_path = quant_path
-            except Exception as e:
-                if self.debug: self.debug.log(f"Pre-merge colors failed: {e}")
-
-        # 2. Segment
+        # 1. Get mask with SAM 3
         try:
-            res = self.attention.segment_by_color(
-                process_path, 
-                k=k, 
-                merge_components=merge_components, 
-                min_area_ratio=min_area_ratio
-            )
-            masks = res.get("masks", [])
+            masks = self.attention.get_mask(image_path, prompt, max_objects=max_objects)
         except Exception as e:
-            if self.debug: self.debug.log(f"Color segmentation failed: {e}")
+            if self.debug: self.debug.log(f"SAM 3 mask retrieval failed for background removal: {e}")
             return None
 
         if not masks:
-            if self.debug: self.debug.log("Background removal: No masks found.")
+            if self.debug: self.debug.log(f"Background removal: No masks found for prompt '{prompt}'.")
             return None
 
-        # 3. Visualize masks (Debug only)
+        # 2. Use the top match mask
+        mask = masks[0] # (H, W) boolean numpy array
+        
         if self.debug:
-            ext = os.path.splitext(image_path)[1] or ".png"
-            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tf:
-                candidates_path = tf.name
-            self._temp_files.append(candidates_path)
-            
-            self.attention.visualize_masks(process_path, masks, output_path=candidates_path, draw_ids=True)
-            self.debug.save_image(candidates_path, f"bg_removal_candidates_{os.path.basename(image_path)}")
-            self.debug.log(f"Evaluating {len(masks)} masks with deterministic criteria for prompt: '{prompt}'")
-            
-        # 4. Deterministic Selection
-        best_idx = -1
-        max_score = -float('inf')
-        
-        with Image.open(process_path) as img:
-            W, H = img.size
-            
-        center_x, center_y = W / 2.0, H / 2.0
-        max_dist = np.sqrt(center_x**2 + center_y**2) or 1.0
-        total_pixels = W * H
-        
-        # 10% margin for edge penalty
-        margin_x = int(W * 0.1)
-        margin_y = int(H * 0.1)
-        
-        for idx, m in enumerate(masks):
-            if len(m.shape) == 3: 
-                m = m[0]
-            
-            # Ensure boolean
-            mask_bool = m > 0
-            area = np.sum(mask_bool)
-            
-            if area == 0:
-                continue
-            
-            # 1. Area Score (Larger is better)
-            norm_area = area / total_pixels
-            
-            # 2. Centrality Score (Closer to center is better)
-            y_indices, x_indices = np.where(mask_bool)
-            if len(x_indices) == 0:
-                continue
-                
-            centroid_x = np.mean(x_indices)
-            centroid_y = np.mean(y_indices)
-            
-            dist = np.sqrt((centroid_x - center_x)**2 + (centroid_y - center_y)**2)
-            norm_dist = dist / max_dist
-            centrality_score = 1.0 - norm_dist
-            
-            # 3. Edge Penalty (More content near edge is bad)
-            in_margin = (
-                (x_indices < margin_x) | 
-                (x_indices >= W - margin_x) | 
-                (y_indices < margin_y) | 
-                (y_indices >= H - margin_y)
-            )
-            edge_pixel_count = np.sum(in_margin)
-            edge_ratio = edge_pixel_count / area
-            
-            # Weights
-            w_area = 1.0
-            w_center = 0.5
-            w_edge = 5.0
-            
-            score = (w_area * norm_area) + (w_center * centrality_score) - (w_edge * edge_ratio)
-            
-            if self.debug:
-                self.debug.log(f"Mask {idx}: Area={norm_area:.2f}, Cent={centrality_score:.2f}, Edge={edge_ratio:.2f} -> Score={score:.2f}")
-            
-            if score > max_score:
-                max_score = score
-                best_idx = idx
-                
-        selected_ids = [best_idx] if best_idx != -1 else []
-        if self.debug and selected_ids:
-            self.debug.log(f"Selected mask ID: {best_idx} (Score: {max_score:.2f})")
+            self.debug.log(f"Selected mask for background removal with prompt '{prompt}'.")
 
-        if selected_ids:
-            # 5. Create RGBA image with combined masks
-            if len(masks) > 0:
-                base_shape = masks[0].shape
-                if len(base_shape) == 3: base_shape = base_shape[:2]
-                combined_mask = np.zeros(base_shape, dtype=bool)
+        # 3. Create RGBA image
+        try:
+            with Image.open(image_path) as img:
+                img = img.convert("RGBA")
+                width, height = img.size
                 
-                for idx in selected_ids:
-                    if 0 <= idx < len(masks):
-                        m = masks[idx]
-                        if len(m.shape) == 3: m = m[0]
-                        combined_mask = np.logical_or(combined_mask, m)
+                # Ensure mask matches image size
+                if mask.shape != (height, width):
+                    if self.debug: self.debug.log(f"Resizing mask from {mask.shape} to {(height, width)}")
+                    mask_img = Image.fromarray((mask * 255).astype(np.uint8), mode='L')
+                    mask_img = mask_img.resize((width, height), resample=Image.NEAREST)
+                    mask_uint8 = np.array(mask_img)
+                else:
+                    mask_uint8 = (mask * 255).astype(np.uint8)
                 
-                try:
-                    with Image.open(image_path) as img:
-                        img = img.convert("RGBA")
-                        
-                        # Fill holes in the mask to preserve internal details
-                        mask_uint8 = (combined_mask * 255).astype(np.uint8)
-                        # RETR_EXTERNAL retrieves only the extreme outer contours
-                        contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                        filled_mask = np.zeros_like(mask_uint8)
-                        cv2.drawContours(filled_mask, contours, -1, 255, cv2.FILLED)
-                        
-                        alpha_img = Image.fromarray(filled_mask, mode='L')
-                        
-                        if alpha_img.size != img.size:
-                            alpha_img = alpha_img.resize(img.size, resample=Image.NEAREST)
-                        
-                        out_img = img.copy()
-                        out_img.putalpha(alpha_img)
-                        
-                        # Save for debug
-                        debug_out = candidates_path.replace(ext, "_result.png")
-                        out_img.save(debug_out)
-                        if self.debug:
-                            self.debug.save_image(debug_out, f"bg_removal_result_{os.path.basename(image_path)}")
-                        
-                        return out_img
-                except Exception as e:
-                    if self.debug: self.debug.log(f"Background removal creation error: {e}")
+                # Fill holes in the mask to preserve internal details
+                # RETR_EXTERNAL retrieves only the extreme outer contours
+                contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                filled_mask = np.zeros_like(mask_uint8)
+                cv2.drawContours(filled_mask, contours, -1, 255, cv2.FILLED)
+                
+                alpha_img = Image.fromarray(filled_mask, mode='L')
+                
+                out_img = img.copy()
+                out_img.putalpha(alpha_img)
+                
+                # Save for debug if manager is present
+                if self.debug:
+                    ext = os.path.splitext(image_path)[1] or ".png"
+                    with tempfile.NamedTemporaryFile(suffix=f"_bg_result{ext}", delete=False) as tf:
+                        debug_out = tf.name
+                    self._temp_files.append(debug_out)
+                    out_img.save(debug_out)
+                    self.debug.save_image(debug_out, f"bg_removal_result_{os.path.basename(image_path)}")
+                
+                return out_img
+        except Exception as e:
+            if self.debug: self.debug.log(f"Background removal creation error: {e}")
                 
         return None
 

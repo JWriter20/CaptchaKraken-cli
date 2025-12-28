@@ -39,40 +39,30 @@ class ToolServerHandler(http.server.BaseHTTPRequestHandler):
                 data = self._read_body()
                 image_path = data.get('image_path')
                 text_prompt = data.get('text_prompt')
-                box_threshold = data.get('box_threshold', 0.35)
-                text_threshold = data.get('text_threshold', 0.25)
+                max_objects = data.get('max_objects', 24)
                 
                 if not image_path or not text_prompt:
                     self._send_response({'error': 'Missing image_path or text_prompt'}, 400)
                     return
 
                 print(f"[Server] Detecting '{text_prompt}' in {image_path}...", file=sys.stderr)
-                result = extractor.detect_with_grounding_dino(
-                    image_path, text_prompt, box_threshold, text_threshold
-                )
-                self._send_response(result)
+                result = extractor.detect(image_path, text_prompt, max_objects=max_objects)
+                self._send_response({"objects": result})
 
-            elif endpoint == '/segment':
+            elif endpoint == '/get_mask':
                 data = self._read_body()
                 image_path = data.get('image_path')
-                points = data.get('points') # List[List[float]]
-                boxes = data.get('boxes')   # List[List[float]]
+                text_prompt = data.get('text_prompt')
+                max_objects = data.get('max_objects', 24)
                 
-                if not image_path:
-                    self._send_response({'error': 'Missing image_path'}, 400)
+                if not image_path or not text_prompt:
+                    self._send_response({'error': 'Missing image_path or text_prompt'}, 400)
                     return
 
-                print(f"[Server] Segmenting {image_path}...", file=sys.stderr)
-                # Note: masks are numpy arrays, need to convert to list/rle for JSON
-                # specific to server usage, we might just return counts or something
-                # But for now let's convert masks to list of lists (boolean)
-                
-                result = extractor.segment_with_sam2(
-                    image_path, input_points=points, input_boxes=boxes
-                )
+                print(f"[Server] Getting masks for '{text_prompt}' in {image_path}...", file=sys.stderr)
+                masks = extractor.get_mask(image_path, text_prompt, max_objects=max_objects)
                 
                 # Convert numpy masks to lists for JSON serialization
-                masks = result.get('masks', [])
                 serialized_masks = []
                 for m in masks:
                     if hasattr(m, 'tolist'):
@@ -80,12 +70,22 @@ class ToolServerHandler(http.server.BaseHTTPRequestHandler):
                     else:
                         serialized_masks.append(m)
                 
-                result['masks'] = serialized_masks
-                
-                if 'points' in result and hasattr(result['points'], 'tolist'):
-                    result['points'] = result['points'].tolist()
+                self._send_response({"masks": serialized_masks})
 
-                self._send_response(result)
+            elif endpoint == '/segment':
+                # For compatibility, /segment can now just be a synonym for detect
+                data = self._read_body()
+                image_path = data.get('image_path')
+                prompt = data.get('prompt', "objects")
+                max_objects = data.get('max_objects', 24)
+                
+                if not image_path:
+                    self._send_response({'error': 'Missing image_path'}, 400)
+                    return
+
+                print(f"[Server] Segmenting {image_path} with prompt '{prompt}'...", file=sys.stderr)
+                result = extractor.detect(image_path, prompt, max_objects=max_objects)
+                self._send_response({"objects": result})
 
             elif endpoint == '/shutdown':
                  self._send_response({'status': 'shutting down'})
