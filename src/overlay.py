@@ -198,8 +198,8 @@ def draw_enhanced_bounding_box(
             text_y -= offset
 
         # Draw background and text
-        # Use black background for labels to ensure high contrast for numbers
-        fill_color = (0, 0, 0, 180)
+        # Use the box color for the label background (e.g. red for high visibility)
+        fill_color = hex_to_rgba(color, alpha=200)
 
         # Match label outline to the box color (instead of hardcoded white)
         draw.rectangle([bg_x1, bg_y1, bg_x2, bg_y2], fill=fill_color, outline=color, width=3)

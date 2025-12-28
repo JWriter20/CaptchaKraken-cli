@@ -44,7 +44,9 @@ def find_grid(image_path: str, debug_manager=None, slant_to_try: Optional[float]
                 if 40 < d < 600:
                     # Calculate how centered the pair is
                     center_offset = abs((p1 + p2) / 2.0 - total_dim / 2.0) / total_dim
-                    score = center_offset * 1000
+                    # Scale penalty: a 3x3 grid cell should be roughly 1/3 of the image
+                    scale_err = abs(d - total_dim / 3.0) / total_dim
+                    score = center_offset * 1000 + scale_err * 500
                     candidates[2].append(([p1, p2], score, d, min(l1, l2), [c1, c2]))
                 
                 # Check for 3-line candidates (for 4x4 grid)
@@ -56,7 +58,9 @@ def find_grid(image_path: str, debug_manager=None, slant_to_try: Optional[float]
                         rel_diff = abs(d1 - d2) / max(d1, d2)
                         if rel_diff < 0.35:
                             center_offset = abs((p1 + p3) / 2.0 - total_dim / 2.0) / total_dim
-                            score = rel_diff * 100 + center_offset * 1000
+                            # Scale penalty: a 4x4 grid cell should be roughly 1/4 of the image
+                            scale_err = abs(((d1 + d2) / 2.0) - total_dim / 4.0) / total_dim
+                            score = rel_diff * 100 + center_offset * 1000 + scale_err * 500
                             candidates[3].append(([p1, p2, p3], score, (d1 + d2) / 2.0, min(l1, l2, l3), [c1, c2, c3]))
 
         # Sort candidates by score (lower is better)
@@ -95,8 +99,10 @@ def find_grid(image_path: str, debug_manager=None, slant_to_try: Optional[float]
                             grid_boxes = _generate_slanted_grid(size, hs, vs, hd, vd, h, w, slant)
                             if grid_boxes:
                                 # Penalize non-square grids and extreme slants
+                                # Also prefer 4x4 grids over 3x3 if both are found
                                 s_diff = abs(hd - vd) / max(hd, vd)
-                                score = hs_sc + vs_sc + s_diff * 1000 + abs(slant) * 500
+                                size_bonus = (4 - size) * 100 # Penalty for size 3
+                                score = hs_sc + vs_sc + s_diff * 1000 + abs(slant) * 500 + size_bonus
                                 if score < min_run_score:
                                     min_run_score, best_run_grid = score, grid_boxes
         
@@ -120,33 +126,28 @@ def find_grid(image_path: str, debug_manager=None, slant_to_try: Optional[float]
 
         return best_run_grid, min_run_score
 
-    if slant_to_try is not None:
-        best_grid, min_score = run_detection(slant_to_try, threshold=10.0, color_thr=12.0)
-        return best_grid
-
+    slant_val = slant_to_try if slant_to_try is not None else 0.0
     # Default logic: try no slant first, then others
-    best_grid, min_score = run_detection(0.0, threshold=10.0, color_thr=12.0)
+    best_grid, min_score = run_detection(slant_val, threshold=1.0, color_thr=10.0)
+    best_slant = slant_val
     
-    # If no grid found, try various slant angles (typical for reCAPTCHA)
-    if not best_grid:
+    # If no grid found or result is poor, try various slant angles
+    if not best_grid or min_score > 100:
         for slant in [0.015, -0.015]:
-            grid, score = run_detection(slant, threshold=10.0, color_thr=12.0)
+            grid, score = run_detection(slant, threshold=3.0, color_thr=10.0)
             if grid and score < min_score:
                 min_score, best_grid = score, grid
+                best_slant = slant
 
     if not best_grid: return None
     
     # Final debug output: Save image with detected grid boxes
     if debug_manager and getattr(debug_manager, 'enabled', False):
-        overlay = img.copy()
-        for i, (x1, y1, x2, y2) in enumerate(best_grid):
-            cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 0, 255), 2)
-            cv2.putText(overlay, str(i+1), (x1+5, y1+20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
         image_basename = os.path.basename(image_path)
-        # Use slant in filename if provided or if we found one
-        slant_val = slant_to_try if slant_to_try is not None else 0.0 # simplified
-        slant_str = f"{slant_val:.3f}".replace('.', '_')
-        cv2.imwrite(os.path.join(str(getattr(debug_manager, 'base_dir', ".")), f"grid_final_slant_{slant_str}_{image_basename}"), overlay)
+        # Use the best slant found in filename
+        slant_str = f"{best_slant:.3f}".replace('.', '_')
+        debug_path = os.path.join(str(getattr(debug_manager, 'base_dir', ".")), f"grid_final_slant_{slant_str}_{image_basename}")
+        get_numbered_grid_overlay(image_path, best_grid, output_path=debug_path)
         
     return best_grid
 
@@ -158,13 +159,13 @@ def _generate_slanted_grid(size, hs, vs, hd, vd, h, w, slant):
     mid_x, mid_y = w / 2, h / 2
     # Extrapolate grid boundaries from detected internal lines
     if size == 4:
-        y_bounds = [hs[1] - 2*hd, hs[1] - hd, hs[1], hs[1] + hd, hs[1] + 2*hd]
-        x_bounds = [vs[1] - 2*vd, vs[1] - vd, vs[1], vs[1] + vd, vs[1] + 2*vd]
+        # Use all three detected lines as anchors for the grid
+        y_bounds = [hs[0] - hd, hs[0], hs[1], hs[2], hs[2] + hd]
+        x_bounds = [vs[0] - vd, vs[0], vs[1], vs[2], vs[2] + vd]
     else:
-        my = (hs[0] + hs[1]) / 2
-        mx = (vs[0] + vs[1]) / 2
-        y_bounds = [my - 1.5*hd, my - 0.5*hd, my + 0.5*hd, my + 1.5*hd]
-        x_bounds = [mx - 1.5*vd, mx - 0.5*vd, mx + 0.5*vd, mx + 1.5*vd]
+        # Use both detected lines as anchors
+        y_bounds = [hs[0] - hd, hs[0], hs[1], hs[1] + hd]
+        x_bounds = [vs[0] - vd, vs[0], vs[1], vs[1] + vd]
 
     grid_boxes = []
     s2 = slant * slant
@@ -208,7 +209,7 @@ def _get_candidate_lines(img_lab, axis, slant, threshold):
     
     # Grid lines are very bright (L > 50) and almost perfectly neutral (low chroma)
     # Lowering chroma threshold to 4.0 to strictly exclude sky blue and other tints
-    grey_mask = (img_lab[:, :, 0] > 50) & (chroma < 5.5)
+    grey_mask = (img_lab[:, :, 0] > 80) & (chroma < 5.5)
     grey_mask_u8 = grey_mask.astype(np.uint8) * 255
 
     candidates = []
@@ -221,7 +222,8 @@ def _get_candidate_lines(img_lab, axis, slant, threshold):
         possible_y0s = np.where(np.any(grey_mask[:, cx_start:cx_end] > 0, axis=1))[0]
         
         if len(possible_y0s) > 0:
-            width_thr = w * 0.7
+            central_start, central_end = int(w * 0.15), int(w * 0.85)
+            central_width = central_end - central_start
             x_range = np.arange(w)
             
             for y0 in possible_y0s:
@@ -229,40 +231,26 @@ def _get_candidate_lines(img_lab, axis, slant, threshold):
                 # y_src = y0 + slant * (x - mid_x)
                 y_indices = np.round(y0 + slant * (x_range - mid_x)).astype(np.int32)
                 
-                # Filter out-of-bounds indices
-                valid_mask = (y_indices >= 0) & (y_indices < h)
-                if np.sum(valid_mask) < width_thr: continue
+                # Check if the central 70% is within image bounds
+                central_y = y_indices[central_start:central_end]
+                if np.any(central_y < 0) or np.any(central_y >= h):
+                    continue
                 
-                # Extract slanted row segment from the mask
-                slanted_row = np.zeros(w, dtype=bool)
-                slanted_row[valid_mask] = grey_mask[y_indices[valid_mask], x_range[valid_mask]]
+                # Extract the central slanted segment from the mask
+                central_mask = grey_mask[central_y, x_range[central_start:central_end]]
                 
-                if np.sum(slanted_row) < width_thr: continue
+                # The central segment must be mostly grey (allowing a 10% margin for noise/artifacts)
+                if np.sum(central_mask) < central_width * 0.9:
+                    continue
                 
-                # Find longest continuous run in the slanted row
-                padded = np.zeros(w + 2, dtype=np.uint8)
-                padded[1:-1] = slanted_row.astype(np.uint8)
-                diff = np.diff(padded.astype(np.int16))
-                starts = np.where(diff == 1)[0]
-                ends = np.where(diff == -1)[0]
+                # Color consistency check for the central 70%
+                segment_colors = img_lab[central_y, x_range[central_start:central_end]]
                 
-                if len(starts) == 0: continue
-                lengths = ends - starts
-                max_idx = np.argmax(lengths)
-                max_len = lengths[max_idx]
-                
-                if max_len >= width_thr:
-                    start, end = starts[max_idx], ends[max_idx]
-                    # Extract the actual color pixels along the slanted path for consistency check
-                    segment_y = y_indices[start:end]
-                    segment_x = x_range[start:end]
-                    segment_colors = img_lab[segment_y, segment_x]
-                    
-                    # Consistency check: Std dev of colors should be low
-                    std_dev = np.std(segment_colors, axis=0)
-                    if np.all(std_dev < threshold):
-                        avg_color = np.mean(segment_colors, axis=0)
-                        candidates.append((float(y0), float(max_len), avg_color))
+                # Consistency check: Std dev of colors should be low
+                std_dev = np.std(segment_colors, axis=0)
+                if np.all(std_dev < threshold):
+                    avg_color = np.mean(segment_colors, axis=0)
+                    candidates.append((float(y0), float(central_width), avg_color))
     else: # Vertical-ish
         # Center check: use a 3-pixel window for robustness
         center_y = h // 2
@@ -270,7 +258,8 @@ def _get_candidate_lines(img_lab, axis, slant, threshold):
         possible_x0s = np.where(np.any(grey_mask[cy_start:cy_end, :], axis=0))[0]
         
         if len(possible_x0s) > 0:
-            height_thr = h * 0.4
+            central_start, central_end = int(h * 0.25), int(h * 0.75) # Central 50%
+            central_height = central_end - central_start
             y_range = np.arange(h)
             
             for x0 in possible_x0s:
@@ -278,35 +267,24 @@ def _get_candidate_lines(img_lab, axis, slant, threshold):
                 # x_src = x0 + slant * (y - mid_y)
                 x_indices = np.round(x0 + slant * (y_range - mid_y)).astype(np.int32)
                 
-                valid_mask = (x_indices >= 0) & (x_indices < w)
-                if np.sum(valid_mask) < height_thr: continue
+                # Check if the central segment is within image bounds
+                central_x = x_indices[central_start:central_end]
+                if np.any(central_x < 0) or np.any(central_x >= w):
+                    continue
                 
-                slanted_col = np.zeros(h, dtype=bool)
-                slanted_col[valid_mask] = grey_mask[y_range[valid_mask], x_indices[valid_mask]]
+                # Extract the central slanted segment from the mask
+                central_mask = grey_mask[y_range[central_start:central_end], central_x]
                 
-                if np.sum(slanted_col) < height_thr: continue
+                if np.sum(central_mask) < central_height * 0.85:
+                    continue
                 
-                padded = np.zeros(h + 2, dtype=np.uint8)
-                padded[1:-1] = slanted_col.astype(np.uint8)
-                diff = np.diff(padded.astype(np.int16))
-                starts = np.where(diff == 1)[0]
-                ends = np.where(diff == -1)[0]
+                # Color consistency check for the central segment
+                segment_colors = img_lab[y_range[central_start:central_end], central_x]
+                std_dev = np.std(segment_colors, axis=0)
                 
-                if len(starts) == 0: continue
-                lengths = ends - starts
-                max_idx = np.argmax(lengths)
-                max_len = lengths[max_idx]
-                
-                if max_len >= height_thr:
-                    start, end = starts[max_idx], ends[max_idx]
-                    segment_x = x_indices[start:end]
-                    segment_y = y_range[start:end]
-                    segment_colors = img_lab[segment_y, segment_x]
-                    
-                    std_dev = np.std(segment_colors, axis=0)
-                    if np.all(std_dev < threshold):
-                        avg_color = np.mean(segment_colors, axis=0)
-                        candidates.append((float(x0), float(max_len), avg_color))
+                if np.all(std_dev < threshold):
+                    avg_color = np.mean(segment_colors, axis=0)
+                    candidates.append((float(x0), float(central_height), avg_color))
 
     if not candidates: return [], []
     
@@ -396,8 +374,9 @@ def _create_delta_e_mask(img, rgb, thr):
 def get_numbered_grid_overlay(image_path, grid_boxes, output_path=None):
     """
     Generates a debug image with numbered boxes overlaid on the original image.
+    Uses high-visibility red labels with white text in the top-right.
     """
-    ov = [{"bbox": [b[0], b[1], b[2]-b[0], b[3]-b[1]], "number": i+1, "color": "#00FF00", "box_style": "solid"} for i, b in enumerate(grid_boxes)]
+    ov = [{"bbox": [b[0], b[1], b[2]-b[0], b[3]-b[1]], "number": i+1, "color": "#FF0000", "box_style": "solid"} for i, b in enumerate(grid_boxes)]
     if output_path is None:
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf: output_path = tf.name
     add_overlays_to_image(image_path, ov, output_path=output_path, label_position="top-right")
