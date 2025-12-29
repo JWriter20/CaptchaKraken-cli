@@ -131,6 +131,58 @@ def clusterDetections(
     return merged
 
 
+class SimpleTracker:
+    """Simple centroid tracker to maintain object ID consistency across frames."""
+
+    def __init__(self, dist_threshold: float = 0.15):
+        self.prev_centroids: Dict[int, Tuple[float, float]] = {}  # id -> (x, y)
+        self.next_id = 1
+        self.dist_threshold = dist_threshold
+
+    def update(self, current_detections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        tracked = []
+        new_centroids = {}
+
+        # Sort current detections by area descending to match larger objects first
+        current_detections.sort(
+            key=lambda d: (d["x_max"] - d["x_min"]) * (d["y_max"] - d["y_min"]), reverse=True
+        )
+
+        assigned_ids = set()
+
+        for det in current_detections:
+            x1, y1, x2, y2 = det["x_min"], det["y_min"], det["x_max"], det["y_max"]
+            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+
+            best_id = None
+            min_dist = float("inf")
+
+            # Find closest previous centroid that hasn't been reassigned
+            for pid, (px, py) in self.prev_centroids.items():
+                if pid in assigned_ids:
+                    continue
+
+                dist = ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5
+                if dist < min_dist and dist < self.dist_threshold:
+                    min_dist = dist
+                    best_id = pid
+
+            if best_id is not None:
+                assigned_id = best_id
+                assigned_ids.add(assigned_id)
+            else:
+                assigned_id = self.next_id
+                self.next_id += 1
+
+            new_centroids[assigned_id] = (cx, cy)
+            det_with_id = det.copy()
+            det_with_id["id"] = assigned_id
+            tracked.append(det_with_id)
+
+        self.prev_centroids = new_centroids
+        return tracked
+
+
 class AttentionExtractor:
     """Wrapper around SAM 3 for pointing and detection."""
 
@@ -216,6 +268,7 @@ class AttentionExtractor:
         media_path: str,
         object_class: str,
         max_objects: int = 24,
+        max_frames: int = 5,
     ) -> List[Dict[str, Any]]:
         """
         Detect all instances of object class using SAM 3.
@@ -225,74 +278,155 @@ class AttentionExtractor:
             media_path: Path to image or video
             object_class: What to detect (e.g., "bird", "car")
             max_objects: Maximum objects to detect
+            max_frames: Max frames to process if video (default: 5)
 
         Returns:
             List of dictionaries: [{'x_min': float, 'y_min': float, 'x_max': float, 'y_max': float, 'score': float}, ...]
-            Coordinates are percentages in [0.0, 1.0]
+            Coordinates are percentages in [0.0, 1.0].
+            For videos, returns the union-box of tracked objects across frames.
         """
+        import cv2
+
+        t0 = time.time()
+
+        # Check if media is video
+        is_video = any(
+            media_path.lower().endswith(ext) for ext in [".mp4", ".webm", ".gif", ".avi"]
+        )
+
+        if not is_video:
+            image = Image.open(media_path).convert("RGB")
+            objects = self._detect_image(image, object_class, max_objects)
+            t1 = time.time()
+            print(
+                f"[AttentionExtractor] SAM 3 detect('{object_class}') took {t1 - t0:.2f}s, found {len(objects)} objects",
+                file=sys.stderr,
+            )
+            return objects
+
+        # Video logic: process multiple frames and track objects
+        cap = cv2.VideoCapture(media_path)
+        if not cap.isOpened():
+            raise ValueError(f"Could not open video {media_path}")
+
+        tracker = SimpleTracker()
+        # id -> list of detections
+        tracked_paths = {}
+
+        frame_idx = 0
+        total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        actual_max = (
+            min(total_video_frames, max_frames) if total_video_frames > 0 else max_frames
+        )
+
+        print(
+            f"[AttentionExtractor] Processing video: {media_path} ({actual_max} frames)",
+            file=sys.stderr,
+        )
+
+        while cap.isOpened() and frame_idx < actual_max:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            # Convert frame to PIL image
+            image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+
+            # Detect in frame
+            frame_detections = self._detect_image(image, object_class, max_objects)
+
+            # Track across frames
+            tracked_detections = tracker.update(frame_detections)
+
+            # Store detections by tracked ID
+            for det in tracked_detections:
+                obj_id = det["id"]
+                if obj_id not in tracked_paths:
+                    tracked_paths[obj_id] = []
+                tracked_paths[obj_id].append(det)
+
+            frame_idx += 1
+
+        cap.release()
+
+        # Merge paths into union boxes (the path of the object across the video)
+        final_detections = []
+        for obj_id, path in tracked_paths.items():
+            if not path:
+                continue
+
+            # Compute encompassing box (Union)
+            union_box = {
+                "x_min": min(d["x_min"] for d in path),
+                "y_min": min(d["y_min"] for d in path),
+                "x_max": max(d["x_max"] for d in path),
+                "y_max": max(d["y_max"] for d in path),
+                "score": sum(d["score"] for d in path) / len(path),
+            }
+            final_detections.append(union_box)
+
+        t1 = time.time()
+        print(
+            f"[AttentionExtractor] Video detection ('{object_class}') took {t1 - t0:.2f}s, found {len(final_detections)} tracked objects",
+            file=sys.stderr,
+        )
+        return final_detections
+
+    def _detect_image(
+        self,
+        image: Image.Image,
+        object_class: str,
+        max_objects: int = 24,
+    ) -> List[Dict[str, Any]]:
+        """Core detection logic for a single image/frame using SAM 3."""
         self._load_sam3()
         import torch
-        import cv2
-        
-        t0 = time.time()
-        
-        # Check if media is video
-        is_video = any(media_path.lower().endswith(ext) for ext in [".mp4", ".webm", ".gif", ".avi"])
-        
-        if is_video:
-            cap = cv2.VideoCapture(media_path)
-            ret, frame = cap.read()
-            cap.release()
-            if not ret:
-                raise ValueError(f"Could not read video from {media_path}")
-            image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        else:
-            image = Image.open(media_path).convert("RGB")
-            
+
         width, height = image.size
-        
-        inputs = self._sam3_processor(images=image, text=object_class, return_tensors="pt").to(self.device)
+
+        inputs = self._sam3_processor(
+            images=image, text=object_class, return_tensors="pt"
+        ).to(self.device)
         with torch.no_grad():
             outputs = self._sam3_model(**inputs)
-            
+
         results = self._sam3_processor.post_process_instance_segmentation(
-            outputs, 
-            target_sizes=[image.size[::-1]]
+            outputs, target_sizes=[image.size[::-1]]
         )[0]
-        
+
         masks = results["masks"]
         scores = results["scores"]
-                
-                # Sort by score descending
+
+        # Sort by score descending
         top_indices = scores.argsort(descending=True)[:max_objects]
-        
+
         objects = []
         for idx in top_indices:
             score = scores[idx].item()
             mask = masks[idx].cpu().numpy()
-            
+
             # Find bounding box from mask
             y_indices, x_indices = np.where(mask > 0)
             if len(y_indices) == 0 or len(x_indices) == 0:
                 continue
-                
+
             x_min, x_max = np.min(x_indices), np.max(x_indices)
             y_min, y_max = np.min(y_indices), np.max(y_indices)
-            
-            objects.append({
-                "x_min": x_min / width,
-                "y_min": y_min / height,
-                "x_max": x_max / width,
-                "y_max": y_max / height,
-                "score": score
-            })
-        
+
+            objects.append(
+                {
+                    "x_min": x_min / width,
+                    "y_min": y_min / height,
+                    "x_max": x_max / width,
+                    "y_max": y_max / height,
+                    "score": score,
+                }
+            )
+
         # Merge overlapping detections to prevent objects from "splitting"
         # Using a lower threshold (0.4) and a distance check (0.1) to merge multi-detections
         objects = clusterDetections(objects, iou_threshold=0.4, distance_threshold=0.1)
-        
-        t1 = time.time()
-        print(f"[AttentionExtractor] SAM 3 detect('{object_class}') took {t1 - t0:.2f}s, found {len(objects)} objects", file=sys.stderr)
+
         return objects
 
     def get_mask(
