@@ -3,9 +3,10 @@ ActionPlanner - LLM-based captcha planning with tool support.
 
 Supports:
 1. Grid selection - which numbered squares to click
-2. Tool-aware planning - can request detect() or point() calls
+2. Tool-aware planning - can request detect() calls
 3. Drag refinement - iterative adjustment with visual feedback
 4. Text reading - OCR for text captchas
+5. Video captchas - plan actions for video captchas
 
 Backends: ollama, gemini
 """
@@ -40,10 +41,10 @@ PLAN_WITH_TOOLS_PROMPT = """You are an expert captcha solver. Solve this captcha
 {instruction}
 
 Types of captchas you support:
-- Clicking described objects (e.g. "click the two similar shapes")
+- Clicking described objects (e.g. "click the two similar shapes", "select all squares with buses")
 - Text captchas (e.g. "type the text in the image")
 - Drag puzzles (e.g. "drag the puzzle piece to the correct position", "complete the image")
-- Analyzing connected lines (e.g. "which watermelon is connected to the bird?")
+- Video captchas (e.g. "Select the object with a different movement pattern")
 
 {object_list_section}
 
@@ -56,46 +57,42 @@ If the goal involves "similar objects", "matching shapes", or "odd one out", exp
 Step 2: GOAL IDENTIFICATION
 Identify the *goal* in concrete visual terms.
 BE SPECIFIC about locations and explicitly state where exactly any action should take place (e.g. "top right", "center left").
-Explain WHY this is the correct target (matching rotation, shape, color, etc).
+Explain WHY this is the correct target.
 
 Step 3: ACTION PLANNING
 Decide on the best tool or action.
 
-You have three tools available:
+You have two tools available:
 1. detect(object_class, max_items) - Find instances of an object (e.g., "traffic light", "bus", "checkbox", "verify button").
    - object_class: Description of what to find.
-   - max_items: (Optional) Maximum number of items to return. Use 1 if you only need one specific thing.
+   - max_items: (Optional) Maximum number of items to return.
+   - Use this to label objects in the image (especially for video or multi-object puzzles). 
+   - You can request MULTIPLE detections in one response by providing a list of tool calls.
 
-2. simulate_drag(source, target_hint, target_object_id, source_quality, refined_source, location_hint) - Simulate a drag operation with visual feedback.
-       Use when: You need to drag an item to a target that requires precise visual alignment (e.g., "fit the puzzle piece", "complete the image").
+2. simulate_drag(source, target_hint, location_hint) - Simulate a drag operation with visual feedback.
+       Use when: You need to drag an item to a target that requires precise visual alignment (e.g., "fit the puzzle piece").
        - source: The ID of the object to drag (e.g. "Object 4") OR a description.
        - target_hint: description of where it roughly should go (e.g., "matching slot").
-       - target_object_id: (Optional) The ID of the object that acts as the target base.
        - location_hint: [x, y] (0.0-1.0) indicating the rough center of the target destination.
-
-3. find_connected_elems(instruction) - Analyze lines or connections between elements.
-       Use when: The puzzle asks which items are connected or follow a path.
-       - instruction: The connection to look for (e.g., "watermelon connected to bird").
+       - IMPORTANT: At the very start, define a clear visual destination for the drag.
 
     NOTE: The image has already been segmented and objects are labeled with red boxes and IDs (if any were found).
     Use the "Detected Objects" list above to refer to specific items by their ID (e.g., "Object 1").
 
-    If you need to interact with multiple specific items (e.g., "click the two similar shapes"), PREFER using multiple detect() calls with max_items=1.
-
     You can also return a direct action:
-    - click: Click on something (provide target_description).
-    - drag: Drag something (provide source and target descriptions). Use this ONLY for simple sliders.
-    - type: Type text (provide the text to type, typically 6 characters).
+    - click: Click on something (provide target_description, which can be an Object ID).
+    - drag: Drag something (provide source and target descriptions, which can be Object IDs).
+    - type: Type text (provide the text to type).
     - wait: Wait for loading.
     - done: Captcha is already solved.
 
     Respond ONLY with JSON:
     {
-      "analysis": "Your visual analysis and captcha type identification",
-      "goal": "The specific goal you identified",
+      "analysis": "...",
+      "goal": "...",
       "tool_calls": [
         {
-          "name": "detect" | "simulate_drag" | "find_connected_elems",
+          "name": "detect" | "simulate_drag",
           "args": {...}
         }
       ]
@@ -103,15 +100,14 @@ You have three tools available:
 
 Or return an action:
 {{
-  "analysis": "Your visual analysis...",
-  "goal": "The specific goal...",
+  "analysis": "...",
+  "goal": "...",
   "action_type": "click" | "drag" | "type" | "wait" | "done",
-  "target_description": "what to click (for click)",
-  "source_description": "what to drag (for drag)",
-  "drag_target_description": "where to drag to (for drag)",
-  "text": "text to type (for type)",
-  "duration_ms": 500,
-  "reasoning": "brief explanation that refers back to the puzzle goal you identified"
+  "target_description": "what to click (or Object ID)",
+  "source_description": "what to drag (or Object ID)",
+  "drag_target_description": "where to drag to (or Object ID)",
+  "text": "text to type",
+  "reasoning": "brief explanation"
 }}"""
 
 
@@ -183,27 +179,6 @@ Respond ONLY with JSON:
   "decision": "accept" | "adjust",
   "dx": 0.0,
   "dy": 0.0
-}}"""
-
-# For verifying source crop tightness
-VERIFY_CROP_PROMPT = """You are refining a selection for a drag-and-drop task.
-Instruction: {instruction}
-
-The system detected "Object {id}" as the item to drag.
-Look at the RED box labeled "{id}" in the image.
-
-Does this box represent a TIGHT isolation of the movable piece?
-OR does it include a lot of background, other slots, or empty space that should be excluded?
-
-For example:
-- If the movable piece is a "white W" but the box covers a large black column containing the W, that is BAD (not tight).
-- If the box tightly hugs the shape of the item, that is GOOD (tight).
-
-Respond ONLY with JSON:
-{{
-  "analysis": "Describe what Object {id} contains vs what the actual movable piece is",
-  "is_tight": true | false,
-  "refined_prompt": "If false, provide a visual description to find the tight item (e.g. 'white letter W')"
 }}"""
 
 
@@ -561,24 +536,6 @@ class ActionPlanner:
             "dy": float(result.get("dy", 0)),
         }
 
-    # ------------------------------------------------------------------
-    # Source Verification
-    # ------------------------------------------------------------------
-    def verify_source_crop(
-        self,
-        image_path: str,
-        source_object: Dict[str, Any],
-        instruction: str
-    ) -> Dict[str, Any]:
-        """
-        Verify if the selected source object is a tight crop or needs refinement.
-        """
-        prompt = VERIFY_CROP_PROMPT.format(
-            id=source_object.get("id"),
-            instruction=instruction
-        )
-        response, _ = self._chat_with_image(prompt, image_path)
-        return self._parse_json(response)
 
     # ------------------------------------------------------------------
     # Text reading (for text captchas)
