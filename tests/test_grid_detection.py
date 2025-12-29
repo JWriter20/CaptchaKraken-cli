@@ -60,6 +60,18 @@ def test_grid_detection_on_image(image_path, debug_manager, slant):
     num_boxes = len(grid_boxes)
     assert num_boxes in [9, 16], f"Detected {num_boxes} boxes in {filename}, expected 9 or 16"
     
+    # Check for similar dimensions
+    widths = [box[2] - box[0] for box in grid_boxes]
+    heights = [box[3] - box[1] for box in grid_boxes]
+    
+    avg_width = sum(widths) / len(widths)
+    avg_height = sum(heights) / len(heights)
+    
+    # Allow 10% tolerance from average
+    for i, (w, h) in enumerate(zip(widths, heights)):
+        assert 0.9 * avg_width <= w <= 1.1 * avg_width, f"Box {i} in {filename} width {w} deviates too much from avg {avg_width}"
+        assert 0.9 * avg_height <= h <= 1.1 * avg_height, f"Box {i} in {filename} height {h} deviates too much from avg {avg_height}"
+    
     # Validate each box structure
     for i, box in enumerate(grid_boxes):
         assert len(box) == 4, f"Box {i} in {filename} should have 4 coordinates, got {len(box)}"

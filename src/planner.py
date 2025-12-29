@@ -128,6 +128,19 @@ Respond ONLY with JSON:
 }}"""
 
 
+# For grid selection captchas
+SELECT_GRID_PROMPT = """Solve the captcha grid.
+Instruction: "{instruction}"
+Grid: {rows}x{cols} ({total} cells)
+{grid_hint}
+
+Respond ONLY with JSON:
+{{
+  "analysis": "Briefly describe which cells contain the target objects",
+  "selected_numbers": [list of integers (1-{total})]
+}}"""
+
+
 # For drag refinement: iterative adjustment
 DRAG_REFINE_PROMPT = """You are refining a drag action for a captcha puzzle.
 
@@ -262,7 +275,6 @@ class ActionPlanner:
         
         image_paths = [image_path] if isinstance(image_path, str) else image_path
         self._log(f"Input paths: {image_paths}")
-        self._log(f"=== PROMPT START ===\n{prompt}\n=== PROMPT END ===")
 
         usage = None
 
@@ -270,20 +282,18 @@ class ActionPlanner:
             import ollama
 
             self._log("Waiting for Ollama response...")
-            with timed("planner.ollama.total", extra=f"model={self.model}"):
-                client = ollama.Client(host=self.ollama_host)
-                # Ollama chat supports multiple images in the 'images' list
-                response = client.chat(
-                    model=self.model,
-                    messages=[{"role": "user", "content": prompt, "images": image_paths}],
-                    options={
-                        "temperature": 0.0,
-                        "num_predict": 1024,
-                    },
-                )
+            client = ollama.Client(host=self.ollama_host)
+            # Ollama chat supports multiple images in the 'images' list
+            response = client.chat(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt, "images": image_paths}],
+                options={
+                    "temperature": 0.0,
+                    "num_predict": 1024,
+                },
+            )
             result = response["message"]["content"]
             
-            # ... token usage ...
             if "prompt_eval_count" in response:
                 usage = {
                     "input_tokens": response["prompt_eval_count"],
@@ -292,7 +302,6 @@ class ActionPlanner:
                 }
                 self.token_usage.append(usage)
             
-            self._log(f"=== RAW RESPONSE ===\n{result}\n=== END RESPONSE ===")
             return result, usage
 
         if self.backend == "gemini":
@@ -307,15 +316,14 @@ class ActionPlanner:
             import mimetypes
             contents: List[Any] = []
 
-            with timed("planner.gemini.prepare_content"):
-                for path in image_paths:
-                    mime_type, _ = mimetypes.guess_type(path)
-                    if not mime_type:
-                        mime_type = "image/png"
-                    
-                    with open(path, "rb") as f:
-                        data = f.read()
-                        contents.append(Part.from_bytes(data=data, mime_type=mime_type))
+            for path in image_paths:
+                mime_type, _ = mimetypes.guess_type(path)
+                if not mime_type:
+                    mime_type = "image/png"
+                
+                with open(path, "rb") as f:
+                    data = f.read()
+                    contents.append(Part.from_bytes(data=data, mime_type=mime_type))
             
             contents.append(prompt)
 
@@ -325,15 +333,13 @@ class ActionPlanner:
                 response_mime_type="application/json",
             )
 
-            with timed("planner.gemini.generate_content", extra=f"model={self.model}"):
-                response = self._genai_client.models.generate_content(  # type: ignore[union-attr]
-                    model=self.model,
-                    contents=contents,
-                    config=config,
-                )
+            response = self._genai_client.models.generate_content(  # type: ignore[union-attr]
+                model=self.model,
+                contents=contents,
+                config=config,
+            )
             result = response.text
             
-            # ... usage ...
             if response.usage_metadata:
                 usage = {
                     "input_tokens": response.usage_metadata.prompt_token_count,
@@ -343,7 +349,6 @@ class ActionPlanner:
                 }
                 self.token_usage.append(usage)
 
-            self._log(f"=== RAW RESPONSE ===\n{result}\n=== END RESPONSE ===")
             return result, usage
 
         if self.backend == "openrouter":
@@ -383,10 +388,9 @@ class ActionPlanner:
             }
 
             self._log(f"Waiting for OpenRouter response ({self.model})...")
-            with timed("planner.openrouter.generate_content", extra=f"model={self.model}"):
-                response = requests.post(url, headers=headers, json=payload)
-                response.raise_for_status()
-                data = response.json()
+            response = requests.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            data = response.json()
 
             if "choices" in data and len(data["choices"]) > 0:
                 result = data["choices"][0]["message"]["content"]
@@ -403,7 +407,6 @@ class ActionPlanner:
                 }
                 self.token_usage.append(usage)
 
-            self._log(f"=== RAW RESPONSE ===\n{result}\n=== END RESPONSE ===")
             return result, usage
 
         raise ValueError(f"Unknown backend: {self.backend}")
@@ -590,6 +593,45 @@ class ActionPlanner:
         response, _ = self._chat_with_image(TEXT_READ_PROMPT, image_path)
         result = self._parse_json(response)
         return result.get("text", "")
+
+    # ------------------------------------------------------------------
+    # Grid Selection
+    # ------------------------------------------------------------------
+    def get_grid_selection(self, image_path: str, rows: int, cols: int, instruction: str = "Solve the captcha by selecting the correct images") -> List[int]:
+        """
+        Ask which numbers to select in the grid.
+        Returns a list of selected cell numbers.
+        """
+        total = rows * cols
+
+        self._log("ActionPlanner.get_grid_selection called")
+        self._log(f"  instruction: '{instruction}'")
+        self._log(f"  grid: {rows}x{cols}")
+
+        grid_hint = ""
+        if rows == 4 and cols == 4:
+            grid_hint = "Hint: Single large image split into tiles. Select ALL parts."
+        elif rows == 3 and cols == 3:
+            grid_hint = "Hint: Separate images. Select only clear matches."
+
+        prompt = SELECT_GRID_PROMPT.format(
+            rows=rows, 
+            cols=cols, 
+            total=total, 
+            instruction=instruction,
+            grid_hint=grid_hint
+        )
+        
+        response, _ = self._chat_with_image(prompt, image_path)
+        result = self._parse_json(response)
+
+        selected = result.get("selected_numbers", [])
+        
+        # Log model reasoning (if present)
+        self._log(f"Analysis: {result.get('analysis', 'N/A')}")
+        self._log(f"Final selection: {selected}")
+
+        return selected
 
     # ------------------------------------------------------------------
     # Item Selection (for SAM2 candidate filtering)

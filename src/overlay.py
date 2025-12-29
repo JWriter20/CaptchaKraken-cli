@@ -70,6 +70,10 @@ def draw_enhanced_bounding_box(
         # Underlay + main stroke to match the solid green/black grid overlay style
         draw.rectangle([x1, y1, x2, y2], outline=shadow_color, width=shadow_width)
         draw.rectangle([x1, y1, x2, y2], outline=color, width=line_width)
+    elif box_style == "thin":
+        line_width = 2
+        # Simple solid line, no shadow for maximum "thinness"
+        draw.rectangle([x1, y1, x2, y2], outline=color, width=line_width)
     else:
         # Dashed box (default)
         dash_length = 10

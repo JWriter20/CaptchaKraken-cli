@@ -63,7 +63,7 @@ def find_grid(image_path: str, debug_manager=None, slant_to_try: Optional[float]
                             score = rel_diff * 100 + center_offset * 1000 + scale_err * 500
                             candidates[3].append(([p1, p2, p3], score, (d1 + d2) / 2.0, min(l1, l2, l3), [c1, c2, c3]))
 
-        # Sort candidates by score (lower is better)
+        # Sort candidates by score
         for k in candidates:
             candidates[k].sort(key=lambda x: x[1])
         return candidates

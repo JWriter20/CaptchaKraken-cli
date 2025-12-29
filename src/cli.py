@@ -214,8 +214,8 @@ Examples:
         else:
             action_data = result
 
-        # Combine token usage from both planners
-        all_token_usage = solver.planner.token_usage + solver.grid_planner.token_usage
+        # Token usage from planner
+        all_token_usage = solver.planner.token_usage
         
         output = {
             "actions": action_data,

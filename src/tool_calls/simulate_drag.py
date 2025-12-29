@@ -8,7 +8,7 @@ from ..overlay import add_drag_overlay
 
 def simulate_drag(
     solver,
-    image_path: str,
+    media_path: str,
     instruction: str,
     source_description: str,
     target_description: str,
@@ -19,6 +19,7 @@ def simulate_drag(
 ) -> Dict[str, Any]:
     """
     Solve drag puzzle with iterative refinement.
+    Supports both images and videos.
     Returns a DragAction-compatible dictionary.
     """
     source_desc = source_description or "movable item"
@@ -31,7 +32,7 @@ def simulate_drag(
         source_x = (source_bbox_px[0] + source_bbox_px[2]) / 2 / img_w
         source_y = (source_bbox_px[1] + source_bbox_px[3]) / 2 / img_h
     else:
-        detections = attention.detect(image_path, source_desc, max_objects=1)
+        detections = attention.detect(media_path, source_desc, max_objects=1)
         if detections:
             obj = detections[0]
             source_x = (obj["x_min"] + obj["x_max"]) / 2
@@ -58,7 +59,28 @@ def simulate_drag(
     foreground_image = None
     try:
         x1, y1, x2, y2 = map(int, source_bbox_px)
-        with Image.open(image_path) as img:
+        # Use cv_image_path from solver if available, otherwise media_path
+        # For background removal, we definitely want a static frame.
+        # solver.solve() extracts the first frame into cv_image_path.
+        # But simulate_drag doesn't have easy access to it unless we pass it.
+        # However, Image.open(media_path) might fail for video.
+        
+        # We'll use a helper to get a frame from media_path if it's a video
+        is_video = any(media_path.lower().endswith(ext) for ext in [".mp4", ".webm", ".gif", ".avi"])
+        
+        if is_video:
+            import cv2
+            cap = cv2.VideoCapture(media_path)
+            ret, frame = cap.read()
+            cap.release()
+            if ret:
+                img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            else:
+                img = None
+        else:
+            img = Image.open(media_path)
+
+        if img:
             w, h = img.size
             x1 = max(0, x1); y1 = max(0, y1)
             x2 = min(w, x2); y2 = min(h, y2)
@@ -82,7 +104,7 @@ def simulate_drag(
     if initial_location_hint:
         target_x, target_y = initial_location_hint
     elif target_description and target_description != "matching slot":
-        detections = attention.detect(image_path, target_description, max_objects=1)
+        detections = attention.detect(media_path, target_description, max_objects=1)
         if detections:
             obj = detections[0]
             target_x, target_y = (obj["x_min"] + obj["x_max"]) / 2, (obj["y_min"] + obj["y_max"]) / 2
@@ -92,13 +114,26 @@ def simulate_drag(
     current_target = [target_x, target_y]
     history: List[dict] = []
 
-    ext = os.path.splitext(image_path)[1] or ".png"
+    # Get a static frame for overlaying progress
+    # We reuse the logic above to get a frame
+    if is_video:
+        import cv2
+        cap = cv2.VideoCapture(media_path)
+        ret, frame = cap.read()
+        cap.release()
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+            frame_path = tf.name
+        cv2.imwrite(frame_path, frame)
+    else:
+        frame_path = media_path
+
+    ext = os.path.splitext(frame_path)[1] or ".png"
     with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tf:
         work_path = tf.name
 
     try:
         for i in range(max_iterations):
-            shutil.copy2(image_path, work_path)
+            shutil.copy2(frame_path, work_path)
             target_px = [current_target[0] * img_w, current_target[1] * img_h]
             box_w = source_bbox_px[2] - source_bbox_px[0]
             box_h = source_bbox_px[3] - source_bbox_px[1]
@@ -153,6 +188,8 @@ def simulate_drag(
     finally:
         if os.path.exists(work_path):
             os.unlink(work_path)
+        if is_video and os.path.exists(frame_path):
+            os.unlink(frame_path)
 
     return {
         "action": "drag",

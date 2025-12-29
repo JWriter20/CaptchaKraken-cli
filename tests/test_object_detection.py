@@ -2,6 +2,8 @@ import pytest
 import json
 import os
 import sys
+import numpy as np
+from PIL import Image
 
 # Add src to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
@@ -85,8 +87,7 @@ def test_image_detection(extractor, filename, prompt, valid_keys):
     if not valid_boxes:
         pytest.fail(f"Could not find valid boxes for keys {valid_keys} in config")
         
-    result = extractor.detect(image_path, prompt)
-    detections = result.get('objects', [])
+    detections = extractor.detect(image_path, prompt)
     assert len(detections) > 0, f"No detections found for '{prompt}' in {filename}"
         
     for det in detections:
@@ -97,4 +98,45 @@ def test_image_detection(extractor, filename, prompt, valid_keys):
                 is_valid = True
                 break
         assert is_valid, f"Detection {bbox} is outside expected regions: {valid_keys} in {filename}"
+
+def test_video_detection(extractor):
+    """
+    Test object detection and numbering in a video file.
+    """
+    import cv2
+    video_path = os.path.join(IMAGES_DIR, "hcaptcha_1766539373078.webm")
+    if not os.path.exists(video_path):
+        pytest.skip(f"Video not found: {video_path}")
+        
+    cap = cv2.VideoCapture(video_path)
+    success, frame = cap.read()
+    cap.release()
+    
+    if not success:
+        pytest.fail("Failed to read frame from video")
+        
+    # Save frame as temporary image for AttentionExtractor
+    temp_frame_path = "temp_video_frame.png"
+    cv2.imwrite(temp_frame_path, frame)
+    
+    try:
+        # Prompt for objects in this specific video (hcaptcha puzzle/objects)
+        prompt = "object" 
+        detections = extractor.detect(temp_frame_path, prompt)
+        
+        assert len(detections) > 0, "No objects detected in video frame"
+        
+        # Verify we can number them (just check we have enough detections to number)
+        # and that they have valid bounding boxes
+        for i, det in enumerate(detections):
+            assert 'x_min' in det and 'y_min' in det
+            assert 'x_max' in det and 'y_max' in det
+            assert det['x_min'] < det['x_max']
+            assert det['y_min'] < det['y_max']
+            
+        print(f"Detected and numbered {len(detections)} objects in video frame")
+        
+    finally:
+        if os.path.exists(temp_frame_path):
+            os.remove(temp_frame_path)
 

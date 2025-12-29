@@ -21,10 +21,10 @@ if TYPE_CHECKING:
 
 
 def clusterDetections(
-    detections: List[Dict[str, float]],
+    detections: List[Dict[str, Any]],
     iou_threshold: float = 0.5,
     distance_threshold: Optional[float] = None,
-) -> List[Dict[str, float]]:
+) -> List[Dict[str, Any]]:
 # ... (rest of clusterDetections remains the same)
     """
     Cluster and merge overlapping or very close detection bounding boxes.
@@ -74,29 +74,30 @@ def clusterDetections(
 
         return ((center1_x - center2_x) ** 2 + (center1_y - center2_y) ** 2) ** 0.5
 
-    def average_boxes(boxes: List[Dict[str, float]]) -> Dict[str, float]:
-        """Average coordinates of multiple boxes."""
+    def merge_cluster_boxes(boxes: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Encompass all boxes in the cluster (Union) and average scores."""
         n = len(boxes)
-        return {
-            "x_min": sum(b["x_min"] for b in boxes) / n,
-            "y_min": sum(b["y_min"] for b in boxes) / n,
-            "x_max": sum(b["x_max"] for b in boxes) / n,
-            "y_max": sum(b["y_max"] for b in boxes) / n,
+        result = {
+            "x_min": min(b["x_min"] for b in boxes),
+            "y_min": min(b["y_min"] for b in boxes),
+            "x_max": max(b["x_max"] for b in boxes),
+            "y_max": max(b["y_max"] for b in boxes),
         }
+        if "score" in boxes[0]:
+            result["score"] = sum(b["score"] for b in boxes) / n
+        return result
 
     # Greedy clustering: merge boxes based on IoU or distance
     clusters = []
     used = [False] * len(detections)
 
-    # Choose similarity function based on parameters
-    if distance_threshold is not None:
-        # Use center distance
-        def should_merge(box1: Dict[str, float], box2: Dict[str, float]) -> bool:
-            return calculate_center_distance(box1, box2) < distance_threshold
-    else:
-        # Use IoU
-        def should_merge(box1: Dict[str, float], box2: Dict[str, float]) -> bool:
-            return calculate_iou(box1, box2) > iou_threshold
+    # Use BOTH IoU and distance for robustness
+    def should_merge(box1: Dict[str, Any], box2: Dict[str, Any]) -> bool:
+        iou = calculate_iou(box1, box2)
+        dist = calculate_center_distance(box1, box2)
+        
+        # Merge if they overlap significantly OR if centers are close
+        return iou > iou_threshold or (distance_threshold is not None and dist < distance_threshold)
 
     for i in range(len(detections)):
         if used[i]:
@@ -124,8 +125,8 @@ def clusterDetections(
 
         clusters.append(cluster)
 
-    # Average each cluster into a single box
-    merged = [average_boxes(cluster) for cluster in clusters]
+    # Use union (encompassing box) instead of average to avoid cutting off parts
+    merged = [merge_cluster_boxes(cluster) for cluster in clusters]
 
     return merged
 
@@ -212,15 +213,16 @@ class AttentionExtractor:
 
     def detect(
         self,
-        image_path: str,
+        media_path: str,
         object_class: str,
         max_objects: int = 24,
     ) -> List[Dict[str, Any]]:
         """
         Detect all instances of object class using SAM 3.
+        Supports both images and videos.
 
         Args:
-            image_path: Path to image
+            media_path: Path to image or video
             object_class: What to detect (e.g., "bird", "car")
             max_objects: Maximum objects to detect
 
@@ -230,9 +232,23 @@ class AttentionExtractor:
         """
         self._load_sam3()
         import torch
+        import cv2
         
         t0 = time.time()
-        image = Image.open(image_path).convert("RGB")
+        
+        # Check if media is video
+        is_video = any(media_path.lower().endswith(ext) for ext in [".mp4", ".webm", ".gif", ".avi"])
+        
+        if is_video:
+            cap = cv2.VideoCapture(media_path)
+            ret, frame = cap.read()
+            cap.release()
+            if not ret:
+                raise ValueError(f"Could not read video from {media_path}")
+            image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        else:
+            image = Image.open(media_path).convert("RGB")
+            
         width, height = image.size
         
         inputs = self._sam3_processor(images=image, text=object_class, return_tensors="pt").to(self.device)
@@ -271,21 +287,26 @@ class AttentionExtractor:
                 "score": score
             })
         
+        # Merge overlapping detections to prevent objects from "splitting"
+        # Using a lower threshold (0.4) and a distance check (0.1) to merge multi-detections
+        objects = clusterDetections(objects, iou_threshold=0.4, distance_threshold=0.1)
+        
         t1 = time.time()
         print(f"[AttentionExtractor] SAM 3 detect('{object_class}') took {t1 - t0:.2f}s, found {len(objects)} objects", file=sys.stderr)
         return objects
 
     def get_mask(
         self,
-        image_path: str,
+        media_path: str,
         object_class: str,
         max_objects: int = 24,
     ) -> List[np.ndarray]:
         """
         Get segmentation masks for an object class using SAM 3.
+        Supports both images and videos.
         
         Args:
-            image_path: Path to image
+            media_path: Path to image or video
             object_class: What to segment (e.g., "bird", "car")
             max_objects: Maximum masks to return
             
@@ -294,8 +315,20 @@ class AttentionExtractor:
         """
         self._load_sam3()
         import torch
+        import cv2
 
-        image = Image.open(image_path).convert("RGB")
+        # Check if media is video
+        is_video = any(media_path.lower().endswith(ext) for ext in [".mp4", ".webm", ".gif", ".avi"])
+        
+        if is_video:
+            cap = cv2.VideoCapture(media_path)
+            ret, frame = cap.read()
+            cap.release()
+            if not ret:
+                raise ValueError(f"Could not read video from {media_path}")
+            image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        else:
+            image = Image.open(media_path).convert("RGB")
         
         inputs = self._sam3_processor(images=image, text=object_class, return_tensors="pt").to(self.device)
         with torch.no_grad():
@@ -345,11 +378,7 @@ class AttentionExtractor:
             print(f"[AttentionExtractor] Could not load {image_path}", file=sys.stderr)
             return {"masks": []}
             
-        # Blur slightly to reduce noise
-        # img_blur = cv2.GaussianBlur(img, (5, 5), 0)
-        
-        # Use Mean Shift Filtering for better segmentation (cartoon effect)
-        # This helps flatten textures and merge similar colors before K-Means
+        # Use Mean Shift Filtering for better segmentation
         img_blur = cv2.pyrMeanShiftFiltering(img, sp=15, sr=30)
         
         # Convert to LAB for better color perceptual distance

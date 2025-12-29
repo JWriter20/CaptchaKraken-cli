@@ -36,7 +36,6 @@ from .action_types import (
 from .attention import AttentionExtractor
 from .overlay import add_drag_overlay, add_overlays_to_image
 from .planner import ActionPlanner
-from .grid_planner import GridPlanner
 from .image_processor import ImageProcessor
 from .timing import timed
 from .tool_calls.find_grid import find_grid, detect_selected_cells
@@ -154,7 +153,6 @@ class CaptchaSolver:
         planner_kwargs["debug_callback"] = self.debug.log
 
         self.planner = ActionPlanner(**planner_kwargs)  # type: ignore[arg-type]
-        self.grid_planner = GridPlanner(**planner_kwargs)
 
         # IMPORTANT: AttentionExtractor imports/initializes heavyweight deps (torch, HF models).
         # Most reCAPTCHA/hCAPTCHA grid flows do not need it. Lazily initialize on-demand to
@@ -191,86 +189,71 @@ class CaptchaSolver:
 
     def solve(
         self,
-        image_path: str,
+        media_path: str,
         instruction: str = "",
     ) -> Union[CaptchaAction, List[ClickAction], Dict[str, Any]]:
         """
         Solve a captcha image or video.
-
-        Args:
-            image_path: Path to the captcha image or video
-            instruction: Optional instruction text (e.g., "Select all traffic lights")
-
-        Returns:
-            CaptchaAction, List[ClickAction], or a dict with actions and metadata
         """
-        with timed("solver.solve.total"):
-            # Resolve path and get image size
-            with timed("solver.resolve_path"):
-                image_path = str(Path(image_path).resolve())
-                if not os.path.exists(image_path):
-                    raise FileNotFoundError(f"Image not found: {image_path}")
+        # Resolve path and get image size
+        media_path = str(Path(media_path).resolve())
+        if not os.path.exists(media_path):
+            raise FileNotFoundError(f"Media not found: {media_path}")
 
-            # Check if input is video
-            is_video = any(image_path.lower().endswith(ext) for ext in [".mp4", ".webm", ".gif", ".avi"])
+        # Check if input is video
+        is_video = any(media_path.lower().endswith(ext) for ext in [".mp4", ".webm", ".gif", ".avi"])
+        
+        # For CV processing, we need a static image. 
+        # If it's a video, we extract the first frame.
+        cv_image_path = media_path
+        if is_video:
+            import cv2
+            cap = cv2.VideoCapture(media_path)
+            ret, frame = cap.read()
+            if not ret:
+                cap.release()
+                raise ValueError(f"Could not read video from {media_path}")
             
-            # For CV processing, we need a static image. 
-            # If it's a video, we extract the first frame.
-            cv_image_path = image_path
-            if is_video:
-                with timed("solver.video.extract_first_frame"):
-                    import cv2
-                    cap = cv2.VideoCapture(image_path)
-                    ret, frame = cap.read()
-                    if not ret:
-                        cap.release()
-                        raise ValueError(f"Could not read video from {image_path}")
-                    
-                    self._image_size = (frame.shape[1], frame.shape[0])
-                    cap.release()
-                    
-                    # Save first frame to temp file for CV tools
-                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                        cv_image_path = tf.name
-                    self._temp_files.append(cv_image_path)
-                    cv2.imwrite(cv_image_path, frame)
-                    self.debug.log(f"Extracted first frame of video for CV processing: {cv_image_path}")
-            else:
-                with timed("solver.open_image"):
-                    with Image.open(image_path) as img:
-                        self._image_size = img.size
+            self._image_size = (frame.shape[1], frame.shape[0])
+            cap.release()
+            
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+                cv_image_path = tf.name
+            self._temp_files.append(cv_image_path)
+            cv2.imwrite(cv_image_path, frame)
+            self.debug.log(f"Extracted first frame of video: {cv_image_path}")
+        else:
+            with Image.open(media_path) as img:
+                self._image_size = img.size
 
-            # Debug: Save base image/frame
-            with timed("solver.debug.save_base_image"):
-                self.debug.save_image(cv_image_path, "00_base_image.png")
+        # Debug: Save base image/frame
+        self.debug.save_image(cv_image_path, "00_base_image.png")
 
-            # 1. Check for grid structure
-            with timed("solver.grid.detect_grid_boxes"):
-                grid_boxes = find_grid(cv_image_path)
-            if grid_boxes:
-                self.debug.log(f"Detected grid with {len(grid_boxes)} cells")
-                # For grid, we usually just need the static image, but we can pass the video path
-                # to the grid planner if needed. For now, use the static image for grid.
-                return self._solve_grid(cv_image_path, instruction, grid_boxes)
+        # 1. Check for grid structure
+        grid_boxes = find_grid(cv_image_path)
+        if grid_boxes:
+            self.debug.log(f"Detected grid with {len(grid_boxes)} cells")
+            return self._solve_grid(cv_image_path, instruction, grid_boxes)
 
-            # 2. Check for simple checkbox (lightweight)
-            img_w, img_h = self._image_size
-            if img_h < 400:
-                with timed("solver.checkbox.detect_checkbox"):
-                    checkbox_box = find_checkbox(cv_image_path)
-                if checkbox_box:
-                    self.debug.log(f"Detected checkbox at {checkbox_box}")
-                    x, y, w, h = checkbox_box
-                    # Convert to normalized click action
-                    return ClickAction(
-                        action="click",
-                        target_bounding_box=[x / img_w, y / img_h, (x + w) / img_w, (y + h) / img_h],
-                    )
+        # 2. Check for simple checkbox (lightweight)
+        img_w, img_h = self._image_size
+        if img_h < 400:
+            checkbox_box = find_checkbox(cv_image_path)
+            if checkbox_box:
+                self.debug.log(f"Detected checkbox at {checkbox_box}")
+                x, y, w, h = checkbox_box
+                return ClickAction(
+                    action="click",
+                    target_bounding_box=[x / img_w, y / img_h, (x + w) / img_w, (y + h) / img_h],
+                )
 
-            # 3. General solving with tool use
-            # Pass the ORIGINAL image_path (could be video) to _solve_general
-            self.debug.log(f"Using general solving flow (is_video={is_video})")
-            return self._solve_general(image_path, instruction, cv_image_path=cv_image_path)
+        # 3. General solving with tool use
+        self.debug.log(f"Using general solving flow (is_video={is_video})")
+        return self._solve_general(media_path, instruction, cv_image_path=cv_image_path)
+
+    def solveVideo(self, *args, **kwargs):
+        """Alias for solve() to handle videos."""
+        return self.solve(*args, **kwargs)
 
     def _solve_grid(
         self,
@@ -297,12 +280,9 @@ class CaptchaSolver:
         cv_selected = []
         cv_loading = []
         try:
-            with timed("solver.grid.cv_detect_selected_cells", extra=f"cells={len(grid_boxes)}"):
-                cv_selected, cv_loading = detect_selected_cells(image_path, grid_boxes, self.debug)
+            cv_selected, cv_loading = detect_selected_cells(image_path, grid_boxes, self.debug)
             if cv_selected:
                 self.debug.log(f"CV Detected already selected cells: {cv_selected}")
-                # We don't return DoneAction immediately anymore, to allow for multi-round selection
-                # if the puzzle requires it. The selected cells will be filtered out of the overlay.
             else:
                 self.debug.log("CV Detection: No selected cells detected")
             if cv_loading:
@@ -314,9 +294,8 @@ class CaptchaSolver:
 
         # Create temp image with numbered overlay
         ext = os.path.splitext(image_path)[1] or ".png"
-        with timed("solver.grid.create_temp_overlay_path"):
-            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tf:
-                overlay_path = tf.name
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tf:
+            overlay_path = tf.name
         self._temp_files.append(overlay_path)
 
         try:
@@ -325,77 +304,64 @@ class CaptchaSolver:
             valid_indices = []
             filtered_out = []
             
-            with timed("solver.grid.build_overlay_boxes", extra=f"cells={len(grid_boxes)}"):
-                for i, (x1, y1, x2, y2) in enumerate(grid_boxes):
-                    idx = i + 1
-                    w = x2 - x1
-                    h = y2 - y1
-                    
-                    # Filter out selected and loading cells from the overlay
-                    if idx in cv_selected or idx in cv_loading:
-                        filtered_out.append(idx)
-                        self.debug.log(f"Filtering out cell {idx} from overlay (selected={idx in cv_selected}, loading={idx in cv_loading})")
-                        continue
-                    
-                    # Tile-grid overlay: match the coordinate grid overlay aesthetic (solid green + black underlay).
-                    # This is less visually confusing than multi-color dashed boxes on busy captcha images.
-                    overlays.append(
-                        {"bbox": [x1, y1, w, h], "number": idx, "color": "#00FF00", "box_style": "solid"}
-                    )
-                    valid_indices.append(idx)
+            for i, (x1, y1, x2, y2) in enumerate(grid_boxes):
+                idx = i + 1
+                w = x2 - x1
+                h = y2 - y1
+                
+                # Filter out selected and loading cells from the overlay
+                if idx in cv_selected or idx in cv_loading:
+                    filtered_out.append(idx)
+                    continue
+                
+                overlays.append(
+                    {"bbox": [x1, y1, w, h], "number": idx, "color": "#00FF00", "box_style": "solid"}
+                )
+                valid_indices.append(idx)
             
             if filtered_out:
-                self.debug.log(f"Total cells filtered out: {filtered_out}")
-            self.debug.log(f"Cells available for selection (numbered in overlay): {valid_indices}")
+                self.debug.log(f"Cells filtered out: {filtered_out}")
+            self.debug.log(f"Selectable cells: {valid_indices}")
 
             # If no cells are valid for selection
             if not overlays:
                 if cv_loading:
-                    self.debug.log("No selectable cells, but loading cells present. Waiting.")
                     return WaitAction(action="wait", duration_ms=1000)
                 else:
-                    self.debug.log("No selectable cells found and no loading cells. Assuming Done.")
                     return DoneAction(action="done")
 
-            with timed("solver.grid.render_overlay_image"):
-                add_overlays_to_image(image_path, overlays, output_path=overlay_path, label_position="top-right")
-            with timed("solver.debug.save_grid_overlay"):
-                self.debug.save_image(overlay_path, "01_grid_overlay.png")
+            add_overlays_to_image(image_path, overlays, output_path=overlay_path, label_position="top-right")
+            self.debug.save_image(overlay_path, "01_grid_overlay.png")
 
             # Ask planner which squares to select
-            with timed("solver.grid.llm_get_grid_selection"):
-                selected_numbers = self.grid_planner.get_grid_selection(
-                    overlay_path, 
-                    rows=rows, 
-                    cols=cols, 
-                    instruction=instruction
-                )
+            selected_numbers = self.planner.get_grid_selection(
+                overlay_path, 
+                rows=rows, 
+                cols=cols, 
+                instruction=instruction
+            )
             
             # Filter just in case the model hallucinates numbers not in overlay
-            # (The model shouldn't see numbers that aren't there, but good for safety)
             before_filter = selected_numbers.copy()
-            with timed("solver.grid.filter_llm_numbers"):
-                # Ensure they are ints and in valid_indices
-                converted_numbers = []
-                for n in selected_numbers:
-                    try:
-                        val = int(n)
-                        if val in valid_indices:
-                            converted_numbers.append(val)
-                    except (ValueError, TypeError):
-                        continue
-                selected_numbers = converted_numbers
+            # Ensure they are ints and in valid_indices
+            converted_numbers = []
+            for n in selected_numbers:
+                try:
+                    val = int(n)
+                    if val in valid_indices:
+                        converted_numbers.append(val)
+                except (ValueError, TypeError):
+                    continue
+            selected_numbers = converted_numbers
             
             if len(before_filter) != len(selected_numbers):
                 filtered = set(before_filter) - set(selected_numbers)
                 self.debug.log(f"WARNING: LLM selected cells that were filtered out: {filtered}")
-                self.debug.log(f"These cells should not have been in the overlay (CV detected them as selected/loading)")
 
-            self.debug.log(f"Grid selection (after filtering): {selected_numbers}")
+            self.debug.log(f"Grid selection: {selected_numbers}")
 
             # Wait Logic
             if not selected_numbers and cv_loading:
-                self.debug.log("No new selections and loading cells detected. Returning WaitAction.")
                 return WaitAction(action="wait", duration_ms=1000)
 
             if not selected_numbers:
@@ -405,27 +371,23 @@ class CaptchaSolver:
             actions = []
             assert self._image_size is not None
             img_w, img_h = self._image_size
-            with timed("solver.grid.build_click_actions", extra=f"n={len(selected_numbers)}"):
-                for num in selected_numbers:
-                    try:
-                        idx = int(num) - 1
-                    except (ValueError, TypeError):
-                        self.debug.log(f"Skipping invalid selection: {num}")
-                        continue
+            for num in selected_numbers:
+                try:
+                    idx = int(num) - 1
+                except (ValueError, TypeError):
+                    self.debug.log(f"Skipping invalid selection: {num}")
+                    continue
 
-                    if 0 <= idx < len(grid_boxes):
-                        x1, y1, x2, y2 = grid_boxes[idx]
-
-                        # Convert to normalized coordinates
-                        bbox_pct = [x1 / img_w, y1 / img_h, x2 / img_w, y2 / img_h]
-
-                        actions.append(
-                            ClickAction(
-                                action="click",
-                                target_number=num,
-                                target_bounding_box=bbox_pct,
-                            )
+                if 0 <= idx < len(grid_boxes):
+                    x1, y1, x2, y2 = grid_boxes[idx]
+                    bbox_pct = [x1 / img_w, y1 / img_h, x2 / img_w, y2 / img_h]
+                    actions.append(
+                        ClickAction(
+                            action="click",
+                            target_number=num,
+                            target_bounding_box=bbox_pct,
                         )
+                    )
 
             if not actions:
                 return DoneAction(action="done")
@@ -453,7 +415,7 @@ class CaptchaSolver:
 
     def _solve_general(
         self,
-        image_path: str,
+        media_path: str,
         instruction: str,
         cv_image_path: Optional[str] = None,
     ) -> Union[CaptchaAction, List[ClickAction]]:
@@ -462,7 +424,7 @@ class CaptchaSolver:
         """
         max_tool_calls = 5
         history: List[str] = []
-        cv_path = cv_image_path or image_path
+        cv_path = cv_image_path or media_path
 
         # General solving relies on detect/point/segmentation -> needs heavyweight vision stack.
         attention = self._get_attention()
@@ -474,10 +436,10 @@ class CaptchaSolver:
 
         for i in range(max_tool_calls):
             self.debug.log(f"Planning step {i+1}/{max_tool_calls}")
-            # IMPORTANT: Pass the ORIGINAL image_path (could be video) to the planner
+            # IMPORTANT: Pass the ORIGINAL media_path (could be video) to the planner
             # but use the segmented/labeled static image (current_cv_image_path) for context
             result = self.planner.plan_with_tools(
-                image_path, # Could be video
+                media_path, # Could be video
                 instruction, 
                 objects=current_objects,
                 history=history,
@@ -508,7 +470,7 @@ class CaptchaSolver:
                     if tool == "detect":
                         object_class = args.get("object_class", "target")
                         self.debug.log(f"Tool call: detect('{object_class}')")
-                        detections = detect(attention, current_cv_image_path, object_class)
+                        detections = detect(attention, media_path, object_class)
 
                         if detections:
                             for det in detections:
@@ -522,7 +484,7 @@ class CaptchaSolver:
                         else:
                             # Fallback to detect with max_objects=1
                             self.debug.log("No detections, trying fallback...")
-                            fallback_detections = attention.detect(current_cv_image_path, object_class, max_objects=1)
+                            fallback_detections = attention.detect(media_path, object_class, max_objects=1)
                             if fallback_detections:
                                 obj = fallback_detections[0]
                                 x = (obj["x_min"] + obj["x_max"]) / 2
@@ -572,7 +534,7 @@ class CaptchaSolver:
                         description_to_use = refined_source if refined_source else source
                         drag_result = simulate_drag(
                             self,
-                            cv_path,
+                            media_path,
                             instruction,
                             description_to_use,
                             target_hint,
@@ -585,7 +547,7 @@ class CaptchaSolver:
                     elif tool == "find_connected_elems":
                         conn_instruction = args.get("instruction", instruction)
                         self.debug.log(f"Tool call: find_connected_elems('{conn_instruction}')")
-                        connected_detections = find_connected_elems(cv_path, conn_instruction)
+                        connected_detections = find_connected_elems(media_path, conn_instruction)
                         
                         if connected_detections:
                             for det in connected_detections:
@@ -649,7 +611,7 @@ class CaptchaSolver:
 
                 drag_result = simulate_drag(
                     self,
-                    current_cv_image_path,
+                    media_path,
                     instruction,
                     source_desc,
                     target_desc,
@@ -663,7 +625,7 @@ class CaptchaSolver:
                 # Check if target is an object ID
                 obj = self._get_object_by_id(target, current_objects)
                 if obj:
-                    img_w, img_h = self._image_size if self._image_size else Image.open(image_path).size
+                    img_w, img_h = self._image_size if self._image_size else Image.open(media_path).size
                     bbox = obj["bbox"] # [x, y, w, h]
                     # Normalize to [x1, y1, x2, y2]
                     bbox_pct = [
@@ -677,7 +639,7 @@ class CaptchaSolver:
                         target_bounding_box=bbox_pct,
                     )
                 else:
-                    detections = attention.detect(current_image_path, target, max_objects=1)
+                    detections = attention.detect(media_path, target, max_objects=1)
                     if detections:
                         obj = detections[0]
                         x = (obj["x_min"] + obj["x_max"]) / 2
@@ -697,9 +659,9 @@ class CaptchaSolver:
         return DoneAction(action="done")
 
 # Convenience function
-def solve_captcha(image_path: str, instruction: str = "", **kwargs) -> Union[CaptchaAction, List[ClickAction]]:
+def solve_captcha(media_path: str, instruction: str = "", **kwargs) -> Union[CaptchaAction, List[ClickAction]]:
     """
-    Convenience function to solve a captcha.
+    Convenience function to solve a captcha image or video.
     """
     solver = CaptchaSolver(**kwargs)
-    return solver.solve(image_path, instruction)
+    return solver.solve(media_path, instruction)
