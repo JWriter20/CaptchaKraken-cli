@@ -36,76 +36,43 @@ except ImportError:  # pragma: no cover - optional dependency
 
 
 # For general planning with tool support
-PLAN_WITH_TOOLS_PROMPT = """You are an expert captcha solver. Solve this captcha image by analyzing its type and using the available tools.
+PLAN_WITH_TOOLS_PROMPT = """Analyze the captcha and solve it using tool calls or direct actions.
 
 {instruction}
-
-Types of captchas you support:
-- Clicking described objects (e.g. "click the two similar shapes", "select all squares with buses")
-- Text captchas (e.g. "type the text in the image")
-- Drag puzzles (e.g. "drag the puzzle piece to the correct position", "complete the image")
-- Video captchas (e.g. "Select the object with a different movement pattern")
 
 {object_list_section}
 
 {history_section}
 
-Step 1: VISUAL ANALYSIS
-Briefly describe the objects you see in the image. Identify the captcha type.
-If the goal involves "similar objects", "matching shapes", or "odd one out", explicitly IDENTIFY the specific shape or object class.
+Available Tools:
+1. detect(object_class, max_items) - Find instances of an object (e.g., "traffic light", "bus").
+2. simulate_drag(source, target_hint, location_hint) - Precise drag refinement.
+   - source: Object ID or description of item to drag.
+   - target_hint: Description of where it should go (e.g., "matching slot").
+   - location_hint: [x, y] (0.0-1.0) rough destination center.
+   - IMPORTANT: Define a clear visual destination for the drag.
 
-Step 2: GOAL IDENTIFICATION
-Identify the *goal* in concrete visual terms.
-BE SPECIFIC about locations and explicitly state where exactly any action should take place (e.g. "top right", "center left").
-Explain WHY this is the correct target.
+Direct Actions:
+- action_type: "click" | "drag" | "type" | "wait" | "done"
+- target_description: Object ID or description to click.
+- source_description / drag_target_description: For drag actions.
+- text: For typing text.
 
-Step 3: ACTION PLANNING
-Decide on the best tool or action.
-
-You have two tools available:
-1. detect(object_class, max_items) - Find instances of an object (e.g., "traffic light", "bus", "checkbox", "verify button").
-   - object_class: Description of what to find.
-   - max_items: (Optional) Maximum number of items to return.
-   - Use this to label objects in the image (especially for video or multi-object puzzles). 
-   - You can request MULTIPLE detections in one response by providing a list of tool calls.
-
-2. simulate_drag(source, goal) - Simulate a drag operation with visual feedback.
-       Use when: You need to drag an item to a target that requires precise visual alignment (e.g., "fit the puzzle piece").
-       - source: The ID of the object to drag (e.g. "Object 4") OR a description.
-       - goal: A visual description of the desired end state (e.g., "The puzzle piece is fitted into the empty slot on the right").
-       - IMPORTANT: Define a clear visual destination in the goal.
-
-    NOTE: The image has already been segmented and objects are labeled with red boxes and IDs (if any were found).
-    Use the "Detected Objects" list above to refer to specific items by their ID (e.g., "Object 1").
-
-    You can also return a direct action:
-    - click: Click on something (provide target_description, which can be an Object ID).
-    - drag: Drag something (provide source_description and drag_target_description, which can be Object IDs or word descriptions like "bottom right parrot").
-    - type: Type text (provide the text to type).
-    - wait: Wait for loading.
-    - done: Captcha is already solved.
-
-    Respond ONLY with JSON:
-    {
-      "analysis": "Visual analysis and reasoning for the tool choice",
-      "goal": "...",
-      "tool_calls": [
-        {
-          "name": "detect" | "simulate_drag",
-          "args": {...}
-        }
-      ]
-    }
-
-Or return an action:
+Respond ONLY with JSON:
 {{
-  "analysis": "Visual analysis and reasoning for the action",
-  "goal": "...",
-  "action_type": "click" | "drag" | "type" | "wait" | "done",
-  "target_description": "what to click (or Object ID)",
-  "source_description": "what to drag (or Object ID or description)",
-  "drag_target_description": "where to drag to (or Object ID or description)",
-  "text": "text to type"
+  "analysis": "Brief reasoning",
+  "goal": "Description of the visual goal",
+  "tool_calls": [
+    {{
+      "name": "detect" | "simulate_drag",
+      "args": {{ ... }}
+    }}
+  ],
+  "action_type": "...",
+  "target_description": "...",
+  "source_description": "...",
+  "drag_target_description": "...",
+  "text": "..."
 }}"""
 
 

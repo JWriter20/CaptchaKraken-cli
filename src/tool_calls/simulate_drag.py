@@ -14,6 +14,7 @@ def simulate_drag(
     primary_goal: str,
     max_iterations: int = 5,
     source_bbox_override: Optional[List[float]] = None,
+    location_hint: Optional[List[float]] = None,
 ) -> Dict[str, Any]:
     """
     Solve drag puzzle with iterative refinement.
@@ -93,7 +94,10 @@ def simulate_drag(
     source_coords = [source_x, source_y]
 
     # 2. Initial target estimate
-    target_x, target_y = 0.5, 0.5
+    if location_hint and len(location_hint) >= 2:
+        target_x, target_y = location_hint[0], location_hint[1]
+    else:
+        target_x, target_y = 0.5, 0.5
     # Use primary_goal as the target_description
     t_desc = primary_goal
     if t_desc:

@@ -506,9 +506,11 @@ class CaptchaSolver:
 
                     elif tool == "simulate_drag":
                         source = args.get("source", "movable item")
-                        goal = args.get("goal", result.get("goal", "Complete the drag puzzle"))
+                        # Support target_hint, goal, or fallback to the general goal from the response
+                        goal = args.get("target_hint") or args.get("goal") or result.get("goal", "Complete the drag puzzle")
+                        location_hint = args.get("location_hint")
 
-                        self.debug.log(f"Tool call: simulate_drag('{source}', goal='{goal}')")
+                        self.debug.log(f"Tool call: simulate_drag('{source}', goal='{goal}', location_hint={location_hint})")
                         
                         # Execute drag simulation
                         drag_result = simulate_drag(
@@ -517,6 +519,7 @@ class CaptchaSolver:
                             instruction,
                             source_description=source,
                             primary_goal=goal,
+                            location_hint=location_hint,
                         )
                         return DragAction(**drag_result)
 
