@@ -107,15 +107,7 @@ def main():
             
             elif command == "find-checkbox":
                 from src.tool_calls.find_checkbox import find_checkbox
-                result = find_checkbox(image_path)
-            
-            elif command == "segment":
-                from src.solver import CaptchaSolver
-                from src.tool_calls.segment import segment
-                # Need a solver instance for image_processor and attention
-                solver = CaptchaSolver(provider="ollama", model="qwen3-vl:4b")
-                labeled_path, objects = segment(solver.image_processor, solver._get_attention(), image_path, solver.debug)
-                result = {"labeled_image": labeled_path, "objects": objects}
+                result = find_checkbox(image_path
             
             elif command == "detect":
                 if len(sys.argv) < 4:
@@ -129,15 +121,15 @@ def main():
             
             elif command == "simulate-drag":
                 if len(sys.argv) < 5:
-                    print(json.dumps({"error": "Usage: python -m src.cli simulate-drag image.png source_desc target_desc"}), file=sys.stderr)
+                    print(json.dumps({"error": "Usage: python -m src.cli simulate-drag image.png source_desc goal"}), file=sys.stderr)
                     sys.exit(1)
                 source_desc = sys.argv[3]
-                target_desc = sys.argv[4]
+                goal = sys.argv[4]
                 from src.solver import CaptchaSolver
                 from src.tool_calls.simulate_drag import simulate_drag
                 # Note: This might need more setup for a full drag simulation (instruction, etc.)
                 solver = CaptchaSolver(provider="ollama", model="qwen3-vl:4b")
-                result = simulate_drag(solver, image_path, "Simulated drag", source_desc, target_desc)
+                result = simulate_drag(solver, image_path, "Simulated drag", source_desc, goal)
             
             elif command == "find-connected-elems":
                 if len(sys.argv) < 4:

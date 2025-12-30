@@ -3,19 +3,17 @@ import tempfile
 import shutil
 import math
 from PIL import Image
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Union
 from ..overlay import add_drag_overlay
 
 def simulate_drag(
     solver,
     media_path: str,
     instruction: str,
-    source_description: str,
-    target_description: Optional[str] = None,
+    source_description: Union[str, List[float]],
+    primary_goal: str,
     max_iterations: int = 5,
     source_bbox_override: Optional[List[float]] = None,
-    initial_location_hint: Optional[List[float]] = None,
-    primary_goal: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Solve drag puzzle with iterative refinement.
@@ -31,10 +29,30 @@ def simulate_drag(
         source_bbox_px = source_bbox_override
         source_x = (source_bbox_px[0] + source_bbox_px[2]) / 2 / img_w
         source_y = (source_bbox_px[1] + source_bbox_px[3]) / 2 / img_h
+    elif isinstance(source_desc, (list, tuple)) and len(source_desc) >= 2:
+        # Handle coordinates [x, y] or [x1, y1, x2, y2]
+        if len(source_desc) >= 4:
+            source_bbox_px = [
+                source_desc[0] * img_w,
+                source_desc[1] * img_h,
+                source_desc[2] * img_w,
+                source_desc[3] * img_h
+            ]
+            source_x = (source_desc[0] + source_desc[2]) / 2
+            source_y = (source_desc[1] + source_desc[3]) / 2
+        else:
+            source_x, source_y = source_desc[0], source_desc[1]
+            box_size_pct = 0.05
+            source_bbox_px = [
+                (source_x - box_size_pct/2) * img_w,
+                (source_y - box_size_pct/2) * img_h,
+                (source_x + box_size_pct/2) * img_w,
+                (source_y + box_size_pct/2) * img_h
+            ]
     else:
         # Check if source_desc is an Object ID (e.g. "Object 4")
         import re
-        obj_match = re.search(r"Object\s*(\d+)", source_desc, re.IGNORECASE)
+        obj_match = re.search(r"Object\s*(\d+)", str(source_desc), re.IGNORECASE)
         found_obj = None
         if obj_match:
             obj_id = int(obj_match.group(1))
@@ -51,7 +69,7 @@ def simulate_drag(
             source_x = (b[0] + b[2]/2) / img_w
             source_y = (b[1] + b[3]/2) / img_h
         else:
-            detections = attention.detect(media_path, source_desc, max_objects=1)
+            detections = attention.detect(media_path, str(source_desc), max_objects=1)
             if detections:
                 obj = detections[0]
                 source_x = (obj["x_min"] + obj["x_max"]) / 2
@@ -76,11 +94,12 @@ def simulate_drag(
 
     # 2. Initial target estimate
     target_x, target_y = 0.5, 0.5
-    if initial_location_hint:
-        target_x, target_y = initial_location_hint
-    elif target_description:
-        # Check if target_description is an Object ID
-        obj_match = re.search(r"Object\s*(\d+)", target_description, re.IGNORECASE)
+    # Use primary_goal as the target_description
+    t_desc = primary_goal
+    if t_desc:
+        # Check if t_desc is an Object ID
+        import re
+        obj_match = re.search(r"Object\s*(\d+)", str(t_desc), re.IGNORECASE)
         found_obj = None
         if obj_match:
             obj_id = int(obj_match.group(1))
@@ -95,12 +114,14 @@ def simulate_drag(
             target_x = (b[0] + b[2]/2) / img_w
             target_y = (b[1] + b[3]/2) / img_h
         else:
-            detections = attention.detect(media_path, target_description, max_objects=1)
+            detections = attention.detect(media_path, str(t_desc), max_objects=1)
             if detections:
                 obj = detections[0]
                 target_x, target_y = (obj["x_min"] + obj["x_max"]) / 2, (obj["y_min"] + obj["y_max"]) / 2
             else:
                 target_x, target_y = 0.5, 0.5
+    else:
+        target_x, target_y = 0.5, 0.5
 
     current_target = [target_x, target_y]
 
@@ -191,8 +212,8 @@ def simulate_drag(
                 current_target,
                 history,
                 source_description=source_desc,
-                target_description=target_description or "matching slot",
-                primary_goal=primary_goal or f"Drag {source_desc} to {target_description}",
+                target_description=primary_goal,
+                primary_goal=primary_goal,
             )
 
             decision = result.get("decision", "accept")

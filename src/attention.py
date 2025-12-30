@@ -397,12 +397,16 @@ class AttentionExtractor:
         masks = results["masks"]
         scores = results["scores"]
 
-        # Sort by score descending
-        top_indices = scores.argsort(descending=True)[:max_objects]
+        # Sort by score descending (initially all objects)
+        all_indices = scores.argsort(descending=True)
 
         objects = []
-        for idx in top_indices:
+        for idx in all_indices:
             score = scores[idx].item()
+            # Stop if score is too low (e.g. < 0.1) to avoid processing junk
+            if score < 0.1:
+                break
+                
             mask = masks[idx].cpu().numpy()
 
             # Find bounding box from mask
@@ -425,9 +429,12 @@ class AttentionExtractor:
 
         # Merge overlapping detections to prevent objects from "splitting"
         # Using a lower threshold (0.4) and a distance check (0.1) to merge multi-detections
+        # CRITICAL: We cluster BEFORE slicing by max_objects so that parts of the same 
+        # object are combined even if max_objects is small (like 1).
         objects = clusterDetections(objects, iou_threshold=0.4, distance_threshold=0.1)
 
-        return objects
+        # Now slice by max_objects
+        return objects[:max_objects]
 
     def get_mask(
         self,

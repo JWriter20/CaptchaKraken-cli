@@ -69,12 +69,11 @@ You have two tools available:
    - Use this to label objects in the image (especially for video or multi-object puzzles). 
    - You can request MULTIPLE detections in one response by providing a list of tool calls.
 
-2. simulate_drag(source, target_hint, location_hint) - Simulate a drag operation with visual feedback.
+2. simulate_drag(source, goal) - Simulate a drag operation with visual feedback.
        Use when: You need to drag an item to a target that requires precise visual alignment (e.g., "fit the puzzle piece").
        - source: The ID of the object to drag (e.g. "Object 4") OR a description.
-       - target_hint: description of where it roughly should go (e.g., "matching slot").
-       - location_hint: [x, y] (0.0-1.0) indicating the rough center of the target destination.
-       - IMPORTANT: At the very start, define a clear visual destination for the drag.
+       - goal: A visual description of the desired end state (e.g., "The puzzle piece is fitted into the empty slot on the right").
+       - IMPORTANT: Define a clear visual destination in the goal.
 
     NOTE: The image has already been segmented and objects are labeled with red boxes and IDs (if any were found).
     Use the "Detected Objects" list above to refer to specific items by their ID (e.g., "Object 1").
