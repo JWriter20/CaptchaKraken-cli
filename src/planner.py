@@ -81,14 +81,14 @@ You have two tools available:
 
     You can also return a direct action:
     - click: Click on something (provide target_description, which can be an Object ID).
-    - drag: Drag something (provide source and target descriptions, which can be Object IDs).
+    - drag: Drag something (provide source_description and drag_target_description, which can be Object IDs or word descriptions like "bottom right parrot").
     - type: Type text (provide the text to type).
     - wait: Wait for loading.
     - done: Captcha is already solved.
 
     Respond ONLY with JSON:
     {
-      "analysis": "...",
+      "analysis": "Visual analysis and reasoning for the tool choice",
       "goal": "...",
       "tool_calls": [
         {
@@ -100,14 +100,13 @@ You have two tools available:
 
 Or return an action:
 {{
-  "analysis": "...",
+  "analysis": "Visual analysis and reasoning for the action",
   "goal": "...",
   "action_type": "click" | "drag" | "type" | "wait" | "done",
   "target_description": "what to click (or Object ID)",
-  "source_description": "what to drag (or Object ID)",
-  "drag_target_description": "where to drag to (or Object ID)",
-  "text": "text to type",
-  "reasoning": "brief explanation"
+  "source_description": "what to drag (or Object ID or description)",
+  "drag_target_description": "where to drag to (or Object ID or description)",
+  "text": "text to type"
 }}"""
 
 
@@ -175,7 +174,7 @@ Make SMALL adjustments (typically 1-5%). We can refine iteratively.
 
 Respond ONLY with JSON:
 {{
-  "conclusion": "Specific critique of vertical/horizontal alignment and edge connectivity",
+  "analysis": "Specific critique of vertical/horizontal alignment and edge connectivity",
   "decision": "accept" | "adjust",
   "dx": 0.0,
   "dy": 0.0
@@ -432,7 +431,7 @@ class ActionPlanner:
 
         Returns:
             Dict with either:
-            - "tool_call": {"name": "detect"|"point", "args": {...}}
+            - "tool_call": {"name": "detect"|"simulate_drag", "args": {...}}
             - "action_type": "click"|"drag"|"type"|"wait"|"done" + action details
         """
         object_list_section = ""
@@ -440,7 +439,7 @@ class ActionPlanner:
             lines = ["Detected Objects (ID: box [x, y, w, h]):"]
             for obj in sorted(objects, key=lambda x: x.get("id", 0)):
                 lines.append(f"- Object {obj.get('id')}: {obj.get('bbox')}")
-            lines.append("\\nUse these Object IDs in your reasoning.")
+            lines.append("\\nUse these Object IDs in your analysis.")
             object_list_section = "\\n".join(lines)
 
         history_section = ""
@@ -486,14 +485,14 @@ class ActionPlanner:
             instruction: Original puzzle instruction
             current_target: Current target position [x, y] as percentages (0-1)
             history: List of previous refinements:
-                [{"destination": [x, y], "conclusion": "...", "decision": "..."}]
+                [{"destination": [x, y], "analysis": "...", "decision": "..."}]
             source_description: Description of the item being dragged
             target_description: Description of where it should go
             primary_goal: The specific goal identified by the planner
 
         Returns:
             {
-                "conclusion": "assessment of current position",
+                "analysis": "assessment of current position",
                 "decision": "accept" | "adjust",
                 "dx": float,  # relative adjustment (-1 to 1)
                 "dy": float   # relative adjustment (-1 to 1)
@@ -504,11 +503,11 @@ class ActionPlanner:
             history_lines = ["Previous attempts:"]
             for i, h in enumerate(history):
                 dest = h.get("destination", [0, 0])
-                conclusion = h.get("conclusion", "")
+                analysis = h.get("analysis", "")
                 decision = h.get("decision", "")
                 history_lines.append(
                     f"  {i + 1}. destination: ({dest[0]:.1%}, {dest[1]:.1%}), "
-                    f'conclusion: "{conclusion}", decision: {decision}'
+                    f'analysis: "{analysis}", decision: {decision}'
                 )
             history_lines.append(f"  {len(history) + 1}. destination: ({current_target[0]:.1%}, {current_target[1]:.1%}) (CURRENT)")
             history_text = "\n".join(history_lines)
@@ -530,7 +529,7 @@ class ActionPlanner:
 
         # Ensure we have valid adjustment values
         return {
-            "conclusion": result.get("conclusion", ""),
+            "analysis": result.get("analysis", ""),
             "decision": result.get("decision", "accept"),
             "dx": float(result.get("dx", 0)),
             "dy": float(result.get("dy", 0)),
@@ -584,61 +583,8 @@ class ActionPlanner:
 
         selected = result.get("selected_numbers", [])
         
-        # Log model reasoning (if present)
+        # Log model analysis (if present)
         self._log(f"Analysis: {result.get('analysis', 'N/A')}")
         self._log(f"Final selection: {selected}")
 
         return selected
-
-    # ------------------------------------------------------------------
-    # Item Selection (for SAM2 candidate filtering)
-    # ------------------------------------------------------------------
-    def select_items(self, image_path: str, instruction: str, candidates_count: int) -> List[int]:
-        """
-        Select items from a set of labeled candidates based on instruction.
-        
-        Args:
-            image_path: Path to image with labeled candidates (numbers on objects)
-            instruction: Description of what to select (e.g. "the letter W")
-            candidates_count: Number of candidates available (for validation)
-            
-        Returns:
-            List of Selected IDs (int)
-        """
-        prompt = f"""You are a vision system selecting objects.
-The image shows {candidates_count} objects detected by a segmentation system.
-Each important object is overlaid with a SEMI-TRANSPARENT colored mask and a numeric label (ID).
-
-Task: We want to identify the segments that match this description: "{instruction}"
-
-CRITICAL INSTRUCTIONS:
-1. Ignore the color of the mask. Focus on the SHAPE and CONTEXT.
-2. Each mask is a different color, and each mask is numbered with an ID.
-3. It is possible that our target object is fragmented into multiple masks. If so, select all relevant IDs.
-4. ONLY select the mask IDs that directly match the description, DO NOT include any backgrounds or other objects
-
-Respond ONLY with JSON:
-{{
-  "analysis": "Describe the candidates that look relevant, noting their shape matches despite mask color",
-  "selected_ids": [id1, id2, ...], // often only one id, don't feel the need to select multiple ids always
-  "confidence": "high" | "medium" | "low",
-  "reasoning": "Why these IDs match the description"
-}}"""
-        
-        response, _ = self._chat_with_image(prompt, image_path)
-        result = self._parse_json(response)
-        
-        self._log(f"Selection reasoning: {result.get('reasoning')}")
-        
-        selected_ids = result.get("selected_ids")
-        valid_ids = []
-        
-        if isinstance(selected_ids, int):
-            selected_ids = [selected_ids]
-            
-        if isinstance(selected_ids, list):
-            for pid in selected_ids:
-                if isinstance(pid, int) and 0 <= pid < candidates_count:
-                    valid_ids.append(pid)
-                    
-        return valid_ids

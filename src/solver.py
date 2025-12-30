@@ -431,6 +431,7 @@ class CaptchaSolver:
         
         # Run initial segmentation immediately (use static image)
         current_cv_image_path, current_objects = segment(self.image_processor, attention, cv_path, self.debug)
+        self.current_objects = current_objects # Store for tools like simulate_drag
         if current_objects:
             history.append(f"Initial segmentation found {len(current_objects)} objects.")
 
@@ -506,39 +507,17 @@ class CaptchaSolver:
                     elif tool == "simulate_drag":
                         source = args.get("source", "movable item")
                         target_hint = args.get("target_hint", "matching slot")
-                        target_object_id = args.get("target_object_id")
-                        source_quality = args.get("source_quality")
-                        refined_source = args.get("refined_source")
                         location_hint = args.get("location_hint")
 
                         self.debug.log(f"Tool call: simulate_drag('{source}', '{target_hint}')")
                         
-                        # 0. Adjust location_hint if target_object_id is provided
-                        if target_object_id:
-                            # Try to treat as int, or string "Object N"
-                            tgt_obj = self._get_object_by_id(str(target_object_id), current_objects)
-                            if tgt_obj:
-                                t_bbox = tgt_obj["bbox"]
-                                img_w, img_h = self._image_size
-                                t_cx = (t_bbox[0] + t_bbox[2] / 2) / img_w
-                                t_cy = (t_bbox[1] + t_bbox[3] / 2) / img_h
-                                location_hint = [t_cx, t_cy]
-                        
-                        source_bbox = None
-                        obj = self._get_object_by_id(source, current_objects)
-                        if obj:
-                            b = obj["bbox"]
-                            source_bbox = [b[0], b[1], b[0] + b[2], b[1] + b[3]]
-
                         # Execute drag simulation
-                        description_to_use = refined_source if refined_source else source
                         drag_result = simulate_drag(
                             self,
                             media_path,
                             instruction,
-                            description_to_use,
-                            target_hint,
-                            source_bbox_override=source_bbox,
+                            source_description=source,
+                            target_description=target_hint,
                             initial_location_hint=location_hint,
                             primary_goal=result.get("goal"),
                         )
@@ -595,26 +574,15 @@ class CaptchaSolver:
                 source_desc = result.get("source_description")
                 target_desc = result.get("drag_target_description") or result.get("target_description")
                 
-                # Optimization: If both source and target are identified objects, return direct action
-                source_obj = self._get_object_by_id(source_desc, current_objects)
-                target_obj = self._get_object_by_id(target_desc, current_objects)
+                # If these are Object IDs, simulate_drag will handle it via self.current_objects
+                # If they are descriptions, simulate_drag will handle it via attention.detect
                 
-                if source_obj and target_obj:
-                    self.debug.log(f"Direct drag from Object {source_obj['id']} to Object {target_obj['id']}")
-                    img_w, img_h = self._image_size
-                    s_bbox = source_obj["bbox"]
-                    t_bbox = target_obj["bbox"]
-                    s_center = [(s_bbox[0] + s_bbox[2] / 2) / img_w, (s_bbox[1] + s_bbox[3] / 2) / img_h]
-                    t_center = [(t_bbox[0] + t_bbox[2] / 2) / img_w, (t_bbox[1] + t_bbox[3] / 2) / img_h]
-                    
-                    return DragAction(action="drag", source_coordinates=s_center, target_coordinates=t_center)
-
                 drag_result = simulate_drag(
                     self,
                     media_path,
                     instruction,
-                    source_desc,
-                    target_desc,
+                    source_description=source_desc,
+                    target_description=target_desc,
                     primary_goal=result.get("goal"),
                 )
                 return DragAction(**drag_result)
