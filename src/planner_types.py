@@ -1,5 +1,5 @@
 from typing import List, Literal, Optional, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class PlannerAction(BaseModel):
@@ -57,4 +57,12 @@ class PlannerPlan(BaseModel):
     tool_calls: Optional[List[PlannerToolCall]] = None
     # We allow the planner to return either a direct action or tool calls
     action: Optional[Union[PlannerClickAction, PlannerDragAction, PlannerTypeAction, PlannerWaitAction, PlannerDoneAction, PlannerDragRefineAction]] = None
+
+    @model_validator(mode="after")
+    def check_exclusive(self) -> "PlannerPlan":
+        if self.action and self.tool_calls:
+            raise ValueError("Provide EITHER 'action' OR 'tool_calls', not both.")
+        if not self.action and not self.tool_calls:
+            raise ValueError("Provide EITHER 'action' OR 'tool_calls'.")
+        return self
 

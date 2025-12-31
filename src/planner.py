@@ -86,12 +86,12 @@ When to use direct actions vs tool calls:
 - Use detect when there are mutliple of the same object and we only want to select one.
 - Use simulate_drag when the drag requires exact visual alignment or when the drag destination cannot be clearly described (missing gaps, etc.)
 
-Respond ONLY with JSON:
+Respond ONLY with JSON. Include EITHER "action" OR "tool_calls" (but not both):
 {{
   "analysis": "Brief reasoning",
   "goal": "Visual goal",
-  "action": {{ ... }},
-  "tool_calls": [ {{ "name": "...", "args": {{ ... }} }} ]
+  "action": {{ ... }} 
+  // OR: "tool_calls": [ {{ "name": "...", "args": {{ ... }} }} ]
 }}"""
 
 
