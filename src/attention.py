@@ -184,7 +184,7 @@ class SimpleTracker:
 
 
 class AttentionExtractor:
-    """Wrapper around SAM 3 for pointing and detection."""
+    """Wrapper around SAM 3 for bounding box detection."""
 
     def __init__(
         self,
@@ -601,38 +601,40 @@ class AttentionExtractor:
         output_path: str = "attention_heatmap.png",
         show_peak: bool = True,
     ) -> str:
-        """Generate visualization showing detected point."""
+        """Generate visualization showing detected bounding box."""
         import matplotlib.pyplot as plt
 
         detections = self.detect(image_path, target_description, max_objects=1)
         if detections:
             obj = detections[0]
-            x_pct = (obj["x_min"] + obj["x_max"]) / 2
-            y_pct = (obj["y_min"] + obj["y_max"]) / 2
+            x1_pct, y1_pct, x2_pct, y2_pct = obj["bbox"]
         else:
-            x_pct, y_pct = 0.5, 0.5
+            x1_pct, y1_pct, x2_pct, y2_pct = 0.45, 0.45, 0.55, 0.55
 
         image = Image.open(image_path).convert("RGB")
         img_array = np.array(image)
         img_height, img_width = img_array.shape[:2]
 
         # Convert percentage to pixels for visualization
-        px = int(x_pct * img_width)
-        py = int(y_pct * img_height)
+        px1, py1 = int(x1_pct * img_width), int(y1_pct * img_height)
+        px2, py2 = int(x2_pct * img_width), int(y2_pct * img_height)
 
         fig, ax = plt.subplots(1, 1, figsize=(12, 8))
 
         ax.imshow(img_array)
 
         if show_peak:
-            # Draw crosshair
-            ax.axhline(y=py, color="lime", linewidth=1, alpha=0.5)
-            ax.axvline(x=px, color="lime", linewidth=1, alpha=0.5)
-            # Draw marker
-            ax.scatter([px], [py], c="lime", s=200, marker="x", linewidths=3, zorder=10)
-            ax.add_patch(plt.Circle((px, py), 20, fill=False, color="lime", linewidth=2, zorder=10))
+            # Draw bounding box
+            rect = plt.Rectangle((px1, py1), px2 - px1, py2 - py1, 
+                                 linewidth=3, edgecolor='lime', facecolor='none', alpha=0.8)
+            ax.add_patch(rect)
+            
+            # Label
+            ax.text(px1, py1 - 5, f'Target: "{target_description}"', 
+                    color='lime', fontsize=12, fontweight='bold',
+                    bbox=dict(facecolor='black', alpha=0.5, edgecolor='none', pad=2))
 
-        ax.set_title(f'Target: "{target_description}"\nPosition: ({x_pct:.2%}, {y_pct:.2%}) | Pixel: ({px}, {py})')
+        ax.set_title(f'Target Detection: "{target_description}"\nBox: [{x1_pct:.2%}, {y1_pct:.2%}, {x2_pct:.2%}, {y2_pct:.2%}]')
         ax.axis("off")
 
         plt.tight_layout()

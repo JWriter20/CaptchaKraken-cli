@@ -1,6 +1,6 @@
 ## CaptchaKraken CLI
 
-AI-powered, fully local captcha-solving CLI that uses attention-based vision models to extract precise click coordinates for common web captchas.
+AI-powered, fully local captcha-solving CLI that uses attention-based vision models to extract precise bounding boxes for common web captchas.
 
 ## Description
 
@@ -14,7 +14,7 @@ It is designed to be:
 High-level flow:
 1. **Classify** the captcha (checkbox vs image grid vs text prompt, etc.).
 2. **Detect and number** all interactable elements in the captcha (checkboxes, tiles, buttons).
-3. **Plan actions** using the point and detect tools to generate click coordinates.
+3. **Plan actions** using the detect and segmentation tools to generate action bounding boxes.
 4. **Output** the sequence of actions (clicks) that can be replayed in a browser automation stack.
 
 ## Captcha support status

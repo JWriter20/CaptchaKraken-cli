@@ -17,6 +17,13 @@ import sys
 import base64
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
+# Import planner types for documentation/type hinting
+try:
+    from .planner_types import PlannerPlan
+except ImportError:
+    # Fallback if types file is missing or in different environment
+    PlannerPlan = Any  # type: ignore
+
 # Timing helper (opt-in via CAPTCHA_TIMINGS=1)
 from .timing import timed
 
@@ -36,7 +43,8 @@ except ImportError:  # pragma: no cover - optional dependency
 
 
 # For general planning with tool support
-PLAN_WITH_TOOLS_PROMPT = """Analyze the captcha and solve it using tool calls or direct actions.
+PLAN_WITH_TOOLS_PROMPT = """Analyze the captcha and solve it using direct actions or tool calls.
+Favor direct actions with descriptions over tool calls when possible.
 
 {instruction}
 
@@ -44,35 +52,30 @@ PLAN_WITH_TOOLS_PROMPT = """Analyze the captcha and solve it using tool calls or
 
 {history_section}
 
-Available Tools:
-1. detect(object_class, max_items) - Find instances of an object (e.g., "traffic light", "bus").
-2. simulate_drag(source, target_hint, location_hint) - Precise drag refinement.
-   - source: Object ID or description of item to drag.
-   - target_hint: Description of where it should go (e.g., "matching slot").
-   - location_hint: [x, y] (0.0-1.0) rough destination center.
-   - IMPORTANT: Define a clear visual destination for the drag.
-
 Direct Actions:
-- action_type: "click" | "drag" | "type" | "wait" | "done"
-- target_description: Object ID or description to click.
-- source_description / drag_target_description: For drag actions.
-- text: For typing text.
+1. {{ "action": "click", "target_description": "ID or description", "max_items": N }}
+   - Use this to click one or more objects.
+   - target_description: Preferred.
+   - max_items: Number of matches to click (default 1).
+2. {{ "action": "drag", "source_description": "ID or desc", "target_description": "desc of destination", "location_hint": [x, y] }}
+   - Use this for drag-and-drop puzzles.
+   - source_description: Preferred.
+   - target_description: Visual goal for destination.
+   - location_hint: Optional rough [x, y] destination.
+3. {{ "action": "type", "text": "...", "target_description": "ID or desc" }}
+4. {{ "action": "wait", "duration_ms": 500 }}
+5. {{ "action": "done" }}
+
+Tool Calls (Use only if direct actions are insufficient):
+1. detect(object_class, max_items) - Find specific objects.
+2. simulate_drag(source, target_hint, location_hint) - Precise iterative drag refinement.
 
 Respond ONLY with JSON:
 {{
   "analysis": "Brief reasoning",
-  "goal": "Description of the visual goal",
-  "tool_calls": [
-    {{
-      "name": "detect" | "simulate_drag",
-      "args": {{ ... }}
-    }}
-  ],
-  "action_type": "...",
-  "target_description": "...",
-  "source_description": "...",
-  "drag_target_description": "...",
-  "text": "..."
+  "goal": "Visual goal",
+  "action": {{ ... }},
+  "tool_calls": [ {{ "name": "...", "args": {{ ... }} }} ]
 }}"""
 
 
@@ -396,9 +399,13 @@ class ActionPlanner:
             context_image_path: Optional path to a static image with overlays/labels
 
         Returns:
-            Dict with either:
-            - "tool_call": {"name": "detect"|"simulate_drag", "args": {...}}
-            - "action_type": "click"|"drag"|"type"|"wait"|"done" + action details
+            Dict containing the planner's response, following the PlannerPlan schema:
+            {
+                "analysis": "...",
+                "goal": "...",
+                "action": { "action": "click"|"drag"|..., ... },
+                "tool_calls": [ { "name": "...", "args": {...} } ]
+            }
         """
         object_list_section = ""
         if objects:

@@ -3,7 +3,7 @@ CaptchaSolver - Simplified captcha solver using LLM planning + vision tools.
 
 Flow:
 1. Grid detection - if grid found, use numbered overlay and ask planner to select
-2. General solving - let planner use detect/point tools to find targets
+2. General solving - let planner use detect/segmentation tools to find targets
 3. Drag simulation - iterative refinement with visual feedback
 
 Usage:
@@ -420,13 +420,13 @@ class CaptchaSolver:
         cv_image_path: Optional[str] = None,
     ) -> Union[CaptchaAction, List[ClickAction]]:
         """
-        General solving using planner with detect/point tools.
+        General solving using planner with detect/segmentation tools.
         """
         max_tool_calls = 5
         history: List[str] = []
         cv_path = cv_image_path or media_path
 
-        # General solving relies on detect/point/segmentation -> needs heavyweight vision stack.
+        # General solving relies on detect/segmentation -> needs heavyweight vision stack.
         attention = self._get_attention()
         
         # Run initial segmentation immediately (use static image)
@@ -470,11 +470,13 @@ class CaptchaSolver:
                     
                     if tool == "detect":
                         object_class = args.get("object_class", "target")
-                        self.debug.log(f"Tool call: detect('{object_class}')")
-                        detections = detect(attention, media_path, object_class)
+                        max_items = args.get("max_items", 10)
+                        self.debug.log(f"Tool call: detect('{object_class}', max_items={max_items})")
+                        detections = detect(attention, media_path, object_class, max_objects=max_items)
 
                         if detections:
-                            for det in detections:
+                            # Limit to max_items
+                            for det in detections[:max_items]:
                                 bbox = det["bbox"]
                                 collected_actions.append(
                                     ClickAction(
@@ -488,19 +490,18 @@ class CaptchaSolver:
                             fallback_detections = attention.detect(media_path, object_class, max_objects=1)
                             if fallback_detections:
                                 obj = fallback_detections[0]
-                                x = (obj["x_min"] + obj["x_max"]) / 2
-                                y = (obj["y_min"] + obj["y_max"]) / 2
+                                x1, y1, x2, y2 = obj["x_min"], obj["y_min"], obj["x_max"], obj["y_max"]
                                 collected_actions.append(
                                     ClickAction(
                                         action="click",
-                                        target_coordinates=[x, y],
+                                        target_bounding_box=[x1, y1, x2, y2],
                                     )
                                 )
                             else:
                                 collected_actions.append(
                                     ClickAction(
                                         action="click",
-                                        target_coordinates=[0.5, 0.5],
+                                        target_bounding_box=[0.45, 0.45, 0.55, 0.55],
                                     )
                                 )
 
@@ -537,11 +538,11 @@ class CaptchaSolver:
                                     )
                                 )
                         else:
-                            # If not implemented or no results, fallback to center click
+                            # If not implemented or no results, fallback to center box
                             collected_actions.append(
                                 ClickAction(
                                     action="click",
-                                    target_coordinates=[0.5, 0.5],
+                                    target_bounding_box=[0.45, 0.45, 0.55, 0.55],
                                 )
                             )
 
@@ -554,25 +555,33 @@ class CaptchaSolver:
                 # If tool calls produced nothing (and no segmentation), try next iteration
                 continue
 
-            # Handle direct actions
-            action_type = result.get("action_type", "click")
+            # Handle direct actions (supports new { "action": { "action": "click", ... } } and old { "action_type": "click", ... } formats)
+            planner_action = result.get("action")
+            if not isinstance(planner_action, dict):
+                planner_action = result # Fallback to top-level if "action" is not a dict
+                
+            action_type = planner_action.get("action") or result.get("action_type")
+            if not action_type:
+                continue
+
             history.append(f"Action proposed: {action_type}")
 
             if action_type == "type":
                 return TypeAction(
                     action="type",
-                    text=result.get("text", ""),
+                    text=planner_action.get("text", ""),
                 )
 
             elif action_type == "wait":
                 return WaitAction(
                     action="wait",
-                    duration_ms=result.get("duration_ms", 500),
+                    duration_ms=planner_action.get("duration_ms", 500),
                 )
 
             elif action_type == "drag":
-                source_desc = result.get("source_description")
-                target_desc = result.get("drag_target_description") or result.get("target_description")
+                source_desc = planner_action.get("source_description") or result.get("source_description")
+                target_desc = planner_action.get("target_description") or result.get("drag_target_description") or result.get("target_description")
+                location_hint = planner_action.get("location_hint")
                 
                 # If these are Object IDs, simulate_drag will handle it via self.current_objects
                 # If they are descriptions, simulate_drag will handle it via attention.detect
@@ -583,11 +592,13 @@ class CaptchaSolver:
                     instruction,
                     source_description=source_desc,
                     primary_goal=target_desc or result.get("goal") or "Complete the drag puzzle",
+                    location_hint=location_hint,
                 )
                 return DragAction(**drag_result)
 
             elif action_type == "click":
-                target = result.get("target_description", "target")
+                target = planner_action.get("target_description") or result.get("target_description", "target")
+                max_items = planner_action.get("max_items", 1)
                 
                 # Check if target is an object ID
                 obj = self._get_object_by_id(target, current_objects)
@@ -606,18 +617,24 @@ class CaptchaSolver:
                         target_bounding_box=bbox_pct,
                     )
                 else:
-                    detections = attention.detect(media_path, target, max_objects=1)
+                    detections = attention.detect(media_path, target, max_objects=max_items)
                     if detections:
-                        obj = detections[0]
-                        x = (obj["x_min"] + obj["x_max"]) / 2
-                        y = (obj["y_min"] + obj["y_max"]) / 2
+                        actions = []
+                        for obj in detections:
+                            # Normalize detections[0] (attention.detect returns x_min, y_min, x_max, y_max)
+                            bbox_pct = [obj["x_min"], obj["y_min"], obj["x_max"], obj["y_max"]]
+                            actions.append(ClickAction(
+                                action="click",
+                                target_bounding_box=bbox_pct,
+                            ))
+                        if len(actions) == 1:
+                            return actions[0]
+                        return actions
                     else:
-                        x, y = 0.5, 0.5
-                    
-                    return ClickAction(
-                        action="click",
-                        target_coordinates=[x, y],
-                    )
+                        return ClickAction(
+                            action="click",
+                            target_bounding_box=[0.45, 0.45, 0.55, 0.55],
+                        )
 
             elif action_type == "done":
                 return DoneAction(action="done")

@@ -10,7 +10,7 @@ def simulate_drag(
     solver,
     media_path: str,
     instruction: str,
-    source_description: Union[str, List[float]],
+    source_description: str,
     primary_goal: str,
     max_iterations: int = 5,
     source_bbox_override: Optional[List[float]] = None,
@@ -30,26 +30,6 @@ def simulate_drag(
         source_bbox_px = source_bbox_override
         source_x = (source_bbox_px[0] + source_bbox_px[2]) / 2 / img_w
         source_y = (source_bbox_px[1] + source_bbox_px[3]) / 2 / img_h
-    elif isinstance(source_desc, (list, tuple)) and len(source_desc) >= 2:
-        # Handle coordinates [x, y] or [x1, y1, x2, y2]
-        if len(source_desc) >= 4:
-            source_bbox_px = [
-                source_desc[0] * img_w,
-                source_desc[1] * img_h,
-                source_desc[2] * img_w,
-                source_desc[3] * img_h
-            ]
-            source_x = (source_desc[0] + source_desc[2]) / 2
-            source_y = (source_desc[1] + source_desc[3]) / 2
-        else:
-            source_x, source_y = source_desc[0], source_desc[1]
-            box_size_pct = 0.05
-            source_bbox_px = [
-                (source_x - box_size_pct/2) * img_w,
-                (source_y - box_size_pct/2) * img_h,
-                (source_x + box_size_pct/2) * img_w,
-                (source_y + box_size_pct/2) * img_h
-            ]
     else:
         # Check if source_desc is an Object ID (e.g. "Object 4")
         import re
@@ -73,13 +53,14 @@ def simulate_drag(
             detections = attention.detect(media_path, str(source_desc), max_objects=1)
             if detections:
                 obj = detections[0]
-                source_x = (obj["x_min"] + obj["x_max"]) / 2
-                source_y = (obj["y_min"] + obj["y_max"]) / 2
+                source_bbox_pct = obj["bbox"] # [x_min, y_min, x_max, y_max]
+                source_x = (source_bbox_pct[0] + source_bbox_pct[2]) / 2
+                source_y = (source_bbox_pct[1] + source_bbox_pct[3]) / 2
                 source_bbox_px = [
-                    obj["x_min"] * img_w,
-                    obj["y_min"] * img_h,
-                    obj["x_max"] * img_w,
-                    obj["y_max"] * img_h
+                    source_bbox_pct[0] * img_w,
+                    source_bbox_pct[1] * img_h,
+                    source_bbox_pct[2] * img_w,
+                    source_bbox_pct[3] * img_h
                 ]
             else:
                 source_x, source_y = 0.5, 0.5
@@ -91,7 +72,6 @@ def simulate_drag(
                     (source_y + box_size/2) * img_h
                 ]
 
-    source_coords = [source_x, source_y]
 
     # 2. Initial target estimate
     if location_hint and len(location_hint) >= 2:
@@ -121,7 +101,8 @@ def simulate_drag(
             detections = attention.detect(media_path, str(t_desc), max_objects=1)
             if detections:
                 obj = detections[0]
-                target_x, target_y = (obj["x_min"] + obj["x_max"]) / 2, (obj["y_min"] + obj["y_max"]) / 2
+                target_bbox_pct = obj["bbox"]
+                target_x, target_y = (target_bbox_pct[0] + target_bbox_pct[2]) / 2, (target_bbox_pct[1] + target_bbox_pct[3]) / 2
             else:
                 target_x, target_y = 0.5, 0.5
     else:
