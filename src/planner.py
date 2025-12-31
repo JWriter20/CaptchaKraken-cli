@@ -19,10 +19,18 @@ from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 # Import planner types for documentation/type hinting
 try:
-    from .planner_types import PlannerPlan
+    from .planner_types import (
+        PlannerPlan, 
+        PlannerDragRefineAction,
+        PlannerClickAction,
+        PlannerTypeAction
+    )
 except ImportError:
     # Fallback if types file is missing or in different environment
     PlannerPlan = Any  # type: ignore
+    PlannerDragRefineAction = Any  # type: ignore
+    PlannerClickAction = Any  # type: ignore
+    PlannerTypeAction = Any  # type: ignore
 
 # Timing helper (opt-in via CAPTCHA_TIMINGS=1)
 from .timing import timed
@@ -64,7 +72,9 @@ Direct Actions:
    - location_hint: Optional rough [x, y] destination.
 3. {{ "action": "type", "text": "...", "target_description": "ID or desc" }}
 4. {{ "action": "wait", "duration_ms": 500 }}
-5. {{ "action": "done" }}
+5. {{ "action": "refine_drag", "decision": "accept"|"adjust", "dx": N, "dy": N, "goal": "..." }}
+   - Use this for iterative refinement of a drag (usually via simulate_drag).
+6. {{ "action": "done" }}
 
 Tool Calls (Use only if direct actions are insufficient):
 1. detect(object_class, max_items) - Find specific objects.
@@ -86,9 +96,15 @@ Look carefully at each character, accounting for distortion, rotation, and noise
 Typically, these captchas contain exactly 6 characters.
 Only respond with more than 6 or fewer than 6 characters if you are confident that the captcha clearly shows more or fewer characters.
 
-Respond ONLY with JSON:
+Respond ONLY with JSON matching this structure:
 {{
-  "text": "the text to type"
+  "analysis": "Brief reasoning",
+  "goal": "Type the text",
+  "action": {{
+    "action": "type",
+    "text": "the text identified",
+    "target_description": "text input field"
+  }}
 }}"""
 
 
@@ -98,10 +114,14 @@ Instruction: "{instruction}"
 Grid: {rows}x{cols} ({total} cells)
 {grid_hint}
 
-Respond ONLY with JSON:
+Respond ONLY with JSON matching this structure:
 {{
   "analysis": "Briefly describe which cells contain the target objects",
-  "selected_numbers": [list of integers (1-{total})]
+  "goal": "Select all correct tiles",
+  "action": {{
+    "action": "click",
+    "target_ids": [list of cell numbers (1-{total})]
+  }}
 }}"""
 
 
@@ -144,6 +164,8 @@ Make SMALL adjustments (typically 1-5%). We can refine iteratively.
 Respond ONLY with JSON:
 {{
   "analysis": "Specific critique of vertical/horizontal alignment and edge connectivity",
+  "goal": "{primary_goal}",
+  "action": "refine_drag",
   "decision": "accept" | "adjust",
   "dx": 0.0,
   "dy": 0.0
@@ -399,13 +421,7 @@ class ActionPlanner:
             context_image_path: Optional path to a static image with overlays/labels
 
         Returns:
-            Dict containing the planner's response, following the PlannerPlan schema:
-            {
-                "analysis": "...",
-                "goal": "...",
-                "action": { "action": "click"|"drag"|..., ... },
-                "tool_calls": [ { "name": "...", "args": {...} } ]
-            }
+            Dict containing the planner's response, following the PlannerPlan schema.
         """
         object_list_section = ""
         if objects:
@@ -435,7 +451,17 @@ class ActionPlanner:
             prompt += "\n\nNOTE: Multiple images/media provided. The first item is the raw captcha (could be video), the second is a static frame with red boxes and Object IDs for reference."
 
         response, _ = self._chat_with_image(prompt, images)
-        return self._parse_json(response)
+        data = self._parse_json(response)
+        
+        # Validation if Pydantic is available
+        if PlannerPlan is not Any:
+            try:
+                # We return dict for compatibility but ensure it matches the schema
+                PlannerPlan.model_validate(data)
+            except Exception as e:
+                self._log(f"Planner response validation failed: {e}")
+                
+        return data
 
     # ------------------------------------------------------------------
     # Drag refinement
@@ -464,12 +490,7 @@ class ActionPlanner:
             primary_goal: The specific goal identified by the planner
 
         Returns:
-            {
-                "analysis": "assessment of current position",
-                "decision": "accept" | "adjust",
-                "dx": float,  # relative adjustment (-1 to 1)
-                "dy": float   # relative adjustment (-1 to 1)
-            }
+            Dict following the PlannerDragRefineAction schema.
         """
         # Format history for context
         if history:
@@ -500,9 +521,18 @@ class ActionPlanner:
         response, _ = self._chat_with_image(prompt, image_path)
         result = self._parse_json(response)
 
-        # Ensure we have valid adjustment values
+        # Validation
+        if PlannerDragRefineAction is not Any:
+            try:
+                PlannerDragRefineAction.model_validate(result)
+            except Exception as e:
+                self._log(f"Drag refinement validation failed: {e}")
+
+        # Ensure we have valid adjustment values and return compatible dict
         return {
             "analysis": result.get("analysis", ""),
+            "goal": result.get("goal", primary_goal),
+            "action": "refine_drag",
             "decision": result.get("decision", "accept"),
             "dx": float(result.get("dx", 0)),
             "dy": float(result.get("dy", 0)),
@@ -520,8 +550,17 @@ class ActionPlanner:
             The text to type
         """
         response, _ = self._chat_with_image(TEXT_READ_PROMPT, image_path)
-        result = self._parse_json(response)
-        return result.get("text", "")
+        data = self._parse_json(response)
+        
+        # Validation
+        if PlannerPlan is not Any:
+            try:
+                PlannerPlan.model_validate(data)
+            except Exception as e:
+                self._log(f"Text reading validation failed: {e}")
+                
+        action = data.get("action", {})
+        return action.get("text", "")
 
     # ------------------------------------------------------------------
     # Grid Selection
@@ -552,12 +591,20 @@ class ActionPlanner:
         )
         
         response, _ = self._chat_with_image(prompt, image_path)
-        result = self._parse_json(response)
+        data = self._parse_json(response)
+        
+        # Validation
+        if PlannerPlan is not Any:
+            try:
+                PlannerPlan.model_validate(data)
+            except Exception as e:
+                self._log(f"Grid selection validation failed: {e}")
 
-        selected = result.get("selected_numbers", [])
+        action = data.get("action", {})
+        selected = action.get("target_ids", [])
         
         # Log model analysis (if present)
-        self._log(f"Analysis: {result.get('analysis', 'N/A')}")
+        self._log(f"Analysis: {data.get('analysis', 'N/A')}")
         self._log(f"Final selection: {selected}")
 
         return selected
