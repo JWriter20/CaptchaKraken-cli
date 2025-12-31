@@ -80,6 +80,12 @@ Tool Calls (Use only if direct actions are insufficient):
 1. detect(object_class, max_items) - Find specific objects.
 2. simulate_drag(source, target_hint, location_hint) - Precise iterative drag refinement.
 
+When to use direct actions vs tool calls:
+- Use direct drags when the start and end destinations are both able to be clearly described, and the drag doesn't require exact visual alignment.
+- Use a direct click when you can describe the object(s) to click without there being other similar objects that could be mistakenly selected.
+- Use detect when there are mutliple of the same object and we only want to select one.
+- Use simulate_drag when the drag requires exact visual alignment or when the drag destination cannot be clearly described (missing gaps, etc.)
+
 Respond ONLY with JSON:
 {{
   "analysis": "Brief reasoning",
