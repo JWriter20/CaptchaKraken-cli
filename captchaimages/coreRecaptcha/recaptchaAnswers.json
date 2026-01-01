@@ -47,7 +47,7 @@
     ]
   },
   "recaptchaImages.png": {
-    "reasoning": "We need to identify and return the squares containing traffic lights. Tile 2 contains a traffic light facing the viewer. Tile 6 contains another traffic light. Tile 9 shows a traffic light from a distance. Based on the required/optional split, 2 and 6 are clear matches.",
+    "reasoning": "We need to identify and return the squares containing Cars. Tile 2 contains a traffic light facing the viewer. Tile 6 contains another traffic light. Tile 9 shows a traffic light from a distance. Based on the required/optional split, 2 and 6 are clear matches.",
     "selectedCells": [],
     "required": [
       2,

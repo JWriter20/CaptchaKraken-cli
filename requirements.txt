@@ -11,10 +11,12 @@ requests>=2.31.0       # For OpenRouter and other HTTP APIs
 
 # Vision models (SAM3, CLIP, FastSAM)
 torch>=2.4.0
-transformers>=4.48.0
+# SAM3 requires the latest development version of transformers
+transformers @ git+https://github.com/huggingface/transformers.git
 timm>=1.0.0
 accelerate>=0.30.0
 ultralytics>=8.0.0     # For FastSAM
+qwen-vl-utils>=0.0.8   # For Qwen-VL vision processing
 
 # Visualization
 matplotlib>=3.7.0

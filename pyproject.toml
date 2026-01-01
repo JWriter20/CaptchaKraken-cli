@@ -17,7 +17,6 @@ dependencies = [
     "pillow>=10.0.0",
     "numpy>=1.24.0",
     "ollama>=0.3.0",
-    "google-genai>=0.4.0",
     "torch>=2.0.0",
     "transformers>=4.40.0",
     "accelerate>=0.27.0",

@@ -58,13 +58,7 @@ def get_recommended_model_config() -> Tuple[str, str, str]:
     # Allow overrides via environment variables
     force_model = os.getenv("CAPTCHA_FORCE_MODEL")
     if force_model:
-        if "q8" in force_model.lower():
-            return (
-                "Jake-Writer-Jobharvest/qwen3-vl-8b-merged-q8",
-                "Quantized (Forced)",
-                "Using forced quantized model."
-            )
-        elif "fp16" in force_model.lower() or "full" in force_model.lower():
+        if "fp16" in force_model.lower() or "full" in force_model.lower():
             return (
                 "Jake-Writer-Jobharvest/qwen3-vl-8b-merged-fp16",
                 "Full (Forced)",
@@ -80,25 +74,17 @@ def get_recommended_model_config() -> Tuple[str, str, str]:
     if (not is_mac and vram >= 22.0) or (is_mac and vram >= 32.0):
         return (
             "Jake-Writer-Jobharvest/qwen3-vl-8b-merged-fp16",
-            "Full",
+            "Full (Merged FP16)",
             "Hardware supports full precision models."
         )
 
-    # Quantized version: SAM3 (3.5) + Q8 (10) = 13.5GB
-    # Requirements: 15GB VRAM or 30GB Unified Memory
-    if (not is_mac and vram >= 15.0) or (is_mac and vram >= 30.0):
-        return (
-            "Jake-Writer-Jobharvest/qwen3-vl-8b-merged-q8",
-            "Quantized (Q8)",
-            "Hardware supports quantized models."
-        )
-
-    # Insufficient hardware
+    # Insufficient hardware for local execution of the full merged model
     return (
         "API",
         "None (Insufficient Hardware)",
-        "Insufficient hardware detected. Recommended: Get an API token at captchaKraken.com or use a cloud provider. "
-        "To force local execution anyway, set CAPTCHA_FORCE_MODEL=q8 or full."
+        "Insufficient hardware detected for local FP16 execution (22GB+ VRAM required). "
+        "Recommended: Use Ollama with test-qwen3-vl:latest for local inference. "
+        "To force local execution of the full model anyway, set CAPTCHA_FORCE_MODEL=full."
     )
 
 
@@ -121,15 +107,23 @@ def check_requirements() -> Tuple[bool, str]:
     try:
         import torch
 
-        messages.append(f"PyTorch {torch.__version__}")
+        version_msg = f"PyTorch {torch.__version__}"
+        if "rocm" in torch.__version__.lower():
+            version_msg += " (ROCm build)"
+        elif "cuda" in torch.__version__.lower():
+            version_msg += " (CUDA build)"
+        messages.append(version_msg)
 
-        # Check CUDA
-        if torch.cuda.is_available():
+        # Check GPU
+        device = get_device()
+        gpu_type = get_gpu_type()
+        
+        if device == "cuda":
             gpu_name = torch.cuda.get_device_name(0)
             gpu_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-            messages.append(f"CUDA available: {gpu_name} ({gpu_mem:.1f}GB)")
-        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            messages.append("MPS (Apple Silicon) available")
+            messages.append(f"{gpu_type} available: {gpu_name} ({gpu_mem:.1f}GB)")
+        elif device == "mps":
+            messages.append(f"{gpu_type} available")
         else:
             messages.append("No GPU detected - CPU inference will be slower")
 
@@ -166,20 +160,38 @@ def check_requirements() -> Tuple[bool, str]:
 def get_device() -> str:
     """
     Get the best available device for inference.
-
-    Returns:
-        Device string: "cuda", "mps", or "cpu"
+    Correctly detects CUDA (NVIDIA), MPS (Apple Silicon), or CPU.
     """
     try:
         import torch
 
         if torch.cuda.is_available():
+            # Check if it's actually ROCm
+            if hasattr(torch.version, "hip") and torch.version.hip is not None:
+                return "cuda" # Still use 'cuda' as device string, but we know it's ROCm/HIP
             return "cuda"
         elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
             return "mps"
     except ImportError:
         pass
     return "cpu"
+
+
+def get_gpu_type() -> str:
+    """
+    Returns a string describing the GPU type: "NVIDIA", "AMD (ROCm)", "Apple (MPS)", or "None".
+    """
+    try:
+        import torch
+        if torch.cuda.is_available():
+            if hasattr(torch.version, "hip") and torch.version.hip is not None:
+                return "AMD (ROCm)"
+            return "NVIDIA (CUDA)"
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return "Apple (MPS)"
+    except ImportError:
+        pass
+    return "None"
 
 
 if __name__ == "__main__":

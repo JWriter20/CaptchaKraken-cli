@@ -53,14 +53,13 @@ def simulate_drag(
             detections = attention.detect(media_path, str(source_desc), max_objects=1)
             if detections:
                 obj = detections[0]
-                source_bbox_pct = obj["bbox"] # [x_min, y_min, x_max, y_max]
-                source_x = (source_bbox_pct[0] + source_bbox_pct[2]) / 2
-                source_y = (source_bbox_pct[1] + source_bbox_pct[3]) / 2
+                source_x = (obj["x_min"] + obj["x_max"]) / 2
+                source_y = (obj["y_min"] + obj["y_max"]) / 2
                 source_bbox_px = [
-                    source_bbox_pct[0] * img_w,
-                    source_bbox_pct[1] * img_h,
-                    source_bbox_pct[2] * img_w,
-                    source_bbox_pct[3] * img_h
+                    obj["x_min"] * img_w,
+                    obj["y_min"] * img_h,
+                    obj["x_max"] * img_w,
+                    obj["y_max"] * img_h
                 ]
             else:
                 source_x, source_y = 0.5, 0.5
@@ -101,8 +100,7 @@ def simulate_drag(
             detections = attention.detect(media_path, str(t_desc), max_objects=1)
             if detections:
                 obj = detections[0]
-                target_bbox_pct = obj["bbox"]
-                target_x, target_y = (target_bbox_pct[0] + target_bbox_pct[2]) / 2, (target_bbox_pct[1] + target_bbox_pct[3]) / 2
+                target_x, target_y = (obj["x_min"] + obj["x_max"]) / 2, (obj["y_min"] + obj["y_max"]) / 2
             else:
                 target_x, target_y = 0.5, 0.5
     else:

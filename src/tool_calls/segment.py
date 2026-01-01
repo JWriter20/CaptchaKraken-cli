@@ -59,9 +59,9 @@ def segment(image_processor, attention_extractor, media_path: str, debug_manager
         shutil.copy2(sharpen_input, sharp_path)
 
     # 5. Segment with SAM 3
-    # Use a generic prompt to find interactable elements
+    # Use a generic prompt to find interactable elements or objects
     from PIL import Image
-    detections = attention_extractor.detect(sharp_path, "interactable button or checkbox", max_objects=20)
+    detections = attention_extractor.detect(sharp_path, "shapes", max_objects=24)
     
     with Image.open(sharp_path) as img:
         img_w, img_h = img.size

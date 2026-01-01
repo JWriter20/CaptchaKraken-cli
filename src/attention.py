@@ -254,28 +254,27 @@ class AttentionExtractor:
         import torch
         from transformers import Sam3Model, Sam3Processor
 
-        model_id = "facebook/sam3"
-        
-        # Determine local path relative to this file
-        local_dir = os.path.join(os.path.dirname(__file__), "vl_models", "sam3")
+        model_id = "Jake-Writer-Jobharvest/sam3"  # Use our mirror
+        print(f"[AttentionExtractor] Loading {model_id}...", file=sys.stderr)
 
-        # Check if local model exists, if not download and save
-        if not os.path.exists(local_dir) or not os.listdir(local_dir):
-            print(f"[AttentionExtractor] Downloading {model_id} to local repo: {local_dir}...", file=sys.stderr)
-            
-            # Download
-            processor = Sam3Processor.from_pretrained(model_id)
-            model = Sam3Model.from_pretrained(model_id)
-            
-            # Save locally
-            os.makedirs(local_dir, exist_ok=True)
-            processor.save_pretrained(local_dir)
-            model.save_pretrained(local_dir)
-            print(f"[AttentionExtractor] Saved {model_id} to {local_dir}", file=sys.stderr)
+        # Use bfloat16 for better quality if CUDA is available, otherwise float16 for MPS
+        dtype = torch.bfloat16 if self.device == "cuda" else torch.float16 if self.device == "mps" else torch.float32
 
-        print(f"[AttentionExtractor] Loading SAM 3 from {local_dir}...", file=sys.stderr)
-        self._sam3_processor = Sam3Processor.from_pretrained(local_dir)
-        self._sam3_model = Sam3Model.from_pretrained(local_dir).to(self.device)
+        # Use SDPA (Scaled Dot Product Attention) which is fast and built into PyTorch 2.0+
+        attn_impl = "sdpa"
+
+        # Force use of Sam3Processor for text prompting support
+        self._sam3_processor = Sam3Processor.from_pretrained(model_id, trust_remote_code=True)
+        self._sam3_model = Sam3Model.from_pretrained(
+            model_id, 
+            torch_dtype=dtype,
+            trust_remote_code=True,
+            device_map="auto" if self.device != "cpu" else None,
+            attn_implementation=attn_impl
+        )
+        if self.device == "cpu":
+             self._sam3_model = self._sam3_model.to("cpu")
+             
         self._sam3_model.eval()
 
         t1 = time.time()
@@ -291,20 +290,25 @@ class AttentionExtractor:
         """
         Detect all instances of object class using SAM 3.
         Supports both images and videos.
-
-        Args:
-            media_path: Path to image or video
-            object_class: What to detect (e.g., "bird", "car")
-            max_objects: Maximum objects to detect
-            max_frames: Max frames to process if video (default: 5)
-
-        Returns:
-            List of dictionaries: [{'x_min': float, 'y_min': float, 'x_max': float, 'y_max': float, 'score': float}, ...]
-            Coordinates are percentages in [0.0, 1.0].
-            For videos, returns the union-box of tracked objects across frames.
         """
-        import cv2
+        # Check for tool server
+        tool_server_url = os.getenv("CAPTCHA_TOOL_SERVER")
+        if tool_server_url:
+            import requests
+            try:
+                # Resolve absolute path for the server
+                abs_path = os.path.abspath(media_path)
+                resp = requests.post(
+                    f"{tool_server_url}/detect",
+                    json={"image_path": abs_path, "text_prompt": object_class, "max_objects": max_objects},
+                    timeout=300
+                )
+                resp.raise_for_status()
+                return resp.json().get("objects", [])
+            except Exception as e:
+                print(f"[AttentionExtractor] Tool server detect failed: {e}. Falling back to local.", file=sys.stderr)
 
+        import cv2
         t0 = time.time()
 
         # Check if media is video
@@ -405,11 +409,15 @@ class AttentionExtractor:
         inputs = self._sam3_processor(
             images=image, text=object_class, return_tensors="pt"
         ).to(self.device)
+        
         with torch.no_grad():
             outputs = self._sam3_model(**inputs)
 
         results = self._sam3_processor.post_process_instance_segmentation(
-            outputs, target_sizes=[image.size[::-1]]
+            outputs, 
+            threshold=0.5,
+            mask_threshold=0.5,
+            target_sizes=[image.size[::-1]]
         )[0]
 
         masks = results["masks"]
@@ -463,15 +471,24 @@ class AttentionExtractor:
         """
         Get segmentation masks for an object class using SAM 3.
         Supports both images and videos.
-        
-        Args:
-            media_path: Path to image or video
-            object_class: What to segment (e.g., "bird", "car")
-            max_objects: Maximum masks to return
-            
-        Returns:
-            List of binary masks (numpy arrays)
         """
+        # Check for tool server
+        tool_server_url = os.getenv("CAPTCHA_TOOL_SERVER")
+        if tool_server_url:
+            import requests
+            try:
+                abs_path = os.path.abspath(media_path)
+                resp = requests.post(
+                    f"{tool_server_url}/get_mask",
+                    json={"image_path": abs_path, "text_prompt": object_class, "max_objects": max_objects},
+                    timeout=300
+                )
+                resp.raise_for_status()
+                masks_data = resp.json().get("masks", [])
+                return [np.array(m) for m in masks_data]
+            except Exception as e:
+                print(f"[AttentionExtractor] Tool server get_mask failed: {e}. Falling back to local.", file=sys.stderr)
+
         self._load_sam3()
         import torch
         import cv2
@@ -495,6 +512,8 @@ class AttentionExtractor:
 
         results = self._sam3_processor.post_process_instance_segmentation(
             outputs,
+            threshold=0.5,
+            mask_threshold=0.5,
             target_sizes=[image.size[::-1]]
         )[0]
         

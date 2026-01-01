@@ -11,5 +11,13 @@ def detect(attention_extractor, media_path: str, object_class: str, max_objects:
         max_objects: Maximum number of objects to return
     """
     detections = attention_extractor.detect(media_path, object_class, max_objects=max_objects)
-    return detections
+    
+    # Format for the solver (package into 'bbox' key)
+    formatted = []
+    for det in detections:
+        formatted.append({
+            "bbox": [det["x_min"], det["y_min"], det["x_max"], det["y_max"]],
+            "score": det.get("score", 0.0)
+        })
+    return formatted
 
