@@ -90,29 +90,31 @@ Respond ONLY with JSON matching this structure:
 
 
 # For grid selection captchas
-SELECT_GRID_PROMPT = """Solve the captcha grid.
-First, read the instruction text from the image (usually at the top in the header).
-Then, analyze the grid cells to find matches.
+SELECT_GRID_PROMPT = """Solve the captcha grid by choosing the cells that contain the target object.
 
 Grid: {rows}x{cols} ({total} cells)
 {grid_hint}
 {instruction_context}
 
-Think step by step:
-1. Identify the target object from the header text in the image.
-2. Analyze each numbered cell.
-3. Output the final JSON.
-
-Example format:
-The header asks for "bicycles".
-Analysis of cell 1...
-...
+Return JSON format ALWAYS:
 {{
-  "analysis": "Briefly describe which cells contain the target objects",
-  "goal": "Select all correct tiles",
+  "analysis": "Think step by step and solve the captcha grid.
+    1. Identify the target object from the header text in the image.
+    2. Analyze each numbered cell.
+  "goal": "To select the target object found in the analysis section.",
   "action": {{
     "action": "click",
     "target_ids": [list of cell numbers (1-{total})]
+  }}
+}}
+
+Correct Example:
+{{
+  "analysis": "The header asks for \\"buses\\".\\ncell 1: Highway with cars.\\ncell 2: Parked car and trees.\\ncell 3: Silver pickup truck.\\ncell 4: Palm trees and building.\\ncell 5: Road and trees.\\ncell 6: Gas station sign.\\ncell 7: Red fire hydrant on grass.\\ncell 8: Underside of a bridge.\\ncell 9: Bicycle parked near a fence.\\nWe need to identify squares containing buses that have not been selected. However none of the images appear to contain buses. The user has likely already solved the captcha, meaning all required tiles have been selected and verified. There are no remaining tiles to select.",
+  "goal": "Select all tiles with buses.",
+  "action": {{
+    "action": "click",
+    "target_ids": []
   }}
 }}"""
 
