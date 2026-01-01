@@ -8,7 +8,7 @@ Supports:
 4. Text reading - OCR for text captchas
 5. Video captchas - plan actions for video captchas
 
-Backends: ollama, gemini
+Backends: ollama, gemini, openrouter, transformers
 """
 
 import json
@@ -34,6 +34,7 @@ except ImportError:
 
 # Timing helper (opt-in via CAPTCHA_TIMINGS=1)
 from .timing import timed
+from .hardware import get_recommended_model_config
 
 # Debug flag - set via CAPTCHA_DEBUG=1 environment variable
 DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
@@ -85,6 +86,8 @@ When to use direct actions vs tool calls:
 - Use a direct click when you can describe the object(s) to click without there being other similar objects that could be mistakenly selected.
 - Use detect when there are mutliple of the same object and we only want to select one.
 - Use simulate_drag when the drag requires exact visual alignment or when the drag destination cannot be clearly described (missing gaps, etc.)
+
+Important: object descriptions must be short and concise: e.g. "bottom left parrot" instead of "the parrot in the bottom left corner" or "wire mesh cube" instead of "the cube with the wire mesh texture". Generally limit yourself to 2-3 words.
 
 Respond ONLY with JSON. Include EITHER "action" OR "tool_calls" (but not both):
 {{
@@ -182,12 +185,12 @@ class ActionPlanner:
     """
     LLM-based captcha planner with tool support.
 
-    Supports backends: ollama, gemini
+    Supports backends: ollama, gemini, openrouter, transformers
     """
 
     def __init__(
         self,
-        backend: Literal["ollama", "gemini", "openrouter"] = "gemini",
+        backend: Literal["ollama", "gemini", "openrouter", "transformers"] = "transformers",
         model: Optional[str] = None,
         ollama_host: Optional[str] = None,
         gemini_api_key: Optional[str] = None,
@@ -200,6 +203,8 @@ class ActionPlanner:
         self.openrouter_key = openrouter_key or os.getenv("OPENROUTER_KEY")
         self.debug_callback = debug_callback
         self._genai_client = None
+        self._model = None
+        self._processor = None
         self.token_usage: List[Dict[str, Any]] = []
 
         # Configure Gemini if selected
@@ -222,6 +227,16 @@ class ActionPlanner:
                 self.model = "gemini-2.5-flash-lite"
             elif backend == "openrouter":
                 self.model = "google/gemini-2.0-flash-lite-preview-02-05:free"
+            elif backend == "transformers":
+                # Get recommended model based on hardware
+                rec_model, _, rec_msg = get_recommended_model_config()
+                if rec_model == "API":
+                    self._log(f"WARNING: {rec_msg}")
+                    # Default to quantized if they still want to try locally
+                    self.model = "Jake-Writer-Jobharvest/qwen3-vl-8b-merged-q8"
+                else:
+                    self._log(f"Recommended model: {rec_model} ({rec_msg})")
+                    self.model = rec_model
             else:
                 raise ValueError(f"Unknown backend: {backend}")
         else:
@@ -380,7 +395,99 @@ class ActionPlanner:
 
             return result, usage
 
-        raise ValueError(f"Unknown backend: {self.backend}")
+        if self.backend == "transformers":
+            from PIL import Image
+            import torch
+            from transformers import AutoProcessor, AutoModelForImageTextToText
+            
+            if self._model is None:
+                self._log(f"Loading transformers model: {self.model}")
+                self._processor = AutoProcessor.from_pretrained(self.model, trust_remote_code=True)
+                
+                # Determine best device
+                if torch.cuda.is_available():
+                    device = "cuda"
+                    dtype = torch.bfloat16
+                elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                    device = "mps"
+                    dtype = torch.float16 # MPS prefers float16
+                else:
+                    device = "cpu"
+                    dtype = torch.float32
+                
+                self._log(f"Using device: {device}, dtype: {dtype}")
+                
+                # Use AutoModelForImageTextToText (replaces deprecated AutoModelForVision2Seq)
+                self._model = AutoModelForImageTextToText.from_pretrained(
+                    self.model,
+                    torch_dtype=dtype,
+                    device_map="auto" if device != "cpu" else None,
+                    trust_remote_code=True
+                )
+                
+                if device == "cpu":
+                    self._model = self._model.to("cpu")
+            
+            messages = [{"role": "user", "content": []}]
+            processed_images = []
+            
+            for path in image_paths:
+                is_video = any(path.lower().endswith(ext) for ext in [".mp4", ".webm", ".gif", ".avi"])
+                if is_video:
+                    # Simple video support: sample first frame for now or implement full sampling
+                    # For captcha, often the first frame or a middle frame is enough
+                    import cv2
+                    cap = cv2.VideoCapture(path)
+                    ret, frame = cap.read()
+                    if ret:
+                        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        processed_images.append(Image.fromarray(frame_rgb))
+                        messages[0]["content"].append({"type": "image"})
+                    cap.release()
+                else:
+                    processed_images.append(Image.open(path).convert("RGB"))
+                    messages[0]["content"].append({"type": "image"})
+            
+            messages[0]["content"].append({"type": "text", "text": prompt})
+            
+            # Apply chat template if model supports it, otherwise fallback to simple prompt
+            try:
+                text = self._processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            except:
+                # Fallback for models without chat template support in processor
+                text = prompt
+            
+            inputs = self._processor(
+                text=[text],
+                images=processed_images,
+                padding=True,
+                return_tensors="pt",
+            )
+            
+            # Move inputs to model device
+            try:
+                # If using device_map, the model might not have a single device
+                target_device = next(self._model.parameters()).device
+                self._log(f"Moving inputs to {target_device}")
+                inputs = {k: v.to(target_device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
+            except Exception as e:
+                self._log(f"Error moving inputs to device: {e}")
+                # Fallback: try moving the whole thing if it's a BatchEncoding
+                inputs = inputs.to(self._model.device)
+            
+            self._log(f"Generating response with {self.model}...")
+            # We use max_new_tokens=1024 as requested
+            generated_ids = self._model.generate(**inputs, max_new_tokens=1024)
+            
+            # Extract only the newly generated tokens
+            generated_ids_trimmed = [
+                out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+            ]
+            result = self._processor.batch_decode(
+                generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+            )[0]
+            
+            return result, None
 
         raise ValueError(f"Unknown backend: {self.backend}")
 

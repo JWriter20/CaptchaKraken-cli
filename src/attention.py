@@ -9,6 +9,7 @@ Exposes:
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
@@ -254,10 +255,27 @@ class AttentionExtractor:
         from transformers import Sam3Model, Sam3Processor
 
         model_id = "facebook/sam3"
-        print(f"[AttentionExtractor] Loading {model_id}...", file=sys.stderr)
+        
+        # Determine local path relative to this file
+        local_dir = os.path.join(os.path.dirname(__file__), "vl_models", "sam3")
 
-        self._sam3_processor = Sam3Processor.from_pretrained(model_id)
-        self._sam3_model = Sam3Model.from_pretrained(model_id).to(self.device)
+        # Check if local model exists, if not download and save
+        if not os.path.exists(local_dir) or not os.listdir(local_dir):
+            print(f"[AttentionExtractor] Downloading {model_id} to local repo: {local_dir}...", file=sys.stderr)
+            
+            # Download
+            processor = Sam3Processor.from_pretrained(model_id)
+            model = Sam3Model.from_pretrained(model_id)
+            
+            # Save locally
+            os.makedirs(local_dir, exist_ok=True)
+            processor.save_pretrained(local_dir)
+            model.save_pretrained(local_dir)
+            print(f"[AttentionExtractor] Saved {model_id} to {local_dir}", file=sys.stderr)
+
+        print(f"[AttentionExtractor] Loading SAM 3 from {local_dir}...", file=sys.stderr)
+        self._sam3_processor = Sam3Processor.from_pretrained(local_dir)
+        self._sam3_model = Sam3Model.from_pretrained(local_dir).to(self.device)
         self._sam3_model.eval()
 
         t1 = time.time()
