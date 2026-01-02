@@ -90,31 +90,17 @@ Respond ONLY with JSON matching this structure:
 
 
 # For grid selection captchas
-SELECT_GRID_PROMPT = """Solve the captcha grid by choosing the cells that contain the target object.
+SELECT_GRID_PROMPT = """Solve the captcha grid by choosing the cell numbers that match the description from the captcha image prompt. 
 
 Grid: {rows}x{cols} ({total} cells)
 {grid_hint}
-{instruction_context}
 
 Return JSON format ALWAYS:
 {{
-  "analysis": "Think step by step and solve the captcha grid.
-    1. Identify the target object from the header text in the image.
-    2. Analyze each numbered cell.
   "goal": "To select the target object found in the analysis section.",
   "action": {{
     "action": "click",
     "target_ids": [list of cell numbers (1-{total})]
-  }}
-}}
-
-Correct Example:
-{{
-  "analysis": "The header asks for \\"buses\\".\\ncell 1: Highway with cars.\\ncell 2: Parked car and trees.\\ncell 3: Silver pickup truck.\\ncell 4: Palm trees and building.\\ncell 5: Road and trees.\\ncell 6: Gas station sign.\\ncell 7: Red fire hydrant on grass.\\ncell 8: Underside of a bridge.\\ncell 9: Bicycle parked near a fence.\\nWe need to identify squares containing buses that have not been selected. However none of the images appear to contain buses. The user has likely already solved the captcha, meaning all required tiles have been selected and verified. There are no remaining tiles to select.",
-  "goal": "Select all tiles with buses.",
-  "action": {{
-    "action": "click",
-    "target_ids": []
   }}
 }}"""
 
@@ -138,10 +124,6 @@ EVALUATION CRITERIA:
 2. **Horizontal Position**: Is it too far left or right?
 3. **Connectivity**: Do the lines of the object flow smoothly into the target?
 
-Evaluate this drag destination:
-1. Describe the specific visual alignment. (e.g. "The neck lines are misaligned by...", "The head is overlapping the torso...")
-2. If not perfect, what RELATIVE adjustment is needed?
-
 The image shows:
 - LIGHT GREEN box: The draggable item at its current location.
 
@@ -157,7 +139,6 @@ Make SMALL adjustments (typically 1-5%). We can refine iteratively.
 
 Respond ONLY with JSON:
 {{
-  "analysis": "Specific critique of vertical/horizontal alignment and edge connectivity",
   "goal": "{primary_goal}",
   "action": "refine_drag",
   "decision": "accept" | "adjust",
@@ -247,12 +228,13 @@ class ActionPlanner:
             from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
             from qwen_vl_utils import process_vision_info
             
+            # Get device before model initialization so it's available later
+            from .hardware import get_device
+            device = get_device()
+            
             if self._model is None:
                 self._log(f"Loading transformers model: {self.model}")
                 self._processor = AutoProcessor.from_pretrained(self.model, trust_remote_code=True)
-                
-                from .hardware import get_device
-                device = get_device()
                 
                 # Use bfloat16 for CUDA, float16 for MPS
                 dtype = torch.bfloat16 if device == "cuda" else torch.float16 if device == "mps" else torch.float32
@@ -573,15 +555,10 @@ class ActionPlanner:
         elif rows == 3 and cols == 3:
             grid_hint = "Hint: Separate images. Select only clear matches."
 
-        instruction_context = ""
-        if instruction:
-            instruction_context = f"External Instruction Context: \"{instruction}\" (Use this if the image text is unclear)"
-
         prompt = SELECT_GRID_PROMPT.format(
             rows=rows, 
             cols=cols, 
             total=total, 
-            instruction_context=instruction_context,
             grid_hint=grid_hint
         )
         

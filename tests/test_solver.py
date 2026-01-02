@@ -22,7 +22,10 @@ _SOLVER_INSTANCE = None
 def get_solver():
     global _SOLVER_INSTANCE
     if _SOLVER_INSTANCE is None:
-        _SOLVER_INSTANCE = CaptchaSolver(provider="ollama")
+        _SOLVER_INSTANCE = CaptchaSolver(
+            provider="transformers",
+            model="Jake-Writer-Jobharvest/qwen3-vl-8b-merged-fp16"
+        )
     return _SOLVER_INSTANCE
 
 def setup_module(module):
@@ -145,7 +148,7 @@ def test_3x3_recaptcha():
     image_path = "captchaimages/coreRecaptcha/recaptchaImages.png"
     label_grid_manually(image_path, "manual_label_3x3.png")
     
-    instruction = "Select all images with traffic lights"
+    instruction = "Select all images with cars"
     run_solver_test(image_path, instruction, "3x3_recaptcha")
 
 def test_4x4_recaptcha():
