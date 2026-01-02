@@ -208,7 +208,6 @@ def simulate_drag(
 
             history.append({
                 "destination": current_target.copy(),
-                "analysis": result.get("analysis", ""),
                 "decision": decision,
             })
 

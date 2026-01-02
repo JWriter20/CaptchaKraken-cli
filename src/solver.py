@@ -441,9 +441,6 @@ class CaptchaSolver:
             )
             self.debug.log(f"Planner Result: {result}")
 
-            # Log analysis
-            if "analysis" in result:
-                self.debug.log(f"Analysis: {result['analysis']}")
             if "goal" in result:
                 self.debug.log(f"Goal: {result['goal']}")
 

@@ -61,10 +61,9 @@ Tool Calls:
 - detect(object_class, max_items)
 - simulate_drag(source, target_hint, location_hint)
 
-Important: Respond ONLY with JSON. Limit analysis to 1 sentence.
+Important: Respond ONLY with JSON.
 Example Click:
 {{
-  "analysis": "Brief reasoning",
   "goal": "Visual goal",
   "action": {{ ... }} 
   // OR: "tool_calls": [ {{ "name": "...", "args": {{ ... }} }} ]
@@ -79,7 +78,6 @@ Typically, these captchas contain exactly 6 characters.
 
 Respond ONLY with JSON matching this structure:
 {{
-  "analysis": "Brief reasoning",
   "goal": "Type the text",
   "action": {{
     "action": "type",
@@ -97,7 +95,7 @@ Grid: {rows}x{cols} ({total} cells)
 
 Return JSON format ALWAYS:
 {{
-  "goal": "To select the target object found in the analysis section.",
+  "goal": "To select the target objects.",
   "action": {{
     "action": "click",
     "target_ids": [list of cell numbers (1-{total})]
@@ -256,7 +254,7 @@ class ActionPlanner:
             messages = [
                 {
                     "role": "system",
-                    "content": "You are an expert captcha solver. Think carefully about the visual cues. Respond with your reasoning followed by the JSON action."
+                    "content": "You are an expert captcha solver. Think carefully about the visual cues. Respond ONLY with the JSON action."
                 },
                 {"role": "user", "content": []}
             ]
@@ -310,7 +308,7 @@ class ActionPlanner:
                 # Use greedy decoding and reduce tokens
                 generated_ids = self._model.generate(
                     **inputs, 
-                    max_new_tokens=1024, # Increased for thinking
+                    max_new_tokens=512, # Reduced as we no longer want analysis
                     do_sample=False,
                     use_cache=True
                 )
@@ -340,7 +338,7 @@ class ActionPlanner:
                     "model": self.model,
                     "messages": [{"role": "user", "content": prompt, "images": images_b64}],
                     "stream": False,
-                    # Removed "format": "json" to allow thinking tags/reasoning
+                    "format": "json"
                 },
                 timeout=120
             )
@@ -400,7 +398,7 @@ class ActionPlanner:
             lines = ["Detected Objects (ID: box [x, y, w, h]):"]
             for obj in sorted(objects, key=lambda x: x.get("id", 0)):
                 lines.append(f"- Object {obj.get('id')}: {obj.get('bbox')}")
-            lines.append("\\nUse these Object IDs in your analysis.")
+            lines.append("\\nUse these Object IDs in your response.")
             object_list_section = "\\n".join(lines)
 
         history_section = ""
@@ -456,7 +454,7 @@ class ActionPlanner:
             instruction: Original puzzle instruction
             current_target: Current target position [x, y] as percentages (0-1)
             history: List of previous refinements:
-                [{"destination": [x, y], "analysis": "...", "decision": "..."}]
+                [{"destination": [x, y], "decision": "..."}]
             source_description: Description of the item being dragged
             target_description: Description of where it should go
             primary_goal: The specific goal identified by the planner
@@ -469,11 +467,10 @@ class ActionPlanner:
             history_lines = ["Previous attempts:"]
             for i, h in enumerate(history):
                 dest = h.get("destination", [0, 0])
-                analysis = h.get("analysis", "")
                 decision = h.get("decision", "")
                 history_lines.append(
                     f"  {i + 1}. destination: ({dest[0]:.1%}, {dest[1]:.1%}), "
-                    f'analysis: "{analysis}", decision: {decision}'
+                    f'decision: {decision}'
                 )
             history_lines.append(f"  {len(history) + 1}. destination: ({current_target[0]:.1%}, {current_target[1]:.1%}) (CURRENT)")
             history_text = "\n".join(history_lines)
@@ -502,7 +499,6 @@ class ActionPlanner:
 
         # Ensure we have valid adjustment values and return compatible dict
         return {
-            "analysis": result.get("analysis", ""),
             "goal": result.get("goal", primary_goal),
             "action": "refine_drag",
             "decision": result.get("decision", "accept"),
@@ -575,8 +571,7 @@ class ActionPlanner:
         action = data.get("action", {})
         selected = action.get("target_ids", [])
         
-        # Log model analysis (if present)
-        self._log(f"Analysis: {data.get('analysis', 'N/A')}")
+        # Log final selection
         self._log(f"Final selection: {selected}")
 
         return selected
