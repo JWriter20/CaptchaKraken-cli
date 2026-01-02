@@ -95,7 +95,7 @@ Grid: {rows}x{cols} ({total} cells)
 
 Return JSON format ALWAYS:
 {{
-  "goal": "To select the target objects.",
+  "goal": "Brief description of what needs to be done to solve the captcha.",
   "action": {{
     "action": "click",
     "target_ids": [list of cell numbers (1-{total})]
