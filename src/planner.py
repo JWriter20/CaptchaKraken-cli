@@ -94,6 +94,8 @@ SELECT_GRID_PROMPT = """Solve the captcha grid by choosing the cell numbers that
 Grid: {rows}x{cols} ({total} cells)
 {grid_hint}
 
+IMPORTANT: If no tiles match the description (e.g., they have all been cleared or none were present), return an empty list for target_ids: [].
+
 Return JSON format ALWAYS:
 {{
   "goal": "Brief description of what needs to be done to solve the captcha.",
@@ -548,7 +550,7 @@ class ActionPlanner:
 
         grid_hint = ""
         if rows == 4 and cols == 4:
-            grid_hint = "Hint: Single large image split into tiles. Select ALL parts."
+            grid_hint = "Hint: Select all tiles that make up the object in the image, even if a tile only has a small part of the object."
         elif rows == 3 and cols == 3:
             grid_hint = "Hint: Separate images. Select only clear matches."
 
