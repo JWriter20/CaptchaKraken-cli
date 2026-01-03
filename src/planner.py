@@ -89,7 +89,7 @@ Respond ONLY with JSON matching this structure:
 
 
 # For grid selection captchas
-SELECT_GRID_PROMPT = """Solve the captcha grid by choosing the cell numbers that match the description from the captcha image prompt, and that have not been selected yet. You can tell if a cell has been selected by looking for a (usually) blue checkmark in the top-left corner or center of a cell.
+SELECT_GRID_PROMPT = """Solve the captcha grid by choosing the cell numbers that match the description from the captcha image prompt.
 
 Grid: {rows}x{cols} ({total} cells)
 {grid_hint}
