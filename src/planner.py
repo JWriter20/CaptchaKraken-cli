@@ -51,7 +51,8 @@ PLAN_WITH_TOOLS_PROMPT = """Solve the captcha using ONE direct action or ONE too
 {history_section}
 
 Direct Actions:
-- {{ "action": "click", "target_description": "...", "max_items": N }} (Use plural for multiple items)
+- {{ "action": "click", "target_description": "...", "max_items": N }}
+- {{ "action": "click", "target_ids": [list of item or cell ids], "max_items": N }} 
 - {{ "action": "drag", "source_description": "...", "target_description": "...", "location_hint": [x, y] }}
 - {{ "action": "type", "text": "...", "target_description": "..." }}
 - {{ "action": "wait", "duration_ms": 500 }}
@@ -88,7 +89,7 @@ Respond ONLY with JSON matching this structure:
 
 
 # For grid selection captchas
-SELECT_GRID_PROMPT = """Solve the captcha grid by choosing the cell numbers that match the description from the captcha image prompt. 
+SELECT_GRID_PROMPT = """Solve the captcha grid by choosing the cell numbers that match the description from the captcha image prompt, and that have not been selected yet. You can tell if a cell has been selected by looking for a (usually) blue checkmark in the top-left corner or center of a cell.
 
 Grid: {rows}x{cols} ({total} cells)
 {grid_hint}
