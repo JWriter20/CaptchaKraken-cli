@@ -62,6 +62,8 @@ Tool Calls:
 - detect(object_class, max_items)
 - simulate_drag(source, location_hint) (source=accurate description of the SMALL movable item)
 
+CRITICAL: If multiple similar objects exist (e.g., three strawberries), you MUST specify which one you are targeting in the "goal" and "target_description" fields using spatial descriptors (e.g., "the strawberry on the far right", "the leftmost bus").
+
 Important: Respond ONLY with JSON. Ensure "max_items" reflects the total number of targets requested in the instruction. For simulate_drag, source MUST be the movable object description. AVOID using the full instruction as a source description.
 Example Click:
 {{
@@ -79,7 +81,7 @@ Typically, these captchas contain exactly 6 characters.
 
 Respond ONLY with JSON matching this structure:
 {{
-  "goal": "Type the text",
+  "goal": "Type the identified text",
   "action": {{
     "action": "type",
     "text": "the text identified",
@@ -117,8 +119,13 @@ Primary Goal: {primary_goal}
 Object to Move: "{source_desc}"
 Target Destination: "{target_desc}"
 
-CRITICAL: The destination must be DISTINCT from the source. You are never dragging something to itself.
-The draggable item is marked with a LIGHT GREEN box (drawn with padding around the item).
+{iteration_hint}
+
+CRITICAL: 
+1. The destination must be DISTINCT from the source. You are never dragging something to itself.
+2. If multiple potential target objects exist (e.g. multiple strawberries), you MUST SPECIFY which one you are targeting in the "goal" field using spatial descriptors (e.g. "drag the bee to the strawberry on the far left", "align with the bottom-most slot").
+
+The draggable item is marked with a LIGHT GREEN box.
 
 EVALUATION CRITERIA:
 1. **Vertical Position**: Is the object too high or too low? (e.g. Is the head on the stomach? It should be on the neck.)
@@ -133,14 +140,14 @@ Current destination: ({target_x:.1%}, {target_y:.1%})
 {history_text}
 
 Provide adjustments as percentages of image size:
-- dx: positive = move right, negative = move left (e.g., 0.05 = 5% right)
-- dy: positive = move down, negative = move up (e.g., -0.02 = 2% up)
+- dx: positive = move right, negative = move left (e.g., 0.15 = 15% right)
+- dy: positive = move down, negative = move up (e.g., -0.20 = 20% up)
 
-Make SMALL adjustments (typically 1-5%). We can refine iteratively.
+{movement_instruction}
 
 Respond ONLY with JSON:
 {{
-  "goal": "{primary_goal}",
+  "goal": "SPECIFIC GOAL (e.g. drag the bee to the leftmost strawberry)",
   "action": "refine_drag",
   "decision": "accept" | "adjust",
   "dx": 0.0,
@@ -335,12 +342,12 @@ class ActionPlanner:
             if self._model is None:
                 self._log(f"Loading vLLM model: {self.model}")
                 # Default to 0.65 to allow SAM 3 to coexist on 32GB cards
-                gpu_memory_utilization = float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.65"))
+                gpu_memory_utilization = float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.6"))
                 
                 self._model = LLM(
                     model=self.model,
                     trust_remote_code=True,
-                    max_model_len=4096,
+                    max_model_len=8192,
                     gpu_memory_utilization=gpu_memory_utilization,
                     **self.config
                 )
@@ -473,12 +480,13 @@ class ActionPlanner:
         source_description: str = "movable item",
         target_description: str = "matching slot",
         primary_goal: str = "Complete the puzzle",
+        iteration: int = 0,
     ) -> Dict[str, Any]:
         """
         Refine a drag destination with visual feedback.
 
         Args:
-            image_path: Path to image with drag overlay (source box, arrow, target box)
+            image_path: Path to image with drag overlay (item to move marked with green box)
             instruction: Original puzzle instruction
             current_target: Current target position [x, y] as percentages (0-1)
             history: List of previous refinements:
@@ -486,6 +494,7 @@ class ActionPlanner:
             source_description: Description of the item being dragged
             target_description: Description of where it should go
             primary_goal: The specific goal identified by the planner
+            iteration: Current refinement iteration (0 = first attempt)
 
         Returns:
             Dict following the PlannerDragRefineAction schema.
@@ -505,6 +514,13 @@ class ActionPlanner:
         else:
             history_text = "This is the first attempt."
 
+        if iteration == 0:
+            iteration_hint = "This is the INITIAL estimation step."
+            movement_instruction = "Estimate the TOTAL distance needed to reach the target and provide it as dx and dy. We will refine if needed, but aim to reach the target in one step."
+        else:
+            iteration_hint = f"This is refinement step #{iteration}. We have moved the object but it needs fine-tuning."
+            movement_instruction = "Make precise, SMALL adjustments (1-5%) to perfectly align the object. Focus on connectivity and alignment."
+
         prompt = DRAG_REFINE_PROMPT.format(
             instruction=instruction or "Complete the drag puzzle.",
             primary_goal=primary_goal,
@@ -513,6 +529,8 @@ class ActionPlanner:
             target_x=current_target[0],
             target_y=current_target[1],
             history_text=history_text,
+            iteration_hint=iteration_hint,
+            movement_instruction=movement_instruction,
         )
 
         response, _ = self._chat_with_image(prompt, image_path)

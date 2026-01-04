@@ -195,6 +195,6 @@ def test_hcaptcha_video_webm():
 
 if __name__ == "__main__":
     # Ensure setup is called if running directly
-    # test_hcaptcha_drag_images_3()
-    setup_module(None)
-    pytest.main([__file__, "-s"])
+    test_hcaptcha_drag_images_3()
+    # setup_module(None)
+    # pytest.main([__file__, "-s"])

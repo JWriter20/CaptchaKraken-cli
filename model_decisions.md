@@ -71,4 +71,4 @@ We have removed the `target_hint` parameter from `simulate_drag`. The model now 
 - **Reasoning**: The model identifies the central cell as the target for the video's instruction.
 
 ---
-*Note: All tests were run using vLLM with `gpu_memory_utilization=0.65` and SAM 3 for high-accuracy grounding/segmentation.*
+*Note: All tests were run using vLLM with `gpu_memory_utilization=0.6` and SAM 3 for high-accuracy grounding/segmentation.*

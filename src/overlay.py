@@ -452,14 +452,8 @@ def add_drag_overlay(
         if show_grid:
             draw_grid_overlay(draw, background.size, step=0.1)
             
-        # RED DASHED BOX around source (original)
-        draw_enhanced_bounding_box(draw, [x1, y1, x2, y2], text="Source", color="#FF0000", box_style="dashed", image_size=background.size)
-        
         # GREEN SOLID BOX around target (current)
-        draw_enhanced_bounding_box(draw, [paste_x, paste_y, paste_x + cw, paste_y + ch], text="Target", color="#00FF00", box_style="solid", image_size=background.size)
-        
-        # RED ARROW from source center to target center
-        draw_arrow(draw, ((x1 + x2) / 2, (y1 + y2) / 2), (tx, ty), color="#FF0000", width=4)
+        draw_enhanced_bounding_box(draw, [paste_x, paste_y, paste_x + cw, paste_y + ch], text=None, color="#00FF00", box_style="solid", image_size=background.size)
 
         background = background.convert("RGB")
         background.save(image_path)

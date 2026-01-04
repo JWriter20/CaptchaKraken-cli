@@ -189,12 +189,19 @@ def simulate_drag(
                 source_description=source_desc,
                 target_description=primary_goal, # Use the clean target description
                 primary_goal=primary_goal,
+                iteration=i,
             )
 
             decision = result.get("decision", "accept")
             dx, dy = result.get("dx", 0.0), result.get("dy", 0.0)
 
-            max_step = 0.05
+            # Adaptive max_step: Allow large initial move, then force refinement
+            if i == 0:
+                max_step = 0.5  # Up to 50% for initial estimation
+            else:
+                # Decrease max_step as we iterate to force smaller refinements
+                max_step = max(0.02, 0.15 / (i + 1))
+            
             dx = math.copysign(min(abs(dx), max_step), dx)
             dy = math.copysign(min(abs(dy), max_step), dy)
 

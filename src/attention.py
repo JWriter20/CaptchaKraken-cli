@@ -132,6 +132,37 @@ def clusterDetections(
     return merged
 
 
+def filterDetections(detection: Dict[str, Any]) -> bool:
+    """
+    Predicate to filter out detections that are likely not the target objects
+    based on size and aspect ratio.
+
+    Criteria:
+    - Area < 25% of the image
+    - Aspect ratio: width/height and height/width < 2.5
+    """
+    x_min = detection.get("x_min", 0)
+    y_min = detection.get("y_min", 0)
+    x_max = detection.get("x_max", 1)
+    y_max = detection.get("y_max", 1)
+
+    width = x_max - x_min
+    height = y_max - y_min
+    area = width * height
+
+    # Filter out if area > 25% of image
+    if area > 0.25:
+        return False
+
+    # Filter out if aspect ratio is too extreme
+    if height > 0 and width / height > 2.5:
+        return False
+    if width > 0 and height / width > 2.5:
+        return False
+
+    return True
+
+
 class SimpleTracker:
     """Simple centroid tracker to maintain object ID consistency across frames."""
 
@@ -401,7 +432,12 @@ class AttentionExtractor:
                 "y_max": max(d["y_max"] for d in path),
                 "score": sum(d["score"] for d in path) / len(path),
             }
-            final_detections.append(union_box)
+            if filterDetections(union_box):
+                final_detections.append(union_box)
+
+        # Sort by score descending and limit to max_objects
+        final_detections.sort(key=lambda x: x.get("score", 0), reverse=True)
+        final_detections = final_detections[:max_objects]
 
         t1 = time.time()
         print(
@@ -462,6 +498,12 @@ class AttentionExtractor:
 
         # Merge overlapping detections
         objects = clusterDetections(objects, iou_threshold=0.4, distance_threshold=0.1)
+
+        # Filter detections by size and aspect ratio
+        objects = [obj for obj in objects if filterDetections(obj)]
+
+        # Re-sort by score descending after clustering/filtering
+        objects.sort(key=lambda x: x.get("score", 0), reverse=True)
 
         # Now slice by max_objects
         return objects[:max_objects]
