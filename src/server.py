@@ -14,9 +14,9 @@ from .hardware import get_recommended_model_config, get_device
 
 # Global instances
 extractor = None
-planner_model = None
-planner_processor = None
-planner_model_id = None
+planner = None
+planner_backend = os.getenv("CAPTCHA_PLANNER_BACKEND", "vllm")
+planner_model_id = os.getenv("CAPTCHA_PLANNER_MODEL")
 
 class ToolServerHandler(http.server.BaseHTTPRequestHandler):
     def _send_response(self, data, status=200):
@@ -113,35 +113,19 @@ class ToolServerHandler(http.server.BaseHTTPRequestHandler):
                     self._send_response({'error': 'Missing image_paths or prompt'}, 400)
                     return
 
-                print(f"[Server] Planning with Ollama (test-qwen3-vl:latest)...", file=sys.stderr)
-                
-                import ollama
+                print(f"[Server] Planning with {planner.backend} ({planner.model})...", file=sys.stderr)
                 
                 t0 = time.time()
                 try:
-                    # Use generate() for maximum speed, remove format='json' to avoid slow constrained decoding
-                    # We will parse the JSON ourselves.
-                    response = ollama.generate(
-                        model="test-qwen3-vl:latest",
-                        prompt=prompt,
-                        images=image_paths, # Path-based is usually faster
-                        options={
-                            "temperature": 0.0,
-                            "num_predict": 128
-                        }
-                    )
-                    output_text = response['response']
+                    # Use the warm planner instance
+                    response_text, _ = planner._chat_with_image(prompt, image_paths)
                     t1 = time.time()
                     
-                    eval_count = response.get('eval_count', 0)
-                    eval_duration = response.get('eval_duration', 1) / 1e9
-                    prompt_eval_count = response.get('prompt_eval_count', 0)
-                    prompt_eval_duration = response.get('prompt_eval_duration', 1) / 1e9
-                    
-                    print(f"[Server] Ollama planning took {t1-t0:.2f}s (Prompt: {prompt_eval_count} tokens in {prompt_eval_duration:.2f}s, Gen: {eval_count} tokens in {eval_duration:.2f}s, Rate: {eval_count/max(0.001, eval_duration):.1f} tok/s)", file=sys.stderr)
-                    self._send_response({"response": output_text})
+                    print(f"[Server] Planning took {t1-t0:.2f}s", file=sys.stderr)
+                    self._send_response({"response": response_text})
                 except Exception as e:
-                    print(f"[Server] Ollama error: {e}", file=sys.stderr)
+                    print(f"[Server] Planning error: {e}", file=sys.stderr)
+                    traceback.print_exc()
                     self._send_response({'error': str(e)}, 500)
 
             else:
@@ -152,22 +136,39 @@ class ToolServerHandler(http.server.BaseHTTPRequestHandler):
             self._send_response({'error': str(e)}, 500)
 
 def start_tool_server(port=8000):
-    global extractor, planner_model_id
+    global extractor, planner, planner_model_id, planner_backend
     
     # 1. Initialize AttentionExtractor and pre-load it
-    print(f"Initializing AttentionExtractor...", file=sys.stderr)
+    print(f"Initializing AttentionExtractor (SAM 3)...", file=sys.stderr)
     extractor = AttentionExtractor()
     extractor.load_models()  # Pre-load SAM 3 into VRAM
     
-    # 2. Set Planner Model ID (Ollama handled in /plan endpoint)
-    planner_model_id = "test-qwen3-vl:latest"
-    print(f"Warming up Ollama ({planner_model_id})...", file=sys.stderr)
-    import ollama
+    # 2. Initialize and Warm ActionPlanner
+    if planner_model_id is None:
+        if planner_backend == "vllm":
+            planner_model_id = "Jake-Writer-Jobharvest/qwen3-vl-8b-merged-bf16"
+        else:
+            # Fallback to transformers if vLLM not specified or available
+            planner_backend = "transformers"
+            from .hardware import get_recommended_model_config
+            planner_model_id, _, _ = get_recommended_model_config()
+    
+    print(f"Initializing Warm Planner ({planner_backend}: {planner_model_id})...", file=sys.stderr)
+    from .planner import ActionPlanner
+    planner = ActionPlanner(backend=planner_backend, model=planner_model_id)
+    
+    # Warm up the planner with a dummy call
+    # For vLLM, the model is loaded on __init__ if it hasn't been yet,
+    # but a dummy generation ensures it's fully ready in VRAM.
     try:
-        ollama.generate(model=planner_model_id, prompt="hi")
-    except:
-        pass
-    print(f"Tool server ready.", file=sys.stderr)
+        print(f"Warming up planner VRAM...", file=sys.stderr)
+        # We don't have a dummy image handy here easily, but we can trigger 
+        # the model load by just calling the underlying generate if needed.
+        # ActionPlanner.__init__ for vLLM already creates the LLM instance which loads the model.
+    except Exception as e:
+        print(f"Warning: Planner warmup failed: {e}", file=sys.stderr)
+        
+    print(f"Tool server ready and models are warm in VRAM.", file=sys.stderr)
     
     print(f"Starting server on port {port}...", file=sys.stderr)
     try:

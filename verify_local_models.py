@@ -124,11 +124,11 @@ if __name__ == "__main__":
     # 1. Test SAM3
     sam_ok = test_sam3(test_image)
     
-    # 2. Test FP16 Merged
-    fp16_ok = test_model("Jake-Writer-Jobharvest/qwen3-vl-8b-merged-fp16", test_image)
+    # 2. Test BF16 Merged
+    BF16_ok = test_model("Jake-Writer-Jobharvest/qwen3-vl-8b-merged-BF16", test_image)
     
     print("\n" + "="*50)
     print("VERIFICATION SUMMARY")
     print(f"SAM3: {'PASS' if sam_ok else 'FAIL'}")
-    print(f"Qwen3-VL FP16 Merged: {'PASS' if fp16_ok else 'FAIL'}")
+    print(f"Qwen3-VL BF16 Merged: {'PASS' if BF16_ok else 'FAIL'}")
     print("="*50)

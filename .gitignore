@@ -6,6 +6,7 @@ env/
 dist
 .hf_cache/
 /.cache/
+.vllm_cache/
 
 # Python
 __pycache__/

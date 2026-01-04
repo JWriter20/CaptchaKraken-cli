@@ -24,7 +24,7 @@ def get_solver():
     if _SOLVER_INSTANCE is None:
         _SOLVER_INSTANCE = CaptchaSolver(
             provider="transformers",
-            model="Jake-Writer-Jobharvest/qwen3-vl-8b-merged-fp16"
+            model="Jake-Writer-Jobharvest/qwen3-vl-8b-merged-bf16"
         )
     return _SOLVER_INSTANCE
 
@@ -105,7 +105,7 @@ def save_final_result_overlay(image_path, actions, test_name):
         add_overlays_to_image(image_path, overlays, output_path=str(output_path))
         print(f"[Test] Final result overlay saved to {output_path}")
 
-def run_solver_test(image_path, instruction, test_name, expected_action_type=ClickAction, min_actions=0):
+def run_solver_test(image_path, test_name, expected_action_type=ClickAction, min_actions=0):
     """ Generic solver test runner """
     if not os.path.exists(image_path):
         pytest.skip(f"Image not found: {image_path}")
@@ -113,10 +113,9 @@ def run_solver_test(image_path, instruction, test_name, expected_action_type=Cli
     solver = get_solver()
     
     print(f"\n[Test] Starting solve for {image_path} ({test_name})")
-    print(f"[Test] Instruction: {instruction}")
     
     start_time = time.time()
-    actions = solver.solve(image_path, instruction)
+    actions = solver.solve(image_path)
     end_time = time.time()
     
     print(f"[Test] Inference took {end_time - start_time:.2f} seconds")
@@ -148,54 +147,44 @@ def test_3x3_recaptcha():
     image_path = "captchaimages/coreRecaptcha/recaptchaImages.png"
     label_grid_manually(image_path, "manual_label_3x3.png")
     
-    instruction = "Select all images with cars"
-    run_solver_test(image_path, instruction, "3x3_recaptcha")
+    run_solver_test(image_path, "3x3_recaptcha")
 
 def test_4x4_recaptcha():
     """ Test 4x4 reCAPTCHA with manual labeling first """
     image_path = "captchaimages/coreRecaptcha/recaptchaImages2.png"
     label_grid_manually(image_path, "manual_label_4x4.png")
-    
-    instruction = "Select all squares with traffic lights"
-    run_solver_test(image_path, instruction, "4x4_recaptcha")
+    run_solver_test(image_path, "4x4_recaptcha")
 
 def test_slanted_grid():
     """ Test slanted reCAPTCHA grid with manual labeling first """
     image_path = "captchaimages/slantedGrid.png"
     label_grid_manually(image_path, "manual_label_slanted.png")
-    
-    instruction = "Select all squares with crosswalks"
-    run_solver_test(image_path, instruction, "slanted_grid")
+    run_solver_test(image_path, "slanted_grid")
 
 def test_hcaptcha_puzzle_solve():
     """ Test hcaptchaPuzzle2.png """
     image_path = "captchaimages/hcaptchaPuzzle2.png"
-    instruction = "Select the two wire-frame mesh cubes."
-    run_solver_test(image_path, instruction, "hcaptcha_puzzle", min_actions=2)
+    run_solver_test(image_path, "hcaptcha_puzzle", min_actions=2)
 
 def test_hcaptcha_choose_similar_shapes():
     """ Test hcaptchaChooseSimilarShapes.png """
     image_path = "captchaimages/hcaptchaChooseSimilarShapes.png"
-    instruction = "Select the image that contains a similar shape."
-    run_solver_test(image_path, instruction, "hcaptcha_similar_shapes")
+    run_solver_test(image_path, "hcaptcha_similar_shapes")
 
 def test_hcaptcha_drag_image_1():
     """ Test hcaptchaDragImage1.png (Drag puzzle) """
     image_path = "captchaimages/hcaptchaDragImage1.png"
-    instruction = "Drag the puzzle piece to the center of the matching shadow."
-    run_solver_test(image_path, instruction, "hcaptcha_drag_1", expected_action_type=DragAction)
+    run_solver_test(image_path, "hcaptcha_drag_1", expected_action_type=DragAction)
 
 def test_hcaptcha_drag_images_3():
     """ Test hcaptchaDragImages3.png (Drag puzzle) """
     image_path = "captchaimages/hcaptchaDragImages3.png"
-    instruction = "Complete the puzzle by dragging the piece."
-    run_solver_test(image_path, instruction, "hcaptcha_drag_3", expected_action_type=DragAction)
+    run_solver_test(image_path, "hcaptcha_drag_3", expected_action_type=DragAction)
 
 def test_hcaptcha_video_webm():
     """ Test video solving with hcaptcha_1766539373078.webm """
     video_path = "captchaimages/hcaptcha_1766539373078.webm"
-    instruction = "Select the specify object in the video."
-    run_solver_test(video_path, instruction, "hcaptcha_video")
+    run_solver_test(video_path, "hcaptcha_video")
 
 if __name__ == "__main__":
     # Ensure setup is called if running directly

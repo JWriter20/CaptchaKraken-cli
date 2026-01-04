@@ -8,7 +8,7 @@ Supports:
 4. Text reading - OCR for text captchas
 5. Video captchas - plan actions for video captchas
 
-Backends: ollama, transformers
+Backends: vllm, transformers
 """
 
 import json
@@ -152,12 +152,12 @@ class ActionPlanner:
     """
     LLM-based captcha planner with tool support.
 
-    Supports backends: ollama, transformers
+    Supports backends: vllm, transformers
     """
 
     def __init__(
         self,
-        backend: Literal["ollama", "transformers"] = "ollama",
+        backend: Literal["transformers", "vllm"] = "vllm",
         model: Optional[str] = None,
         debug_callback: Optional[Any] = None,
         **kwargs
@@ -177,12 +177,12 @@ class ActionPlanner:
                 if rec_model == "API":
                     self._log(f"WARNING: {rec_msg}")
                     # Default to the full merged model if they still want to try locally
-                    self.model = "Jake-Writer-Jobharvest/qwen3-vl-8b-merged-fp16"
+                    self.model = "Jake-Writer-Jobharvest/qwen3-vl-8b-merged-BF16"
                 else:
                     self._log(f"Recommended model: {rec_model} ({rec_msg})")
                     self.model = rec_model
-            elif backend == "ollama":
-                self.model = "test-qwen3-vl:latest"
+            elif backend == "vllm":
+                self.model = "Jake-Writer-Jobharvest/qwen3-vl-8b-merged-bf16"
         else:
             self.model = model
 
@@ -325,29 +325,54 @@ class ActionPlanner:
             
             return result, None
 
-        if self.backend == "ollama":
-            import requests
-            host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+        if self.backend == "vllm":
+            try:
+                from vllm import LLM, SamplingParams
+                from PIL import Image
+            except ImportError:
+                raise ImportError("vLLM not installed. Please install with 'pip install vllm'")
+
+            if self._model is None:
+                self._log(f"Loading vLLM model: {self.model}")
+                # Determine quantization if any
+                gpu_memory_utilization = float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.9"))
+                
+                self._model = LLM(
+                    model=self.model,
+                    trust_remote_code=True,
+                    max_model_len=4096,
+                    gpu_memory_utilization=gpu_memory_utilization,
+                    **self.config
+                )
             
-            images_b64 = []
-            for path in image_paths:
-                with open(path, "rb") as f:
-                    images_b64.append(base64.b64encode(f.read()).decode("utf-8"))
-            
-            self._log(f"Generating Ollama response for model: {self.model}")
-            resp = requests.post(
-                f"{host}/api/chat",
-                json={
-                    "model": self.model,
-                    "messages": [{"role": "user", "content": prompt, "images": images_b64}],
-                    "stream": False,
-                    "format": "json"
-                },
-                timeout=120
+            sampling_params = SamplingParams(
+                temperature=0,
+                max_tokens=512,
+                stop=["<|im_end|>", "<|endoftext|>"]
             )
-            resp.raise_for_status()
-            data = resp.json()
-            return data["message"]["content"], None
+
+            # vLLM multi-modal input format for Qwen2-VL style models
+            mm_data = {}
+            if len(image_paths) == 1:
+                mm_data = {"image": Image.open(image_paths[0]).convert("RGB")}
+            else:
+                mm_data = {"image": [Image.open(p).convert("RGB") for p in image_paths]}
+
+            # vLLM expects the prompt with vision tokens if using multi-modal
+            # For Qwen2-VL/Qwen3-VL, it typically uses <|vision_start|><|image_pad|><|vision_end|> placeholders
+            vision_tokens = "<|vision_start|><|image_pad|><|vision_end|>" * len(image_paths)
+            full_prompt = f"<|im_start|>system\nYou are an expert captcha solver. Think carefully about the visual cues. Respond ONLY with the JSON action.<|im_end|>\n<|im_start|>user\n{vision_tokens}{prompt}<|im_end|>\n<|im_start|>assistant\n"
+
+            outputs = self._model.generate(
+                {
+                    "prompt": full_prompt,
+                    "multi_modal_data": mm_data,
+                },
+                sampling_params=sampling_params
+            )
+            
+            result = outputs[0].outputs[0].text
+            return result, None
 
         raise ValueError(f"Unknown backend: {self.backend}")
 

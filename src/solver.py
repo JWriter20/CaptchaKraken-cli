@@ -9,7 +9,7 @@ Flow:
 Usage:
     from src import CaptchaSolver
 
-    solver = CaptchaSolver(provider="ollama")
+    solver = CaptchaSolver(provider="vllm")
     actions = solver.solve("captcha.png", "Select all traffic lights")
 """
 
@@ -117,27 +117,27 @@ class CaptchaSolver:
     def __init__(
         self,
         model: Optional[str] = None,
-        provider: str = "ollama",
+        provider: str = "vllm",
         api_key: Optional[str] = None,
     ):
         self.debug = DebugManager(DEBUG)
         
         # Restrict providers to the supported set
-        if provider not in {"ollama", "transformers"}:
-            raise ValueError(f"Unsupported provider '{provider}'. Supported providers are: 'ollama', 'transformers'.")
+        if provider not in {"transformers", "vllm"}:
+            raise ValueError(f"Unsupported provider '{provider}'. Supported providers are: 'transformers', 'vllm'.")
 
         # Set default model based on provider
         if model is None:
-            if provider == "ollama":
-                model = "test-qwen3-vl:latest"
+            if provider == "vllm":
+                model = "Jake-Writer-Jobharvest/qwen3-vl-8b-merged-bf16"
             elif provider == "transformers":
                 # ActionPlanner handles the recommended model config for transformers
                 pass
 
         # Validate required parameters
-        if provider not in {"ollama", "transformers"} and not api_key:
-            # This check is actually redundant now that we only have ollama and transformers, 
-            # as neither strictly requires api_key (ollama is local, transformers is local or tool server).
+        if provider not in {"transformers", "vllm"} and not api_key:
+            # This check is actually redundant now that we only have transformers and vllm, 
+            # as neither strictly requires api_key (both are local or tool server).
             # But let's keep it clean.
             pass
 
@@ -338,24 +338,35 @@ class CaptchaSolver:
                 instruction=instruction
             )
             
-            # Filter just in case the model hallucinates numbers not in overlay
-            before_filter = selected_numbers.copy()
-            # Ensure they are ints and in valid_indices
-            converted_numbers = []
+            # 2. Post-processing: Filter out cells that are already selected (using detect_selected_cells results)
+            # This ensures we don't click cells that the planner might have hallucinated
+            # or that were already marked as selected or loading by CV.
+            final_selections = []
             for n in selected_numbers:
                 try:
                     val = int(n)
-                    if val in valid_indices:
-                        converted_numbers.append(val)
+                    # Check against CV detections from the earlier detect_selected_cells call
+                    if val in cv_selected:
+                        self.debug.log(f"Post-processing: Filtering out cell {val} - already selected (CV detected)")
+                        continue
+                    if val in cv_loading:
+                        self.debug.log(f"Post-processing: Filtering out cell {val} - cell is loading (CV detected)")
+                        continue
+                    if val not in valid_indices:
+                        # This covers cells that are out of range or otherwise invalid
+                        self.debug.log(f"Post-processing: Filtering out cell {val} - not in valid overlay indices")
+                        continue
+                    final_selections.append(val)
                 except (ValueError, TypeError):
+                    self.debug.log(f"Post-processing: Skipping invalid selection format: {n}")
                     continue
-            selected_numbers = converted_numbers
             
-            if len(before_filter) != len(selected_numbers):
-                filtered = set(before_filter) - set(selected_numbers)
-                self.debug.log(f"WARNING: LLM selected cells that were filtered out: {filtered}")
-
-            self.debug.log(f"Grid selection: {selected_numbers}")
+            if len(selected_numbers) != len(final_selections):
+                filtered = [n for n in selected_numbers if int(n) not in final_selections]
+                self.debug.log(f"Post-processing filtered out: {filtered}")
+            
+            selected_numbers = final_selections
+            self.debug.log(f"Final grid selection: {selected_numbers}")
 
             # Wait Logic
             if not selected_numbers and cv_loading:

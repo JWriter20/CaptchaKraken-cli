@@ -4,8 +4,8 @@ CaptchaKraken - AI-powered captcha solver using LLM planning + vision tools.
 Usage:
     from src import CaptchaSolver
 
-    # Ollama (local backend)
-    solver = CaptchaSolver(provider="ollama")
+    # vLLM (high-performance local backend)
+    solver = CaptchaSolver(provider="vllm")
 
     # Solve a captcha
     actions = solver.solve("captcha.png", "Select all traffic lights")

@@ -209,6 +209,7 @@ class AttentionExtractor:
 
         self._sam3_model = None
         self._sam3_processor = None
+        self._sam3_pipeline = None
 
     def unload_models(self, models: Optional[List[str]] = None):
         """
@@ -222,7 +223,7 @@ class AttentionExtractor:
         import torch
 
         all_models = {
-            "sam3": ["_sam3_model", "_sam3_processor"],
+            "sam3": ["_sam3_model", "_sam3_processor", "_sam3_pipeline"],
         }
         
         targets = models if models else all_models.keys()
@@ -246,39 +247,26 @@ class AttentionExtractor:
         self._load_sam3()
 
     def _load_sam3(self):
-        """Lazy load SAM 3 model."""
-        if self._sam3_model is not None:
+        """Lazy load SAM 3 model via pipeline."""
+        if self._sam3_pipeline is not None:
             return
 
         t0 = time.time()
-        import torch
-        from transformers import Sam3Model, Sam3Processor
+        from transformers import pipeline
 
         model_id = "Jake-Writer-Jobharvest/sam3"  # Use our mirror
-        print(f"[AttentionExtractor] Loading {model_id}...", file=sys.stderr)
+        print(f"[AttentionExtractor] Loading {model_id} via pipeline...", file=sys.stderr)
 
-        # Use bfloat16 for better quality if CUDA is available, otherwise float16 for MPS
-        dtype = torch.bfloat16 if self.device == "cuda" else torch.float16 if self.device == "mps" else torch.float32
-
-        # Use SDPA (Scaled Dot Product Attention) which is fast and built into PyTorch 2.0+
-        attn_impl = "sdpa"
-
-        # Force use of Sam3Processor for text prompting support
-        self._sam3_processor = Sam3Processor.from_pretrained(model_id, trust_remote_code=True)
-        self._sam3_model = Sam3Model.from_pretrained(
-            model_id, 
-            torch_dtype=dtype,
-            trust_remote_code=True,
-            device_map="auto" if self.device != "cpu" else None,
-            attn_implementation=attn_impl
+        # Use the high-level pipeline for better compatibility and automatic handling of text prompts
+        self._sam3_pipeline = pipeline(
+            "mask-generation", 
+            model=model_id, 
+            device=0 if self.device == "cuda" else -1, 
+            trust_remote_code=True
         )
-        if self.device == "cpu":
-             self._sam3_model = self._sam3_model.to("cpu")
-             
-        self._sam3_model.eval()
 
         t1 = time.time()
-        print(f"[AttentionExtractor] Loaded SAM 3 in {t1 - t0:.2f}s", file=sys.stderr)
+        print(f"[AttentionExtractor] Loaded SAM 3 pipeline in {t1 - t0:.2f}s", file=sys.stderr)
 
     def detect(
         self,
@@ -400,40 +388,35 @@ class AttentionExtractor:
         object_class: str,
         max_objects: int = 24,
     ) -> List[Dict[str, Any]]:
-        """Core detection logic for a single image/frame using SAM 3."""
+        """Core detection logic for a single image/frame using SAM 3 via pipeline."""
         self._load_sam3()
         import torch
 
         width, height = image.size
 
-        inputs = self._sam3_processor(
-            images=image, text=object_class, return_tensors="pt"
-        ).to(self.device)
+        # Use pipeline for high-level mask generation with text prompt
+        # The pipeline handles image processing and model inference internally
+        outputs = self._sam3_pipeline(image, text=object_class)
         
-        with torch.no_grad():
-            outputs = self._sam3_model(**inputs)
-
-        results = self._sam3_processor.post_process_instance_segmentation(
-            outputs, 
-            threshold=0.5,
-            mask_threshold=0.5,
-            target_sizes=[image.size[::-1]]
-        )[0]
-
-        masks = results["masks"]
-        scores = results["scores"]
+        masks = outputs["masks"]
+        scores = outputs["scores"]
 
         # Sort by score descending (initially all objects)
-        all_indices = scores.argsort(descending=True)
+        if isinstance(scores, torch.Tensor):
+            all_indices = scores.argsort(descending=True)
+        else:
+            all_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
 
         objects = []
         for idx in all_indices:
-            score = scores[idx].item()
+            score = scores[idx].item() if hasattr(scores[idx], "item") else scores[idx]
             # Stop if score is too low (e.g. < 0.1) to avoid processing junk
             if score < 0.1:
                 break
                 
-            mask = masks[idx].cpu().numpy()
+            mask = masks[idx]
+            if hasattr(mask, "cpu"):
+                mask = mask.cpu().numpy()
 
             # Find bounding box from mask
             y_indices, x_indices = np.where(mask > 0)
@@ -449,7 +432,7 @@ class AttentionExtractor:
                     "y_min": y_min / height,
                     "x_max": x_max / width,
                     "y_max": y_max / height,
-                    "score": score,
+                    "score": float(score),
                 }
             )
 
@@ -469,7 +452,7 @@ class AttentionExtractor:
         max_objects: int = 24,
     ) -> List[np.ndarray]:
         """
-        Get segmentation masks for an object class using SAM 3.
+        Get segmentation masks for an object class using SAM 3 via pipeline.
         Supports both images and videos.
         """
         # Check for tool server
@@ -490,7 +473,6 @@ class AttentionExtractor:
                 print(f"[AttentionExtractor] Tool server get_mask failed: {e}. Falling back to local.", file=sys.stderr)
 
         self._load_sam3()
-        import torch
         import cv2
 
         # Check if media is video
@@ -506,25 +488,24 @@ class AttentionExtractor:
         else:
             image = Image.open(media_path).convert("RGB")
         
-        inputs = self._sam3_processor(images=image, text=object_class, return_tensors="pt").to(self.device)
-        with torch.no_grad():
-            outputs = self._sam3_model(**inputs)
-
-        results = self._sam3_processor.post_process_instance_segmentation(
-            outputs,
-            threshold=0.5,
-            mask_threshold=0.5,
-            target_sizes=[image.size[::-1]]
-        )[0]
+        # Use pipeline for high-level mask generation with text prompt
+        outputs = self._sam3_pipeline(image, text=object_class)
         
-        masks = results["masks"]
-        scores = results["scores"]
+        masks = outputs["masks"]
+        scores = outputs["scores"]
         
-        top_indices = scores.argsort(descending=True)[:max_objects]
+        # Sort by score and take top N
+        if isinstance(scores, torch.Tensor):
+            top_indices = scores.argsort(descending=True)[:max_objects]
+        else:
+            top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:max_objects]
         
         final_masks = []
         for idx in top_indices:
-            final_masks.append(masks[idx].cpu().numpy())
+            mask = masks[idx]
+            if hasattr(mask, "cpu"):
+                mask = mask.cpu().numpy()
+            final_masks.append(mask)
             
         return final_masks
 

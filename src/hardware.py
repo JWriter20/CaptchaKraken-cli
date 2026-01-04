@@ -58,23 +58,36 @@ def get_recommended_model_config() -> Tuple[str, str, str]:
     # Allow overrides via environment variables
     force_model = os.getenv("CAPTCHA_FORCE_MODEL")
     if force_model:
-        if "fp16" in force_model.lower() or "full" in force_model.lower():
+        if "bf16" in force_model.lower():
             return (
-                "Jake-Writer-Jobharvest/qwen3-vl-8b-merged-fp16",
-                "Full (Forced)",
-                "Using forced full model."
+                "Jake-Writer-Jobharvest/qwen3-vl-8b-merged-bf16",
+                "Full BF16 (Forced)",
+                "Using forced BF16 model (vLLM recommended)."
+            )
+        if "BF16" in force_model.lower() or "full" in force_model.lower():
+            return (
+                "Jake-Writer-Jobharvest/qwen3-vl-8b-merged-BF16",
+                "Full BF16 (Forced)",
+                "Using forced BF16 model (Transformers recommended)."
             )
 
     vram = get_gpu_memory_gb()
     device = get_device()
     is_mac = (device == "mps")
 
-    # Full version: SAM3 (3.5) + FP16 (17.5) = 21GB
+    # Full version: SAM3 (3.5) + Qwen3-VL (17.5) = 21GB
     # Requirements: 22GB VRAM or 32GB Unified Memory
     if (not is_mac and vram >= 22.0) or (is_mac and vram >= 32.0):
+        # Prefer BF16 for vLLM performance if on CUDA
+        if device == "cuda":
+            return (
+                "Jake-Writer-Jobharvest/qwen3-vl-8b-merged-bf16",
+                "Full (Merged BF16)",
+                "Hardware supports high-performance BF16 models via vLLM."
+            )
         return (
-            "Jake-Writer-Jobharvest/qwen3-vl-8b-merged-fp16",
-            "Full (Merged FP16)",
+            "Jake-Writer-Jobharvest/qwen3-vl-8b-merged-BF16",
+            "Full (Merged BF16)",
             "Hardware supports full precision models."
         )
 
@@ -82,9 +95,8 @@ def get_recommended_model_config() -> Tuple[str, str, str]:
     return (
         "API",
         "None (Insufficient Hardware)",
-        "Insufficient hardware detected for local FP16 execution (22GB+ VRAM required). "
-        "Recommended: Use Ollama with test-qwen3-vl:latest for local inference. "
-        "To force local execution of the full model anyway, set CAPTCHA_FORCE_MODEL=full."
+        "Insufficient hardware detected for local execution (22GB+ VRAM required). "
+        "To force local execution, set CAPTCHA_FORCE_MODEL=bf16 (for vLLM) or BF16."
     )
 
 
@@ -139,16 +151,6 @@ def check_requirements() -> Tuple[bool, str]:
     except ImportError:
         success = False
         messages.append("Transformers not installed")
-
-    # Check ollama connectivity
-    try:
-        import ollama
-
-        models = ollama.list()
-        model_count = len(models.get("models", []))
-        messages.append(f"Ollama connected ({model_count} models)")
-    except Exception as e:
-        messages.append(f"Ollama not available: {e}")
 
     # Add model recommendation
     _, model_desc, model_msg = get_recommended_model_config()

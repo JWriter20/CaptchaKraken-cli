@@ -116,7 +116,7 @@ def main():
                     sys.exit(1)
                 object_class = sys.argv[3]
                 from .tool_calls.detect import detect
-                solver = CaptchaSolver(provider="ollama", model="qwen3-vl:4b")
+                solver = CaptchaSolver(provider="vllm")
                 result = detect(solver._get_attention(), image_path, object_class)
             
             elif command == "simulate-drag":
@@ -127,7 +127,7 @@ def main():
                 goal = sys.argv[4]
                 from .tool_calls.simulate_drag import simulate_drag
                 # Note: This might need more setup for a full drag simulation (instruction, etc.)
-                solver = CaptchaSolver(provider="ollama", model="qwen3-vl:4b")
+                solver = CaptchaSolver(provider="vllm")
                 result = simulate_drag(solver, image_path, "Simulated drag", source_desc, goal)
             
             elif command == "find-connected-elems":
@@ -137,11 +137,11 @@ def main():
                 instruction = sys.argv[3]
                 from .tool_calls.find_connected_elems import find_connected_elems
                 result = find_connected_elems(image_path, instruction)
-
+                
             elif command == "segment":
                 from .solver import CaptchaSolver
                 from .tool_calls.segment import segment
-                solver = CaptchaSolver(provider="ollama", model="qwen3-vl:4b")
+                solver = CaptchaSolver(provider="vllm")
                 labeled_path, objects = segment(solver.image_processor, solver._get_attention(), image_path)
                 result = {"labeled_image": labeled_path, "objects": objects}
 
@@ -172,12 +172,12 @@ Examples:
     )
     parser.add_argument(
         "api_provider",
-        choices=["ollama", "transformers"],
-        default="ollama",
+        choices=["transformers", "vllm"],
+        default="vllm",
         nargs="?",
-        help="API provider to use one of: ollama, transformers (default: ollama)",
+        help="API provider to use one of: transformers, vllm (default: vllm)",
     )
-    parser.add_argument("api_key", nargs="?", help="API key (not required for transformers/ollama)")
+    parser.add_argument("api_key", nargs="?", help="API key (not required for transformers/vllm)")
 
     args = parser.parse_args()
 
@@ -192,7 +192,7 @@ Examples:
         pass
 
     # Validate API key requirement
-    if args.api_provider not in ["ollama", "transformers"] and not args.api_key:
+    if args.api_provider not in ["transformers", "vllm"] and not args.api_key:
         print(json.dumps({"error": f"API key required for {args.api_provider} provider"}), file=sys.stderr)
         sys.exit(1)
 
