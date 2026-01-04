@@ -3,7 +3,14 @@ import os
 import sys
 import time
 import shutil
+import multiprocessing
 from pathlib import Path
+
+# Set start method to 'spawn' for CUDA multiprocessing compatibility
+try:
+    multiprocessing.set_start_method('spawn', force=True)
+except RuntimeError:
+    pass
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent.parent))
@@ -23,7 +30,7 @@ def get_solver():
     global _SOLVER_INSTANCE
     if _SOLVER_INSTANCE is None:
         _SOLVER_INSTANCE = CaptchaSolver(
-            provider="transformers",
+            provider="vllm",
             model="Jake-Writer-Jobharvest/qwen3-vl-8b-merged-bf16"
         )
     return _SOLVER_INSTANCE
@@ -188,5 +195,6 @@ def test_hcaptcha_video_webm():
 
 if __name__ == "__main__":
     # Ensure setup is called if running directly
+    # test_hcaptcha_drag_images_3()
     setup_module(None)
     pytest.main([__file__, "-s"])

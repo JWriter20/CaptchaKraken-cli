@@ -51,8 +51,8 @@ PLAN_WITH_TOOLS_PROMPT = """Solve the captcha using ONE direct action or ONE too
 {history_section}
 
 Direct Actions:
-- {{ "action": "click", "target_description": "...", "max_items": N }}
-- {{ "action": "click", "target_ids": [list of item or cell ids], "max_items": N }} 
+- {{ "action": "click", "target_description": "...", "max_items": N }} (CRITICAL: Match N to instruction, e.g. "Select ALL 3 buses" -> max_items: 3)
+- {{ "action": "click", "target_ids": [list of item or cell ids] }} 
 - {{ "action": "drag", "source_description": "...", "target_description": "...", "location_hint": [x, y] }}
 - {{ "action": "type", "text": "...", "target_description": "..." }}
 - {{ "action": "wait", "duration_ms": 500 }}
@@ -60,9 +60,9 @@ Direct Actions:
 
 Tool Calls:
 - detect(object_class, max_items)
-- simulate_drag(source, target_hint, location_hint)
+- simulate_drag(source, location_hint) (source=accurate description of the SMALL movable item)
 
-Important: Respond ONLY with JSON.
+Important: Respond ONLY with JSON. Ensure "max_items" reflects the total number of targets requested in the instruction. For simulate_drag, source MUST be the movable object description. AVOID using the full instruction as a source description.
 Example Click:
 {{
   "goal": "Visual goal",
@@ -334,8 +334,8 @@ class ActionPlanner:
 
             if self._model is None:
                 self._log(f"Loading vLLM model: {self.model}")
-                # Determine quantization if any
-                gpu_memory_utilization = float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.9"))
+                # Default to 0.65 to allow SAM 3 to coexist on 32GB cards
+                gpu_memory_utilization = float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.65"))
                 
                 self._model = LLM(
                     model=self.model,

@@ -434,8 +434,8 @@ class CaptchaSolver:
         history: List[str] = []
         cv_path = cv_image_path or media_path
         
-        # We might still need attention for fallback or if explicitly requested via tools
-        attention = self._get_attention()
+        # DO NOT initialize attention here. Let tools do it on-demand to avoid 
+        # initializing CUDA before vLLM forks.
 
         for i in range(max_tool_calls):
             self.debug.log(f"Planning step {i+1}/{max_tool_calls}")
@@ -474,6 +474,7 @@ class CaptchaSolver:
                         object_class = args.get("object_class", "target")
                         max_items = args.get("max_items", 10)
                         self.debug.log(f"Tool call: detect('{object_class}', max_items={max_items})")
+                        attention = self._get_attention()
                         detections = detect(attention, media_path, object_class, max_objects=max_items)
 
                         if detections:
@@ -508,12 +509,12 @@ class CaptchaSolver:
                                 )
 
                     elif tool == "simulate_drag":
-                        source = args.get("source", "movable item")
-                        # Support target_hint, goal, or fallback to the general goal from the response
-                        goal = args.get("target_hint") or args.get("goal") or result.get("goal", "Complete the drag puzzle")
-                        location_hint = args.get("location_hint")
+                        source = args.get("source") or args.get("source_description") or "movable item"
+                        print(f"Source: {source}")
+                        goal_text = result.get("goal") or instruction or "Complete the drag puzzle"
+                        current_location = args.get("location_hint") or args.get("current_location")
 
-                        self.debug.log(f"Tool call: simulate_drag('{source}', goal='{goal}', location_hint={location_hint})")
+                        self.debug.log(f"Tool call: simulate_drag(source='{source}', goal='{goal_text}', current_location={current_location})")
                         
                         # Execute drag simulation
                         drag_result = simulate_drag(
@@ -521,8 +522,8 @@ class CaptchaSolver:
                             media_path,
                             instruction,
                             source_description=source,
-                            primary_goal=goal,
-                            location_hint=location_hint,
+                            primary_goal=goal_text, 
+                            current_location=current_location,
                         )
                         return DragAction(**drag_result)
 
@@ -649,6 +650,7 @@ class CaptchaSolver:
                         target_bounding_box=bbox_pct,
                     )
                 else:
+                    attention = self._get_attention()
                     detections = attention.detect(media_path, target, max_objects=max_items)
                     if detections:
                         actions = []

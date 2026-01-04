@@ -209,7 +209,8 @@ class AttentionExtractor:
 
         self._sam3_model = None
         self._sam3_processor = None
-        self._sam3_pipeline = None
+        self._sam3_video_model = None
+        self._sam3_video_processor = None
 
     def unload_models(self, models: Optional[List[str]] = None):
         """
@@ -223,7 +224,7 @@ class AttentionExtractor:
         import torch
 
         all_models = {
-            "sam3": ["_sam3_model", "_sam3_processor", "_sam3_pipeline"],
+            "sam3": ["_sam3_model", "_sam3_processor", "_sam3_video_model", "_sam3_video_processor"],
         }
         
         targets = models if models else all_models.keys()
@@ -247,31 +248,42 @@ class AttentionExtractor:
         self._load_sam3()
 
     def _load_sam3(self):
-        """Lazy load SAM 3 model via pipeline."""
-        if self._sam3_pipeline is not None:
+        """Lazy load SAM 3 model and processor."""
+        if self._sam3_model is not None:
             return
 
         t0 = time.time()
-        from transformers import pipeline
+        import torch
+        from transformers import Sam3Model, Sam3Processor, Sam3VideoModel, Sam3VideoProcessor
 
-        model_id = "Jake-Writer-Jobharvest/sam3"  # Use our mirror
-        print(f"[AttentionExtractor] Loading {model_id} via pipeline...", file=sys.stderr)
+        model_id = "facebook/sam3"
+        print(f"[AttentionExtractor] Loading {model_id}...", file=sys.stderr)
 
-        # Use the high-level pipeline for better compatibility and automatic handling of text prompts
-        self._sam3_pipeline = pipeline(
-            "mask-generation", 
-            model=model_id, 
-            device=0 if self.device == "cuda" else -1, 
+        dtype = torch.bfloat16 if self.device == "cuda" else torch.float32
+        
+        # Load image model/processor
+        self._sam3_model = Sam3Model.from_pretrained(
+            model_id, 
+            torch_dtype=dtype,
             trust_remote_code=True
-        )
+        ).to(self.device)
+        self._sam3_processor = Sam3Processor.from_pretrained(model_id, trust_remote_code=True)
+
+        # Load video model/processor
+        self._sam3_video_model = Sam3VideoModel.from_pretrained(
+            model_id,
+            torch_dtype=dtype,
+            trust_remote_code=True
+        ).to(self.device)
+        self._sam3_video_processor = Sam3VideoProcessor.from_pretrained(model_id, trust_remote_code=True)
 
         t1 = time.time()
-        print(f"[AttentionExtractor] Loaded SAM 3 pipeline in {t1 - t0:.2f}s", file=sys.stderr)
+        print(f"[AttentionExtractor] Loaded SAM 3 models in {t1 - t0:.2f}s", file=sys.stderr)
 
     def detect(
         self,
         media_path: str,
-        object_class: str,
+        object_description: str,
         max_objects: int = 24,
         max_frames: int = 5,
     ) -> List[Dict[str, Any]]:
@@ -288,7 +300,7 @@ class AttentionExtractor:
                 abs_path = os.path.abspath(media_path)
                 resp = requests.post(
                     f"{tool_server_url}/detect",
-                    json={"image_path": abs_path, "text_prompt": object_class, "max_objects": max_objects},
+                    json={"image_path": abs_path, "text_prompt": object_description, "max_objects": max_objects},
                     timeout=300
                 )
                 resp.raise_for_status()
@@ -296,6 +308,7 @@ class AttentionExtractor:
             except Exception as e:
                 print(f"[AttentionExtractor] Tool server detect failed: {e}. Falling back to local.", file=sys.stderr)
 
+        import torch
         import cv2
         t0 = time.time()
 
@@ -306,58 +319,73 @@ class AttentionExtractor:
 
         if not is_video:
             image = Image.open(media_path).convert("RGB")
-            objects = self._detect_image(image, object_class, max_objects)
+            objects = self._detect_image(image, object_description, max_objects)
             t1 = time.time()
             print(
-                f"[AttentionExtractor] SAM 3 detect('{object_class}') took {t1 - t0:.2f}s, found {len(objects)} objects",
+                f"[AttentionExtractor] SAM 3 detect('{object_description}') took {t1 - t0:.2f}s, found {len(objects)} objects",
                 file=sys.stderr,
             )
             return objects
 
-        # Video logic: process multiple frames and track objects
-        cap = cv2.VideoCapture(media_path)
-        if not cap.isOpened():
-            raise ValueError(f"Could not open video {media_path}")
-
-        tracker = SimpleTracker()
-        # id -> list of detections
-        tracked_paths = {}
-
-        frame_idx = 0
-        total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        actual_max = (
-            min(total_video_frames, max_frames) if total_video_frames > 0 else max_frames
-        )
+        # Video logic: Use native SAM 3 video tracking
+        self._load_sam3()
+        from transformers.video_utils import load_video
+        
+        # Load video frames
+        video_frames, _ = load_video(media_path)
+        actual_max = min(len(video_frames), max_frames)
+        video_frames = video_frames[:actual_max]
 
         print(
-            f"[AttentionExtractor] Processing video: {media_path} ({actual_max} frames)",
+            f"[AttentionExtractor] Processing video: {media_path} ({len(video_frames)} frames)",
             file=sys.stderr,
         )
 
-        while cap.isOpened() and frame_idx < actual_max:
-            ret, frame = cap.read()
-            if not ret:
-                break
+        # Initialize video inference session
+        dtype = torch.bfloat16 if self.device == "cuda" else torch.float32
+        inference_session = self._sam3_video_processor.init_video_session(
+            video=video_frames,
+            inference_device=self.device,
+            dtype=dtype,
+        )
 
-            # Convert frame to PIL image
-            image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        # Add text prompt to detect and track objects
+        inference_session = self._sam3_video_processor.add_text_prompt(
+            inference_session=inference_session,
+            text=object_description,
+        )
 
-            # Detect in frame
-            frame_detections = self._detect_image(image, object_class, max_objects)
+        # id -> list of detections
+        tracked_paths = {}
 
-            # Track across frames
-            tracked_detections = tracker.update(frame_detections)
+        # Process frames
+        for model_outputs in self._sam3_video_model.propagate_in_video_iterator(
+            inference_session=inference_session, 
+            max_frame_num_to_track=actual_max
+        ):
+            processed_outputs = self._sam3_video_processor.postprocess_outputs(inference_session, model_outputs)
+            
+            frame_idx = model_outputs.frame_idx
+            obj_ids = processed_outputs["object_ids"].tolist()
+            scores = processed_outputs["scores"].tolist()
+            boxes = processed_outputs["boxes"] # [num_objs, 4] in XYXY absolute
+            
+            # Get original video dimensions for normalization
+            h, w = inference_session.video_height, inference_session.video_width
 
-            # Store detections by tracked ID
-            for det in tracked_detections:
-                obj_id = det["id"]
+            for i, obj_id in enumerate(obj_ids):
                 if obj_id not in tracked_paths:
                     tracked_paths[obj_id] = []
-                tracked_paths[obj_id].append(det)
-
-            frame_idx += 1
-
-        cap.release()
+                
+                box = boxes[i]
+                tracked_paths[obj_id].append({
+                    "x_min": float(box[0]) / w,
+                    "y_min": float(box[1]) / h,
+                    "x_max": float(box[2]) / w,
+                    "y_max": float(box[3]) / h,
+                    "score": float(scores[i]),
+                    "id": int(obj_id)
+                })
 
         # Merge paths into union boxes (the path of the object across the video)
         final_detections = []
@@ -377,7 +405,7 @@ class AttentionExtractor:
 
         t1 = time.time()
         print(
-            f"[AttentionExtractor] Video detection ('{object_class}') took {t1 - t0:.2f}s, found {len(final_detections)} tracked objects",
+            f"[AttentionExtractor] Video detection ('{object_description}') took {t1 - t0:.2f}s, found {len(final_detections)} tracked objects",
             file=sys.stderr,
         )
         return final_detections
@@ -385,46 +413,42 @@ class AttentionExtractor:
     def _detect_image(
         self,
         image: Image.Image,
-        object_class: str,
+        object_description: str,
         max_objects: int = 24,
     ) -> List[Dict[str, Any]]:
-        """Core detection logic for a single image/frame using SAM 3 via pipeline."""
+        """Core detection logic for a single image/frame using SAM 3."""
         self._load_sam3()
         import torch
 
         width, height = image.size
 
-        # Use pipeline for high-level mask generation with text prompt
-        # The pipeline handles image processing and model inference internally
-        outputs = self._sam3_pipeline(image, text=object_class)
+        # Segment using text prompt as per docs
+        inputs = self._sam3_processor(images=image, text=object_description, return_tensors="pt").to(self.device)
         
-        masks = outputs["masks"]
-        scores = outputs["scores"]
+        with torch.no_grad():
+            outputs = self._sam3_model(**inputs)
 
-        # Sort by score descending (initially all objects)
-        if isinstance(scores, torch.Tensor):
-            all_indices = scores.argsort(descending=True)
-        else:
-            all_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+        # Post-process results as per docs
+        results = self._sam3_processor.post_process_instance_segmentation(
+            outputs,
+            threshold=0.1, # Using 0.1 as in original code
+            mask_threshold=0.5,
+            target_sizes=inputs.get("original_sizes").tolist()
+        )[0]
+
+        masks = results["masks"] # [num_objs, H, W]
+        boxes = results["boxes"] # [num_objs, 4] in XYXY absolute
+        scores = results["scores"] # [num_objs]
 
         objects = []
-        for idx in all_indices:
-            score = scores[idx].item() if hasattr(scores[idx], "item") else scores[idx]
-            # Stop if score is too low (e.g. < 0.1) to avoid processing junk
+        for i in range(len(scores)):
+            score = float(scores[i])
+            # Stop if score is too low
             if score < 0.1:
-                break
-                
-            mask = masks[idx]
-            if hasattr(mask, "cpu"):
-                mask = mask.cpu().numpy()
-
-            # Find bounding box from mask
-            y_indices, x_indices = np.where(mask > 0)
-            if len(y_indices) == 0 or len(x_indices) == 0:
                 continue
-
-            x_min, x_max = np.min(x_indices), np.max(x_indices)
-            y_min, y_max = np.min(y_indices), np.max(y_indices)
+                
+            box = boxes[i]
+            x_min, y_min, x_max, y_max = box.tolist()
 
             objects.append(
                 {
@@ -432,14 +456,11 @@ class AttentionExtractor:
                     "y_min": y_min / height,
                     "x_max": x_max / width,
                     "y_max": y_max / height,
-                    "score": float(score),
+                    "score": score,
                 }
             )
 
-        # Merge overlapping detections to prevent objects from "splitting"
-        # Using a lower threshold (0.4) and a distance check (0.1) to merge multi-detections
-        # CRITICAL: We cluster BEFORE slicing by max_objects so that parts of the same 
-        # object are combined even if max_objects is small (like 1).
+        # Merge overlapping detections
         objects = clusterDetections(objects, iou_threshold=0.4, distance_threshold=0.1)
 
         # Now slice by max_objects
@@ -448,13 +469,14 @@ class AttentionExtractor:
     def get_mask(
         self,
         media_path: str,
-        object_class: str,
+        object_description: str,
         max_objects: int = 24,
     ) -> List[np.ndarray]:
         """
-        Get segmentation masks for an object class using SAM 3 via pipeline.
+        Get segmentation masks for an object class using SAM 3.
         Supports both images and videos.
         """
+        import torch
         # Check for tool server
         tool_server_url = os.getenv("CAPTCHA_TOOL_SERVER")
         if tool_server_url:
@@ -463,7 +485,7 @@ class AttentionExtractor:
                 abs_path = os.path.abspath(media_path)
                 resp = requests.post(
                     f"{tool_server_url}/get_mask",
-                    json={"image_path": abs_path, "text_prompt": object_class, "max_objects": max_objects},
+                    json={"image_path": abs_path, "text_prompt": object_description, "max_objects": max_objects},
                     timeout=300
                 )
                 resp.raise_for_status()
@@ -479,26 +501,33 @@ class AttentionExtractor:
         is_video = any(media_path.lower().endswith(ext) for ext in [".mp4", ".webm", ".gif", ".avi"])
         
         if is_video:
-            cap = cv2.VideoCapture(media_path)
-            ret, frame = cap.read()
-            cap.release()
-            if not ret:
-                raise ValueError(f"Could not read video from {media_path}")
-            image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            # For masks, we just take the first frame for now or could use tracking
+            # Following the image logic for simplicity unless tracking is specifically needed for masks
+            from transformers.video_utils import load_video
+            video_frames, _ = load_video(media_path)
+            image = video_frames[0]
         else:
             image = Image.open(media_path).convert("RGB")
         
-        # Use pipeline for high-level mask generation with text prompt
-        outputs = self._sam3_pipeline(image, text=object_class)
+        # Segment using text prompt
+        inputs = self._sam3_processor(images=image, text=object_description, return_tensors="pt").to(self.device)
         
-        masks = outputs["masks"]
-        scores = outputs["scores"]
+        with torch.no_grad():
+            outputs = self._sam3_model(**inputs)
+
+        # Post-process results
+        results = self._sam3_processor.post_process_instance_segmentation(
+            outputs,
+            threshold=0.1,
+            mask_threshold=0.5,
+            target_sizes=inputs.get("original_sizes").tolist()
+        )[0]
+        
+        masks = results["masks"] # [num_objs, H, W]
+        scores = results["scores"]
         
         # Sort by score and take top N
-        if isinstance(scores, torch.Tensor):
-            top_indices = scores.argsort(descending=True)[:max_objects]
-        else:
-            top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:max_objects]
+        top_indices = scores.argsort(descending=True)[:max_objects]
         
         final_masks = []
         for idx in top_indices:
@@ -625,7 +654,11 @@ class AttentionExtractor:
         detections = self.detect(image_path, target_description, max_objects=1)
         if detections:
             obj = detections[0]
-            x1_pct, y1_pct, x2_pct, y2_pct = obj["bbox"]
+            # Handle both formats: dict with keys or dict with 'bbox' list
+            if "bbox" in obj:
+                x1_pct, y1_pct, x2_pct, y2_pct = obj["bbox"]
+            else:
+                x1_pct, y1_pct, x2_pct, y2_pct = obj["x_min"], obj["y_min"], obj["x_max"], obj["y_max"]
         else:
             x1_pct, y1_pct, x2_pct, y2_pct = 0.45, 0.45, 0.55, 0.55
 
@@ -690,12 +723,18 @@ class AttentionExtractor:
         ]
 
         for i, det in enumerate(detections):
-            bbox = det["bbox"]
-            # Convert [x_min, y_min, x_max, y_max] normalized to [x, y, w, h] pixel
-            x1 = bbox[0] * img_width
-            y1 = bbox[1] * img_height
-            x2 = bbox[2] * img_width
-            y2 = bbox[3] * img_height
+            # Handle both formats: dict with keys or dict with 'bbox' list
+            if "bbox" in det:
+                bbox = det["bbox"]
+                x1_pct, y1_pct, x2_pct, y2_pct = bbox[0], bbox[1], bbox[2], bbox[3]
+            else:
+                x1_pct, y1_pct, x2_pct, y2_pct = det["x_min"], det["y_min"], det["x_max"], det["y_max"]
+
+            # Convert normalized to [x, y, w, h] pixel
+            x1 = x1_pct * img_width
+            y1 = y1_pct * img_height
+            x2 = x2_pct * img_width
+            y2 = y2_pct * img_height
 
             w = max(0, x2 - x1)
             h = max(0, y2 - y1)

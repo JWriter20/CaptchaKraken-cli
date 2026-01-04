@@ -393,9 +393,9 @@ def add_drag_overlay(
 ):
     """
     Add drag-and-drop visualization.
-    If foreground_image is provided, it uses that for the object.
-    It also fills the source location in the background with a surrounding color.
-    Otherwise, it uses a simple crop.
+    - RED DASHED box: Original source location (the "hole").
+    - GREEN SOLID box: Current destination (where the item is pasted).
+    - RED ARROW: Shows the movement path.
     """
     try:
         # Load image with PIL
@@ -411,64 +411,55 @@ def add_drag_overlay(
         # 1. Prepare Background
         background = img.copy()
         
-        # "Remove the cropped out source image"
-        # We'll simple average the color of a 5px border around the bbox and fill the rect.
-        # This acts as inpainting the "hole" left by the dragged object.
+        # Inpaint the source hole
         border = 5
         bx1 = max(0, x1 - border)
         by1 = max(0, y1 - border)
         bx2 = min(w, x2 + border)
         by2 = min(h, y2 + border)
-        
-        # Crop the border area
         region = img.crop((bx1, by1, bx2, by2))
         region_np = np.array(region)
-        # Average color (ignoring alpha for now, assuming opaque bg)
         avg_color = np.mean(region_np, axis=(0, 1)).astype(int)
         fill_color = tuple(avg_color)
         
-        # Draw filled rect over source
         draw_bg = ImageDraw.Draw(background)
         draw_bg.rectangle([x1, y1, x2, y2], fill=fill_color)
         
-        # 2. Dim the background
-        # "make it only a tad darker than the original" -> lighter dimming
-        # Previously 80 alpha (approx 30%), now let's try 40 alpha (approx 15%)
+        # 2. Dim background slightly
         dim_overlay = Image.new("RGBA", img.size, (0, 0, 0, 40)) 
         background = Image.alpha_composite(background, dim_overlay)
         
         # 3. Prepare Object
         if foreground_image:
-            # Use provided foreground image
-            object_crop = foreground_image.resize((x2-x1, y2-y1)) # Ensure size matches just in case
+            object_crop = foreground_image.resize((x2-x1, y2-y1))
         else:
-            # Fallback to simple crop
             object_crop = img.crop((x1, y1, x2, y2))
 
-        # 4. Paste Object at Target
+        # 4. Paste at Target
         if target_center:
             tx, ty = target_center
         else:
-            tx = (x1 + x2) / 2
-            ty = (y1 + y2) / 2
+            tx, ty = (x1 + x2) / 2, (y1 + y2) / 2
             
         cw, ch = object_crop.size
         paste_x = int(tx - cw / 2)
         paste_y = int(ty - ch / 2)
         
-        # Composite object_crop onto background
         background.alpha_composite(object_crop, (paste_x, paste_y))
         
-        # 5. Highlight border (Draw with padding to avoid obscuring edges)
+        # 5. Draw Overlays
         draw = ImageDraw.Draw(background)
         if show_grid:
             draw_grid_overlay(draw, background.size, step=0.1)
-        padding = 4
-        draw.rectangle(
-            [paste_x - padding, paste_y - padding, paste_x + cw + padding, paste_y + ch + padding],
-            outline="#00FF00",
-            width=3
-        )
+            
+        # RED DASHED BOX around source (original)
+        draw_enhanced_bounding_box(draw, [x1, y1, x2, y2], text="Source", color="#FF0000", box_style="dashed", image_size=background.size)
+        
+        # GREEN SOLID BOX around target (current)
+        draw_enhanced_bounding_box(draw, [paste_x, paste_y, paste_x + cw, paste_y + ch], text="Target", color="#00FF00", box_style="solid", image_size=background.size)
+        
+        # RED ARROW from source center to target center
+        draw_arrow(draw, ((x1 + x2) / 2, (y1 + y2) / 2), (tx, ty), color="#FF0000", width=4)
 
         background = background.convert("RGB")
         background.save(image_path)

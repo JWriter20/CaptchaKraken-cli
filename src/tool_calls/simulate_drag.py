@@ -14,7 +14,7 @@ def simulate_drag(
     primary_goal: str,
     max_iterations: int = 5,
     source_bbox_override: Optional[List[float]] = None,
-    location_hint: Optional[List[float]] = None,
+    current_location: Optional[List[float]] = None,
 ) -> Dict[str, Any]:
     """
     Solve drag puzzle with iterative refinement.
@@ -51,10 +51,12 @@ def simulate_drag(
             source_y = (b[1] + b[3]/2) / img_h
         else:
             detections = attention.detect(media_path, str(source_desc), max_objects=1)
+            print(f"Detections: {detections}")
             if detections:
                 obj = detections[0]
                 source_x = (obj["x_min"] + obj["x_max"]) / 2
                 source_y = (obj["y_min"] + obj["y_max"]) / 2
+                if solver.debug: solver.debug.log(f"Detected source '{source_desc}' at center ({source_x:.3f}, {source_y:.3f})")
                 source_bbox_px = [
                     obj["x_min"] * img_w,
                     obj["y_min"] * img_h,
@@ -73,42 +75,14 @@ def simulate_drag(
 
 
     # 2. Initial target estimate
-    if location_hint and len(location_hint) >= 2:
-        target_x, target_y = location_hint[0], location_hint[1]
-    else:
-        target_x, target_y = 0.5, 0.5
-    # Use primary_goal as the target_description
-    t_desc = primary_goal
-    if t_desc:
-        # Check if t_desc is an Object ID
-        import re
-        obj_match = re.search(r"Object\s*(\d+)", str(t_desc), re.IGNORECASE)
-        found_obj = None
-        if obj_match:
-            obj_id = int(obj_match.group(1))
-            objects = getattr(solver, "current_objects", [])
-            for o in objects:
-                if o.get("id") == obj_id:
-                    found_obj = o
-                    break
-        
-        if found_obj:
-            b = found_obj["bbox"]
-            target_x = (b[0] + b[2]/2) / img_w
-            target_y = (b[1] + b[3]/2) / img_h
-        else:
-            detections = attention.detect(media_path, str(t_desc), max_objects=1)
-            if detections:
-                obj = detections[0]
-                target_x, target_y = (obj["x_min"] + obj["x_max"]) / 2, (obj["y_min"] + obj["y_max"]) / 2
-            else:
-                target_x, target_y = 0.5, 0.5
+    if current_location and len(current_location) >= 2:
+        target_x, target_y = current_location[0], current_location[1]
     else:
         target_x, target_y = 0.5, 0.5
 
     current_target = [target_x, target_y]
 
-    # 3. Prepare foreground image (optional but helpful for visual refinement)
+    # 4. Prepare foreground image (optional but helpful for visual refinement)
     foreground_image = None
     try:
         x1, y1, x2, y2 = map(int, source_bbox_px)
@@ -128,19 +102,37 @@ def simulate_drag(
 
         if img:
             w, h = img.size
-            x1 = max(0, x1); y1 = max(0, y1)
-            x2 = min(w, x2); y2 = min(h, y2)
-            if x2 > x1 and y2 > y1:
-                source_crop = img.crop((x1, y1, x2, y2))
+            # Add 10% padding to the crop for better context during background removal
+            bw = x2 - x1
+            bh = y2 - y1
+            pad_x = int(bw * 0.1)
+            pad_y = int(bh * 0.1)
+            
+            cx1 = max(0, x1 - pad_x)
+            cy1 = max(0, y1 - pad_y)
+            cx2 = min(w, x2 + pad_x)
+            cy2 = min(h, y2 + pad_y)
+            
+            if cx2 > cx1 and cy2 > cy1:
+                source_crop = img.crop((cx1, cy1, cx2, cy2))
                 with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
                     crop_path = tf.name
                 source_crop.save(crop_path)
                 
+                # Try background removal on the padded crop
                 foreground_image = solver.image_processor.remove_background(
                     crop_path, 
                     prompt=source_desc,
                     max_objects=1
                 )
+                
+                # If foreground removal succeeded, we need to crop the padding back out
+                # or ensure it matches the original requested bbox size.
+                if foreground_image:
+                    # The foreground image is RGBA. We want to return just the object part.
+                    # Actually, remove_background already does that.
+                    pass
+                
                 os.unlink(crop_path)
     except Exception as e:
         if solver.debug: solver.debug.log(f"Failed to prepare foreground image: {e}")
@@ -195,7 +187,7 @@ def simulate_drag(
                 current_target,
                 history,
                 source_description=source_desc,
-                target_description=primary_goal,
+                target_description=primary_goal, # Use the clean target description
                 primary_goal=primary_goal,
             )
 
