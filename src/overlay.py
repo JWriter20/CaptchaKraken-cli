@@ -65,8 +65,8 @@ def draw_enhanced_bounding_box(
     shadow_color = (0, 0, 0, 210)  # strong underlay for contrast
 
     if box_style == "solid":
-        line_width = 3
-        shadow_width = line_width + 4
+        line_width = 2
+        shadow_width = line_width + 2
         # Underlay + main stroke to match the solid green/black grid overlay style
         draw.rectangle([x1, y1, x2, y2], outline=shadow_color, width=shadow_width)
         draw.rectangle([x1, y1, x2, y2], outline=color, width=line_width)
@@ -120,7 +120,7 @@ def draw_enhanced_bounding_box(
 
         # Scale font based on image width (slightly larger for readability)
         # Bump size a bit to make numbered overlays easier to read on captcha tiles.
-        base_font_size = max(16, min(64, int(img_width * 0.045)))
+        base_font_size = max(14, min(48, int(img_width * 0.035)))
         font = get_cross_platform_font(base_font_size)
 
         # Get text size
@@ -206,7 +206,7 @@ def draw_enhanced_bounding_box(
         fill_color = hex_to_rgba(color, alpha=200)
 
         # Match label outline to the box color (instead of hardcoded white)
-        draw.rectangle([bg_x1, bg_y1, bg_x2, bg_y2], fill=fill_color, outline=color, width=3)
+        draw.rectangle([bg_x1, bg_y1, bg_x2, bg_y2], fill=fill_color, outline=color, width=2)
         # Slight stroke helps keep text readable on busy backgrounds even at small sizes
         draw.text(
             (text_x, text_y),
@@ -452,8 +452,14 @@ def add_drag_overlay(
         if show_grid:
             draw_grid_overlay(draw, background.size, step=0.1)
             
+        # RED DASHED BOX around source (original)
+        draw_enhanced_bounding_box(draw, [x1, y1, x2, y2], text="Source", color="#FF0000", box_style="dashed", image_size=background.size)
+        
         # GREEN SOLID BOX around target (current)
-        draw_enhanced_bounding_box(draw, [paste_x, paste_y, paste_x + cw, paste_y + ch], text=None, color="#00FF00", box_style="solid", image_size=background.size)
+        draw_enhanced_bounding_box(draw, [paste_x, paste_y, paste_x + cw, paste_y + ch], text="Target", color="#00FF00", box_style="solid", image_size=background.size)
+        
+        # RED ARROW from source center to target center
+        draw_arrow(draw, ((x1 + x2) / 2, (y1 + y2) / 2), (tx, ty), color="#FF0000", width=4)
 
         background = background.convert("RGB")
         background.save(image_path)
