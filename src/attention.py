@@ -26,7 +26,6 @@ def clusterDetections(
     iou_threshold: float = 0.5,
     distance_threshold: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
-# ... (rest of clusterDetections remains the same)
     """
     Cluster and merge overlapping or very close detection bounding boxes.
 
@@ -132,6 +131,35 @@ def clusterDetections(
     return merged
 
 
+def default_predicate(detection: Dict[str, Any]) -> Optional[float]:
+    """
+    Default filtering and weighting for detections.
+    - Ignores boxes with width or height > 25% of image.
+    - Boosts score for more square-like boxes.
+    """
+    # Handle both formats: dict with direct keys or dict with 'bbox' list
+    if "bbox" in detection:
+        x1, y1, x2, y2 = detection["bbox"]
+    else:
+        x1, y1, x2, y2 = detection["x_min"], detection["y_min"], detection["x_max"], detection["y_max"]
+
+    w = x2 - x1
+    h = y2 - y1
+    score = detection.get("score", 0.0)
+
+    # 1. Filter: Size limit (max 25% in either dimension)
+    if w > 0.25 or h > 0.25:
+        return None
+
+    # 2. Squareness boost: width/height similarity
+    if w > 0 and h > 0:
+        # Use min/max ratio as squareness (1.0 = perfect square)
+        squareness = min(w, h) / max(w, h)
+        score += squareness * 0.1  # Small boost up to 0.1
+
+    return score
+
+
 class SimpleTracker:
     """Simple centroid tracker to maintain object ID consistency across frames."""
 
@@ -209,6 +237,8 @@ class AttentionExtractor:
 
         self._sam3_model = None
         self._sam3_processor = None
+        self._sam3_video_model = None
+        self._sam3_video_processor = None
 
     def unload_models(self, models: Optional[List[str]] = None):
         """
@@ -222,7 +252,7 @@ class AttentionExtractor:
         import torch
 
         all_models = {
-            "sam3": ["_sam3_model", "_sam3_processor"],
+            "sam3": ["_sam3_model", "_sam3_processor", "_sam3_video_model", "_sam3_video_processor"],
         }
         
         targets = models if models else all_models.keys()
@@ -246,218 +276,173 @@ class AttentionExtractor:
         self._load_sam3()
 
     def _load_sam3(self):
-        """Lazy load SAM 3 model."""
+        """Lazy load SAM 3 model and processor."""
         if self._sam3_model is not None:
             return
 
         t0 = time.time()
         import torch
-        from transformers import Sam3Model, Sam3Processor
+        from transformers import Sam3Model, Sam3Processor, Sam3VideoModel, Sam3VideoProcessor
 
         model_id = "facebook/sam3"
+        print(f"[AttentionExtractor] Loading {model_id}...", file=sys.stderr)
+
+        dtype = torch.bfloat16 if self.device == "cuda" else torch.float32
         
-        # Determine local path relative to this file
-        local_dir = os.path.join(os.path.dirname(__file__), "vl_models", "sam3")
+        # Load image model/processor
+        self._sam3_model = Sam3Model.from_pretrained(
+            model_id, 
+            torch_dtype=dtype,
+            trust_remote_code=True
+        ).to(self.device)
+        self._sam3_processor = Sam3Processor.from_pretrained(model_id, trust_remote_code=True)
 
-        # Check if local model exists, if not download and save
-        if not os.path.exists(local_dir) or not os.listdir(local_dir):
-            print(f"[AttentionExtractor] Downloading {model_id} to local repo: {local_dir}...", file=sys.stderr)
-            
-            # Download
-            processor = Sam3Processor.from_pretrained(model_id)
-            model = Sam3Model.from_pretrained(model_id)
-            
-            # Save locally
-            os.makedirs(local_dir, exist_ok=True)
-            processor.save_pretrained(local_dir)
-            model.save_pretrained(local_dir)
-            print(f"[AttentionExtractor] Saved {model_id} to {local_dir}", file=sys.stderr)
-
-        print(f"[AttentionExtractor] Loading SAM 3 from {local_dir}...", file=sys.stderr)
-        self._sam3_processor = Sam3Processor.from_pretrained(local_dir)
-        self._sam3_model = Sam3Model.from_pretrained(local_dir).to(self.device)
-        self._sam3_model.eval()
+        # Load video model/processor
+        self._sam3_video_model = Sam3VideoModel.from_pretrained(
+            model_id,
+            torch_dtype=dtype,
+            trust_remote_code=True
+        ).to(self.device)
+        self._sam3_video_processor = Sam3VideoProcessor.from_pretrained(model_id, trust_remote_code=True)
 
         t1 = time.time()
-        print(f"[AttentionExtractor] Loaded SAM 3 in {t1 - t0:.2f}s", file=sys.stderr)
+        print(f"[AttentionExtractor] Loaded SAM 3 models in {t1 - t0:.2f}s", file=sys.stderr)
 
     def detect(
         self,
         media_path: str,
-        object_class: str,
+        object_description: str,
         max_objects: int = 24,
         max_frames: int = 5,
     ) -> List[Dict[str, Any]]:
         """
         Detect all instances of object class using SAM 3.
-        Supports both images and videos.
-
-        Args:
-            media_path: Path to image or video
-            object_class: What to detect (e.g., "bird", "car")
-            max_objects: Maximum objects to detect
-            max_frames: Max frames to process if video (default: 5)
-
-        Returns:
-            List of dictionaries: [{'x_min': float, 'y_min': float, 'x_max': float, 'y_max': float, 'score': float}, ...]
-            Coordinates are percentages in [0.0, 1.0].
-            For videos, returns the union-box of tracked objects across frames.
+        Delegates to the implementation in tool_calls.detect.
         """
-        import cv2
-
-        t0 = time.time()
-
-        # Check if media is video
-        is_video = any(
-            media_path.lower().endswith(ext) for ext in [".mp4", ".webm", ".gif", ".avi"]
+        try:
+            from .tool_calls.detect import detect as run_detect
+        except (ImportError, ValueError):
+            from tool_calls.detect import detect as run_detect
+            
+        return run_detect(
+            self, 
+            media_path, 
+            object_description, 
+            max_objects=max_objects, 
+            max_frames=max_frames
         )
 
-        if not is_video:
-            image = Image.open(media_path).convert("RGB")
-            objects = self._detect_image(image, object_class, max_objects)
-            t1 = time.time()
-            print(
-                f"[AttentionExtractor] SAM 3 detect('{object_class}') took {t1 - t0:.2f}s, found {len(objects)} objects",
-                file=sys.stderr,
-            )
-            return objects
-
-        # Video logic: process multiple frames and track objects
-        cap = cv2.VideoCapture(media_path)
-        if not cap.isOpened():
-            raise ValueError(f"Could not open video {media_path}")
-
-        tracker = SimpleTracker()
-        # id -> list of detections
-        tracked_paths = {}
-
-        frame_idx = 0
-        total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        actual_max = (
-            min(total_video_frames, max_frames) if total_video_frames > 0 else max_frames
-        )
-
-        print(
-            f"[AttentionExtractor] Processing video: {media_path} ({actual_max} frames)",
-            file=sys.stderr,
-        )
-
-        while cap.isOpened() and frame_idx < actual_max:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            # Convert frame to PIL image
-            image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-
-            # Detect in frame
-            frame_detections = self._detect_image(image, object_class, max_objects)
-
-            # Track across frames
-            tracked_detections = tracker.update(frame_detections)
-
-            # Store detections by tracked ID
-            for det in tracked_detections:
-                obj_id = det["id"]
-                if obj_id not in tracked_paths:
-                    tracked_paths[obj_id] = []
-                tracked_paths[obj_id].append(det)
-
-            frame_idx += 1
-
-        cap.release()
-
-        # Merge paths into union boxes (the path of the object across the video)
-        final_detections = []
-        for obj_id, path in tracked_paths.items():
-            if not path:
-                continue
-
-            # Compute encompassing box (Union)
-            union_box = {
-                "x_min": min(d["x_min"] for d in path),
-                "y_min": min(d["y_min"] for d in path),
-                "x_max": max(d["x_max"] for d in path),
-                "y_max": max(d["y_max"] for d in path),
-                "score": sum(d["score"] for d in path) / len(path),
-            }
-            final_detections.append(union_box)
-
-        t1 = time.time()
-        print(
-            f"[AttentionExtractor] Video detection ('{object_class}') took {t1 - t0:.2f}s, found {len(final_detections)} tracked objects",
-            file=sys.stderr,
-        )
-        return final_detections
-
-    def _detect_image(
+    def detect_all(
         self,
-        image: Image.Image,
-        object_class: str,
-        max_objects: int = 24,
+        media_path: str,
+        method: str = "prompts",
+        max_objects: int = 8,
     ) -> List[Dict[str, Any]]:
-        """Core detection logic for a single image/frame using SAM 3."""
-        self._load_sam3()
-        import torch
+        """
+        Detect all significant items in the image without a specific prompt.
+        
+        Args:
+            media_path: Path to the image or video
+            method: "points" or "prompts"
+            max_objects: Maximum number of objects to return
+        """
+        if method == "prompts":
+            # Method 2: Multi-prompt detection
+            prompts = ["animal", "shape", "object"]
+            all_detections = []
+            for prompt in prompts:
+                detections = self.detect(media_path, prompt, max_objects=max_objects)
+                all_detections.extend(detections)
+            
+            # Merge overlapping detections
+            merged = clusterDetections(all_detections, iou_threshold=0.4, distance_threshold=0.1)
+            
+            # Filter and sort using default_predicate
+            final_results = []
+            for det in merged:
+                score = default_predicate(det)
+                if score is not None:
+                    det["score"] = score
+                    # Ensure bbox is present
+                    if "bbox" not in det:
+                        det["bbox"] = [det["x_min"], det["y_min"], det["x_max"], det["y_max"]]
+                    final_results.append(det)
+            
+            final_results.sort(key=lambda x: x["score"], reverse=True)
+            return final_results[:max_objects]
 
-        width, height = image.size
-
-        inputs = self._sam3_processor(
-            images=image, text=object_class, return_tensors="pt"
-        ).to(self.device)
-        with torch.no_grad():
-            outputs = self._sam3_model(**inputs)
-
-        results = self._sam3_processor.post_process_instance_segmentation(
-            outputs, target_sizes=[image.size[::-1]]
-        )[0]
-
-        masks = results["masks"]
-        scores = results["scores"]
-
-        # Sort by score descending (initially all objects)
-        all_indices = scores.argsort(descending=True)
-
-        objects = []
-        for idx in all_indices:
-            score = scores[idx].item()
-            # Stop if score is too low (e.g. < 0.1) to avoid processing junk
-            if score < 0.1:
-                break
+        elif method == "points":
+            # Method 1: Point-based segmentation
+            # Load image to get dimensions
+            is_video = any(media_path.lower().endswith(ext) for ext in [".mp4", ".webm", ".gif", ".avi"])
+            if is_video:
+                import cv2
+                cap = cv2.VideoCapture(media_path)
+                ret, frame = cap.read()
+                cap.release()
+                if not ret:
+                    return []
+                height, width = frame.shape[:2]
+            else:
+                image = Image.open(media_path).convert("RGB")
+                width, height = image.size
+            
+            # Generate points: ignore top/bottom 15%
+            # Grid of 5x5 points
+            points = []
+            y_start, y_end = 0.15, 0.85
+            x_start, x_end = 0.15, 0.85
+            for y in np.linspace(y_start, y_end, 5):
+                for x in np.linspace(x_start, x_end, 5):
+                    points.append([float(x), float(y)])
+            
+            # Get masks for these points
+            # We use get_mask which uses the SAM 3 model
+            masks = self.get_mask(media_path, points=points, max_objects=24)
+            
+            detections = []
+            for mask in masks:
+                # Find bounding box of mask
+                if len(mask.shape) == 3:
+                    mask = mask[0]
                 
-            mask = masks[idx].cpu().numpy()
-
-            # Find bounding box from mask
-            y_indices, x_indices = np.where(mask > 0)
-            if len(y_indices) == 0 or len(x_indices) == 0:
-                continue
-
-            x_min, x_max = np.min(x_indices), np.max(x_indices)
-            y_min, y_max = np.min(y_indices), np.max(y_indices)
-
-            objects.append(
-                {
-                    "x_min": x_min / width,
-                    "y_min": y_min / height,
-                    "x_max": x_max / width,
-                    "y_max": y_max / height,
-                    "score": score,
+                rows = np.any(mask, axis=1)
+                cols = np.any(mask, axis=0)
+                if not np.any(rows) or not np.any(cols):
+                    continue
+                
+                rmin, rmax = np.where(rows)[0][[0, -1]]
+                cmin, cmax = np.where(cols)[0][[0, -1]]
+                
+                # Normalize coordinates
+                det = {
+                    "x_min": float(cmin) / width,
+                    "y_min": float(rmin) / height,
+                    "x_max": float(cmax) / width,
+                    "y_max": float(rmax) / height,
+                    "score": 0.5, # Base score
                 }
-            )
-
-        # Merge overlapping detections to prevent objects from "splitting"
-        # Using a lower threshold (0.4) and a distance check (0.1) to merge multi-detections
-        # CRITICAL: We cluster BEFORE slicing by max_objects so that parts of the same 
-        # object are combined even if max_objects is small (like 1).
-        objects = clusterDetections(objects, iou_threshold=0.4, distance_threshold=0.1)
-
-        # Now slice by max_objects
-        return objects[:max_objects]
+                
+                score = default_predicate(det)
+                if score is not None:
+                    det["score"] = score
+                    det["bbox"] = [det["x_min"], det["y_min"], det["x_max"], det["y_max"]]
+                    detections.append(det)
+            
+            # Merge overlapping detections
+            merged = clusterDetections(detections, iou_threshold=0.4, distance_threshold=0.1)
+            merged.sort(key=lambda x: x.get("score", 0), reverse=True)
+            return merged[:max_objects]
+        
+        else:
+            raise ValueError(f"Unknown method: {method}")
 
     def get_mask(
         self,
         media_path: str,
-        object_class: str,
+        object_description: Optional[str] = None,
+        bboxes: Optional[List[List[float]]] = None,
+        points: Optional[List[List[float]]] = None,
         max_objects: int = 24,
     ) -> List[np.ndarray]:
         """
@@ -465,47 +450,96 @@ class AttentionExtractor:
         Supports both images and videos.
         
         Args:
-            media_path: Path to image or video
-            object_class: What to segment (e.g., "bird", "car")
-            max_objects: Maximum masks to return
-            
-        Returns:
-            List of binary masks (numpy arrays)
+            media_path: Path to media
+            object_description: Optional text prompt
+            bboxes: Optional list of bounding boxes in [x1, y1, x2, y2] normalized
+            points: Optional list of points in [x, y] normalized
+            max_objects: Max masks to return
         """
-        self._load_sam3()
         import torch
-        import cv2
+        # Check for tool server
+        tool_server_url = os.getenv("CAPTCHA_TOOL_SERVER")
+        if tool_server_url:
+            import requests
+            try:
+                abs_path = os.path.abspath(media_path)
+                resp = requests.post(
+                    f"{tool_server_url}/get_mask",
+                    json={
+                        "image_path": abs_path, 
+                        "text_prompt": object_description, 
+                        "bboxes": bboxes,
+                        "points": points,
+                        "max_objects": max_objects
+                    },
+                    timeout=300
+                )
+                resp.raise_for_status()
+                masks_data = resp.json().get("masks", [])
+                return [np.array(m) for m in masks_data]
+            except Exception as e:
+                print(f"[AttentionExtractor] Tool server get_mask failed: {e}. Falling back to local.", file=sys.stderr)
 
-        # Check if media is video
-        is_video = any(media_path.lower().endswith(ext) for ext in [".mp4", ".webm", ".gif", ".avi"])
+        self._load_sam3()
         
+        is_video = any(media_path.lower().endswith(ext) for ext in [".mp4", ".webm", ".gif", ".avi"])
         if is_video:
-            cap = cv2.VideoCapture(media_path)
-            ret, frame = cap.read()
-            cap.release()
-            if not ret:
-                raise ValueError(f"Could not read video from {media_path}")
-            image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            from transformers.video_utils import load_video
+            video_frames, _ = load_video(media_path)
+            image = video_frames[0]
         else:
             image = Image.open(media_path).convert("RGB")
         
-        inputs = self._sam3_processor(images=image, text=object_class, return_tensors="pt").to(self.device)
+        inputs_kwargs = {"images": image, "return_tensors": "pt"}
+        if object_description:
+            inputs_kwargs["text"] = object_description
+        
+        width, height = image.size
+        if bboxes:
+            # Convert normalized [x1, y1, x2, y2] to pixel coordinates
+            scaled_bboxes = [[b[0] * width, b[1] * height, b[2] * width, b[3] * height] for b in bboxes]
+            # Convert [N, 4] to [1, N, 4] for transformers
+            inputs_kwargs["input_boxes"] = [scaled_bboxes]
+        if points:
+            # Convert normalized [x, y] to pixel coordinates
+            scaled_points = [[p[0] * width, p[1] * height] for p in points]
+            # Convert [N, 2] to [1, N, 2] for transformers
+            inputs_kwargs["input_points"] = [scaled_points]
+            # Need labels too (1 for foreground)
+            inputs_kwargs["input_labels"] = [[1] * len(points)]
+            
+        inputs = self._sam3_processor(**inputs_kwargs).to(self.device)
+        
+        # Ensure floating point inputs match model dtype (e.g., BFloat16)
+        for k, v in inputs.items():
+            if isinstance(v, torch.Tensor) and torch.is_floating_point(v):
+                inputs[k] = v.to(self._sam3_model.dtype)
+
         with torch.no_grad():
             outputs = self._sam3_model(**inputs)
 
+        # Post-process results
         results = self._sam3_processor.post_process_instance_segmentation(
             outputs,
-            target_sizes=[image.size[::-1]]
+            threshold=0.1,
+            mask_threshold=0.5,
+            target_sizes=inputs.get("original_sizes").tolist()
         )[0]
         
-        masks = results["masks"]
+        masks = results["masks"] # [num_objs, H, W]
         scores = results["scores"]
         
+        # Sort by score and take top N
         top_indices = scores.argsort(descending=True)[:max_objects]
+        
+        print(f"[AttentionExtractor] get_mask() found {len(scores)} candidate masks. Top scores: {scores[top_indices].tolist()}", file=sys.stderr)
         
         final_masks = []
         for idx in top_indices:
-            final_masks.append(masks[idx].cpu().numpy())
+            mask = masks[idx]
+            if hasattr(mask, "cpu"):
+                mask = mask.cpu().numpy()
+            final_masks.append(mask)
             
         return final_masks
 
@@ -598,11 +632,6 @@ class AttentionExtractor:
                     masks.append(component_mask)
                     mask_colors.append(color)
         
-        # Sort masks by size (area) to ensure smaller contained items (like text) are drawn/labeled AFTER/ON TOP of larger backgrounds
-        # This helps with "W doesn't appear to be labelled" if it was covered by background label?
-        # Actually visualize_masks sorts by size reversed (largest first) to draw small on top.
-        # But for labeling, if centers are close, they might overlap.
-        
         t1 = time.time()
         print(f"[AttentionExtractor] Color segmentation (k={k}) took {t1 - t0:.2f}s, found {len(masks)} masks", file=sys.stderr)
         
@@ -625,7 +654,11 @@ class AttentionExtractor:
         detections = self.detect(image_path, target_description, max_objects=1)
         if detections:
             obj = detections[0]
-            x1_pct, y1_pct, x2_pct, y2_pct = obj["bbox"]
+            # Handle both formats: dict with keys or dict with 'bbox' list
+            if "bbox" in obj:
+                x1_pct, y1_pct, x2_pct, y2_pct = obj["bbox"]
+            else:
+                x1_pct, y1_pct, x2_pct, y2_pct = obj["x_min"], obj["y_min"], obj["x_max"], obj["y_max"]
         else:
             x1_pct, y1_pct, x2_pct, y2_pct = 0.45, 0.45, 0.55, 0.55
 
@@ -670,7 +703,10 @@ class AttentionExtractor:
         elements: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """Visualize detected objects with bounding boxes."""
-        from .overlay import add_overlays_to_image
+        try:
+            from .overlay import add_overlays_to_image
+        except (ImportError, ValueError):
+            from overlay import add_overlays_to_image
 
         # Load image to get dimensions for coordinate conversion
         with Image.open(image_path) as image:
@@ -690,12 +726,18 @@ class AttentionExtractor:
         ]
 
         for i, det in enumerate(detections):
-            bbox = det["bbox"]
-            # Convert [x_min, y_min, x_max, y_max] normalized to [x, y, w, h] pixel
-            x1 = bbox[0] * img_width
-            y1 = bbox[1] * img_height
-            x2 = bbox[2] * img_width
-            y2 = bbox[3] * img_height
+            # Handle both formats: dict with keys or dict with 'bbox' list
+            if "bbox" in det:
+                bbox = det["bbox"]
+                x1_pct, y1_pct, x2_pct, y2_pct = bbox[0], bbox[1], bbox[2], bbox[3]
+            else:
+                x1_pct, y1_pct, x2_pct, y2_pct = det["x_min"], det["y_min"], det["x_max"], det["y_max"]
+
+            # Convert normalized to [x, y, w, h] pixel
+            x1 = x1_pct * img_width
+            y1 = y1_pct * img_height
+            x2 = x2_pct * img_width
+            y2 = y2_pct * img_height
 
             w = max(0, x2 - x1)
             h = max(0, y2 - y1)
@@ -772,32 +814,25 @@ class AttentionExtractor:
         def get_random_color():
             return [random.random(), random.random(), random.random()]
         
-        # Sort masks by area (largest first) so small ones aren't hidden
-        # But if we want IDs to match the original list index, we shouldn't re-sort unless we track indices.
-        # We'll use a list of (index, mask) tuples
         indexed_masks = []
         for i, m in enumerate(masks):
             if len(m.shape) == 3: m = m[0]
             indexed_masks.append((i, m))
             
-        # Sort for display order (largest area first/bottom)
         sorted_masks = sorted(indexed_masks, key=lambda x: np.sum(x[1]), reverse=True)
         
         for idx, mask in sorted_masks:
-            # Ensure mask is 2D
             if len(mask.shape) != 2:
                 continue
 
             if colors and idx < len(colors):
                 c = np.array(colors[idx])
-                # If color is > 1.0, assume 0-255 scale
                 if np.max(c) > 1.0:
                     c = c / 255.0
                 color = np.concatenate([c, [alpha]])
             else:
                 color = np.concatenate([get_random_color(), [alpha]])
             
-            # Create colored mask
             h, w = mask.shape
             mask_image = np.zeros((h, w, 4))
             mask_image[mask > 0] = color
@@ -805,10 +840,6 @@ class AttentionExtractor:
             ax.imshow(mask_image)
             
             if draw_ids:
-                # Find best position for label (point furthest from edges)
-                # This prevents labels from appearing in holes (e.g. centroid of a "U" shape)
-                # We pad the mask with 0s so that image boundaries are treated as edges
-                # This keeps labels away from the image border.
                 import cv2
                 h_m, w_m = mask.shape
                 padded_mask = np.zeros((h_m + 2, w_m + 2), dtype=np.uint8)
@@ -817,26 +848,16 @@ class AttentionExtractor:
                 dist = cv2.distanceTransform(padded_mask, cv2.DIST_L2, 5)
                 _, max_val, _, max_loc = cv2.minMaxLoc(dist)
                 
-                # Adjust back to original coordinates
                 cx = max_loc[0] - 1
                 cy = max_loc[1] - 1
                 
-                # Clamp just in case
                 cx = max(0, min(w_m - 1, cx))
                 cy = max(0, min(h_m - 1, cy))
                 
-                # Draw text with solid background like overlay.py
-                # 1. Measure text
                 label_text = str(idx)
-                
-                # Heuristic for text size (matplotlib font size 12 is approx 12-14 pixels high)
-                # We want tight padding.
                 font_size = 10
                 padding = 1
                 
-                # Estimate width/height
-                # Width: approx 0.6 * fontsize * num_chars
-                # Height: approx 1.0 * fontsize
                 est_w = max(8, len(label_text) * 0.6 * font_size)
                 est_h = font_size * 1.0
                 
@@ -846,7 +867,6 @@ class AttentionExtractor:
                 x0 = cx - box_w/2
                 y0 = cy - box_h/2
                 
-                # Draw background rectangle
                 rect = plt.Rectangle((x0, y0), box_w, box_h, 
                                    facecolor='black', 
                                    edgecolor='none', 
@@ -855,7 +875,6 @@ class AttentionExtractor:
                                    zorder=100)
                 ax.add_patch(rect)
                 
-                # Draw text on top
                 txt = ax.text(cx, cy, label_text, 
                         color='white', 
                         fontsize=font_size, 
@@ -873,11 +892,8 @@ class AttentionExtractor:
         return output_path
 
     def visualize_masks_simple(self, *args, **kwargs):
-         # Compatibility alias if needed
          return self.visualize_masks(*args, **kwargs)
 
     def import_patheffects_helper(self):
-         # Helper to delay import
          import matplotlib.patheffects as path_effects
          return path_effects
-

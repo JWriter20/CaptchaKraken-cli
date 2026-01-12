@@ -65,8 +65,8 @@ def draw_enhanced_bounding_box(
     shadow_color = (0, 0, 0, 210)  # strong underlay for contrast
 
     if box_style == "solid":
-        line_width = 3
-        shadow_width = line_width + 4
+        line_width = 2
+        shadow_width = line_width + 2
         # Underlay + main stroke to match the solid green/black grid overlay style
         draw.rectangle([x1, y1, x2, y2], outline=shadow_color, width=shadow_width)
         draw.rectangle([x1, y1, x2, y2], outline=color, width=line_width)
@@ -120,7 +120,7 @@ def draw_enhanced_bounding_box(
 
         # Scale font based on image width (slightly larger for readability)
         # Bump size a bit to make numbered overlays easier to read on captcha tiles.
-        base_font_size = max(16, min(64, int(img_width * 0.045)))
+        base_font_size = max(14, min(48, int(img_width * 0.035)))
         font = get_cross_platform_font(base_font_size)
 
         # Get text size
@@ -206,7 +206,7 @@ def draw_enhanced_bounding_box(
         fill_color = hex_to_rgba(color, alpha=200)
 
         # Match label outline to the box color (instead of hardcoded white)
-        draw.rectangle([bg_x1, bg_y1, bg_x2, bg_y2], fill=fill_color, outline=color, width=3)
+        draw.rectangle([bg_x1, bg_y1, bg_x2, bg_y2], fill=fill_color, outline=color, width=2)
         # Slight stroke helps keep text readable on busy backgrounds even at small sizes
         draw.text(
             (text_x, text_y),
@@ -390,12 +390,11 @@ def add_drag_overlay(
     target_center: tuple = None,
     show_grid: bool = False,
     foreground_image: Image.Image = None,
+    mask_points: list[list[float]] = None,
 ):
     """
     Add drag-and-drop visualization.
-    If foreground_image is provided, it uses that for the object.
-    It also fills the source location in the background with a surrounding color.
-    Otherwise, it uses a simple crop.
+    - THIN GREEN box: The item being dragged at its current location.
     """
     try:
         # Load image with PIL
@@ -411,64 +410,71 @@ def add_drag_overlay(
         # 1. Prepare Background
         background = img.copy()
         
-        # "Remove the cropped out source image"
-        # We'll simple average the color of a 5px border around the bbox and fill the rect.
-        # This acts as inpainting the "hole" left by the dragged object.
+        # Inpaint the source hole
         border = 5
         bx1 = max(0, x1 - border)
         by1 = max(0, y1 - border)
         bx2 = min(w, x2 + border)
         by2 = min(h, y2 + border)
-        
-        # Crop the border area
         region = img.crop((bx1, by1, bx2, by2))
         region_np = np.array(region)
-        # Average color (ignoring alpha for now, assuming opaque bg)
-        avg_color = np.mean(region_np, axis=(0, 1)).astype(int)
+        # Only take the first 3 channels (RGB) even if image is RGBA
+        avg_color = np.mean(region_np, axis=(0, 1)).astype(int)[:3]
         fill_color = tuple(avg_color)
         
-        # Draw filled rect over source
         draw_bg = ImageDraw.Draw(background)
-        draw_bg.rectangle([x1, y1, x2, y2], fill=fill_color)
+        if mask_points:
+            # Create mask for precise inpainting
+            mask = Image.new("L", (w, h), 0)
+            draw_mask = ImageDraw.Draw(mask)
+            pts = [(p[0] * w, p[1] * h) for p in mask_points]
+            draw_mask.polygon(pts, fill=255)
+            
+            # Fill only the masked area with the average background color
+            fill_img = Image.new("RGBA", (w, h), fill_color + (255,))
+            background.paste(fill_img, (0, 0), mask)
+        else:
+            draw_bg.rectangle([x1, y1, x2, y2], fill=fill_color + (255,))
         
-        # 2. Dim the background
-        # "make it only a tad darker than the original" -> lighter dimming
-        # Previously 80 alpha (approx 30%), now let's try 40 alpha (approx 15%)
+        # 2. Dim background slightly
         dim_overlay = Image.new("RGBA", img.size, (0, 0, 0, 40)) 
         background = Image.alpha_composite(background, dim_overlay)
         
         # 3. Prepare Object
         if foreground_image:
-            # Use provided foreground image
-            object_crop = foreground_image.resize((x2-x1, y2-y1)) # Ensure size matches just in case
+            object_crop = foreground_image.resize((x2-x1, y2-y1))
+        elif mask_points:
+            # Create masked crop using mask_points
+            mask = Image.new("L", (w, h), 0)
+            draw_mask = ImageDraw.Draw(mask)
+            pts = [(p[0] * w, p[1] * h) for p in mask_points]
+            draw_mask.polygon(pts, fill=255)
+            
+            object_rgba = img.convert("RGBA")
+            object_rgba.putalpha(mask)
+            object_crop = object_rgba.crop((x1, y1, x2, y2))
         else:
-            # Fallback to simple crop
             object_crop = img.crop((x1, y1, x2, y2))
 
-        # 4. Paste Object at Target
+        # 4. Paste at Target
         if target_center:
             tx, ty = target_center
         else:
-            tx = (x1 + x2) / 2
-            ty = (y1 + y2) / 2
+            tx, ty = (x1 + x2) / 2, (y1 + y2) / 2
             
         cw, ch = object_crop.size
         paste_x = int(tx - cw / 2)
         paste_y = int(ty - ch / 2)
         
-        # Composite object_crop onto background
         background.alpha_composite(object_crop, (paste_x, paste_y))
         
-        # 5. Highlight border (Draw with padding to avoid obscuring edges)
+        # 5. Draw Overlays
         draw = ImageDraw.Draw(background)
         if show_grid:
             draw_grid_overlay(draw, background.size, step=0.1)
-        padding = 4
-        draw.rectangle(
-            [paste_x - padding, paste_y - padding, paste_x + cw + padding, paste_y + ch + padding],
-            outline="#00FF00",
-            width=3
-        )
+            
+        # THIN GREEN BOX around the item being dragged (no labels, no source box, no arrow)
+        draw_enhanced_bounding_box(draw, [paste_x, paste_y, paste_x + cw, paste_y + ch], color="#00FF00", box_style="thin", image_size=background.size)
 
         background = background.convert("RGB")
         background.save(image_path)
