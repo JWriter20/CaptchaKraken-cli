@@ -10,14 +10,15 @@ import json
 import os
 import sys
 
-from src.solver import CaptchaSolver
-from src.timing import timed
+from .solver import CaptchaSolver
+from .timing import timed
 
 
 def main():
+    from .solver import CaptchaSolver
     # Handle start-tool-server command
     if len(sys.argv) > 1 and sys.argv[1] == "start-tool-server":
-        from src.server import start_tool_server
+        from .server import start_tool_server
         port = 8000
         if len(sys.argv) > 2:
             try:
@@ -55,7 +56,7 @@ def main():
             print(json.dumps({"error": "Usage: python -m src.cli check-movement img1.png img2.png [threshold]"}), file=sys.stderr)
             sys.exit(1)
         
-        from src.image_processor import ImageProcessor
+        from .image_processor import ImageProcessor
         img1 = sys.argv[2]
         img2 = sys.argv[3]
         threshold = 0.005
@@ -80,15 +81,15 @@ def main():
         if not os.path.exists(image_path):
             print(json.dumps({"error": f"Image not found: {image_path}"}), file=sys.stderr)
             sys.exit(1)
-
+        
         try:
             result = None
             if command == "find-grid":
-                from src.tool_calls.find_grid import find_grid
+                from .tool_calls.find_grid import find_grid
                 result = find_grid(image_path)
             
             elif command == "detect-selected":
-                from src.tool_calls.find_grid import find_grid, detect_selected_cells
+                from .tool_calls.find_grid import find_grid, detect_selected_cells
                 grid_boxes = find_grid(image_path)
                 if not grid_boxes:
                     result = {"error": "No grid detected"}
@@ -97,7 +98,7 @@ def main():
                     result = {"selected": selected, "loading": loading}
 
             elif command == "get-numbered-grid":
-                from src.tool_calls.find_grid import find_grid, get_numbered_grid_overlay
+                from .tool_calls.find_grid import find_grid, get_numbered_grid_overlay
                 grid_boxes = find_grid(image_path)
                 if not grid_boxes:
                     result = {"error": "No grid detected"}
@@ -106,17 +107,16 @@ def main():
                     result = {"overlay_image": overlay_path}
             
             elif command == "find-checkbox":
-                from src.tool_calls.find_checkbox import find_checkbox
-                result = find_checkbox(image_path
+                from .tool_calls.find_checkbox import find_checkbox
+                result = find_checkbox(image_path)
             
             elif command == "detect":
                 if len(sys.argv) < 4:
                     print(json.dumps({"error": "Usage: python -m src.cli detect image.png object_class"}), file=sys.stderr)
                     sys.exit(1)
                 object_class = sys.argv[3]
-                from src.solver import CaptchaSolver
-                from src.tool_calls.detect import detect
-                solver = CaptchaSolver(provider="ollama", model="qwen3-vl:4b")
+                from .tool_calls.detect import detect
+                solver = CaptchaSolver(provider="vllm")
                 result = detect(solver._get_attention(), image_path, object_class)
             
             elif command == "simulate-drag":
@@ -125,10 +125,9 @@ def main():
                     sys.exit(1)
                 source_desc = sys.argv[3]
                 goal = sys.argv[4]
-                from src.solver import CaptchaSolver
-                from src.tool_calls.simulate_drag import simulate_drag
+                from .tool_calls.simulate_drag import simulate_drag
                 # Note: This might need more setup for a full drag simulation (instruction, etc.)
-                solver = CaptchaSolver(provider="ollama", model="qwen3-vl:4b")
+                solver = CaptchaSolver(provider="vllm")
                 result = simulate_drag(solver, image_path, "Simulated drag", source_desc, goal)
             
             elif command == "find-connected-elems":
@@ -136,8 +135,15 @@ def main():
                     print(json.dumps({"error": "Usage: python -m src.cli find-connected-elems image.png instruction"}), file=sys.stderr)
                     sys.exit(1)
                 instruction = sys.argv[3]
-                from src.tool_calls.find_connected_elems import find_connected_elems
+                from .tool_calls.find_connected_elems import find_connected_elems
                 result = find_connected_elems(image_path, instruction)
+                
+            elif command == "segment":
+                from .solver import CaptchaSolver
+                from .tool_calls.segment import segment
+                solver = CaptchaSolver(provider="vllm")
+                labeled_path, objects = segment(solver.image_processor, solver._get_attention(), image_path)
+                result = {"labeled_image": labeled_path, "objects": objects}
 
             print(json.dumps(result))
             return
@@ -152,24 +158,26 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic usage with Ollama (no API key needed)
-  python -m src.cli captcha.png qwen3-vl:4b ollama
+  # Basic usage with local Transformers (auto-selects best model)
+  python -m src.cli captcha.png
 
-  # Use Gemini
-  python -m src.cli captcha.png gemini-2.0-flash-exp gemini your-gemini-key
+  # Use local Transformers with a specific model
+  python -m src.cli captcha.png Jake-Writer-Jobharvest/qwen3-vl-8b-lora-q8 transformers
         """,
     )
 
     parser.add_argument("image_path", help="Path to the captcha image")
     parser.add_argument(
-        "model", help="AI model to use for solving ie. gemini-2.0-flash-exp, qwen3-vl:4b"
+        "model", nargs="?", help="AI model to use (optional for transformers)"
     )
     parser.add_argument(
         "api_provider",
-        choices=["ollama", "gemini", "openrouter"],
-        help="API provider to use one of: ollama, gemini, openrouter",
+        choices=["transformers", "vllm"],
+        default="vllm",
+        nargs="?",
+        help="API provider to use one of: transformers, vllm (default: vllm)",
     )
-    parser.add_argument("api_key", nargs="?", help="API key (not required for ollama)")
+    parser.add_argument("api_key", nargs="?", help="API key (not required for transformers/vllm)")
 
     args = parser.parse_args()
 
@@ -178,8 +186,13 @@ Examples:
         print(json.dumps({"error": f"Image not found: {args.image_path}"}), file=sys.stderr)
         sys.exit(1)
 
+    # Use default model for transformers if not provided
+    if args.api_provider == "transformers" and args.model is None:
+        # CaptchaSolver will handle getting the recommended model
+        pass
+
     # Validate API key requirement
-    if args.api_provider != "ollama" and not args.api_key:
+    if args.api_provider not in ["transformers", "vllm"] and not args.api_key:
         print(json.dumps({"error": f"API key required for {args.api_provider} provider"}), file=sys.stderr)
         sys.exit(1)
 

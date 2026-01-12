@@ -481,6 +481,8 @@ class AttentionExtractor:
                 print(f"[AttentionExtractor] Tool server get_mask failed: {e}. Falling back to local.", file=sys.stderr)
 
         self._load_sam3()
+
+        self._load_sam3()
         
         is_video = any(media_path.lower().endswith(ext) for ext in [".mp4", ".webm", ".gif", ".avi"])
         if is_video:
@@ -514,7 +516,6 @@ class AttentionExtractor:
         for k, v in inputs.items():
             if isinstance(v, torch.Tensor) and torch.is_floating_point(v):
                 inputs[k] = v.to(self._sam3_model.dtype)
-
         with torch.no_grad():
             outputs = self._sam3_model(**inputs)
 

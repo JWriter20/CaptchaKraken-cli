@@ -3,8 +3,7 @@ from pydantic import BaseModel, Field, model_validator
 
 
 class PlannerAction(BaseModel):
-    analysis: str = Field(description="Brief reasoning for the action")
-    goal: str = Field(description="Description of the visual goal")
+    goal: Optional[str] = Field(None, description="Description of the visual goal")
 
 
 class PlannerClickAction(PlannerAction):
@@ -52,7 +51,6 @@ class PlannerToolCall(BaseModel):
 
 
 class PlannerPlan(BaseModel):
-    analysis: str
     goal: str
     tool_calls: Optional[List[PlannerToolCall]] = None
     # We allow the planner to return either a direct action or tool calls

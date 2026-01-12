@@ -8,13 +8,14 @@ Supports:
 4. Text reading - OCR for text captchas
 5. Video captchas - plan actions for video captchas
 
-Backends: ollama, gemini, openrouter, transformers
+Backends: vllm, transformers
 """
 
 import json
 import os
 import sys
 import base64
+import time
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 # Import planner types for documentation/type hinting
@@ -40,20 +41,8 @@ from .hardware import get_recommended_model_config
 DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
 
 
-try:
-    # New Gemini SDK (direct Gemini API, no Vertex AI dependency)
-    from google import genai  # type: ignore[import-not-found]
-    from google.genai.types import GenerateContentConfig, Part  # type: ignore[import-not-found]
-except ImportError:  # pragma: no cover - optional dependency
-    genai = None  # type: ignore[assignment]
-    GenerateContentConfig = None  # type: ignore[assignment]
-    Part = None  # type: ignore[assignment]
-
-
-
 # For general planning with tool support
-PLAN_WITH_TOOLS_PROMPT = """Analyze the captcha and solve it using direct actions or tool calls.
-Favor direct actions with descriptions over tool calls when possible.
+PLAN_WITH_TOOLS_PROMPT = """Solve the captcha using ONE direct action or ONE tool call.
 
 {instruction}
 
@@ -62,36 +51,22 @@ Favor direct actions with descriptions over tool calls when possible.
 {history_section}
 
 Direct Actions:
-1. {{ "action": "click", "target_description": "ID or description", "max_items": N }}
-   - Use this to click one or more objects.
-   - target_description: Preferred.
-   - max_items: Number of matches to click (default 1).
-2. {{ "action": "drag", "source_description": "ID or desc", "target_description": "desc of destination", "location_hint": [x, y] }}
-   - Use this for drag-and-drop puzzles.
-   - source_description: Preferred.
-   - target_description: Visual goal for destination.
-   - location_hint: Optional rough [x, y] destination.
-3. {{ "action": "type", "text": "...", "target_description": "ID or desc" }}
-4. {{ "action": "wait", "duration_ms": 500 }}
-5. {{ "action": "refine_drag", "decision": "accept"|"adjust", "dx": N, "dy": N, "goal": "..." }}
-   - Use this for iterative refinement of a drag (usually via simulate_drag).
-6. {{ "action": "done" }}
+- {{ "action": "click", "target_description": "...", "max_items": N }} (CRITICAL: Match N to instruction, e.g. "Select ALL 3 buses" -> max_items: 3)
+- {{ "action": "click", "target_ids": [list of item or cell ids] }} 
+- {{ "action": "drag", "source_description": "...", "target_description": "...", "location_hint": [x, y] }}
+- {{ "action": "type", "text": "...", "target_description": "..." }}
+- {{ "action": "wait", "duration_ms": 500 }}
+- {{ "action": "done" }}
 
-Tool Calls (Use only if direct actions are insufficient):
-1. detect(object_class, max_items) - Find specific objects.
-2. simulate_drag(source, target_hint, location_hint) - Precise iterative drag refinement.
+Tool Calls:
+- detect(object_class, max_items)
+- simulate_drag(source, location_hint) (source=accurate description of the SMALL movable item)
 
-When to use direct actions vs tool calls:
-- Use direct drags when the start and end destinations are both able to be clearly described, and the drag doesn't require exact visual alignment.
-- Use a direct click when you can describe the object(s) to click without there being other similar objects that could be mistakenly selected.
-- Use detect when there are mutliple of the same object and we only want to select one.
-- Use simulate_drag when the drag requires exact visual alignment or when the drag destination cannot be clearly described (missing gaps, etc.)
+CRITICAL: If multiple similar objects exist (e.g., three strawberries), you MUST specify which one you are targeting in the "goal" and "target_description" fields using spatial descriptors (e.g., "the strawberry on the far right", "the leftmost bus").
 
-Important: object descriptions must be short and concise: e.g. "bottom left parrot" instead of "the parrot in the bottom left corner" or "wire mesh cube" instead of "the cube with the wire mesh texture". Generally limit yourself to 2-3 words.
-
-Respond ONLY with JSON. Include EITHER "action" OR "tool_calls" (but not both):
+Important: Respond ONLY with JSON. Ensure "max_items" reflects the total number of targets requested in the instruction. For simulate_drag, source MUST be the movable object description. AVOID using the full instruction as a source description.
+Example Click:
 {{
-  "analysis": "Brief reasoning",
   "goal": "Visual goal",
   "action": {{ ... }} 
   // OR: "tool_calls": [ {{ "name": "...", "args": {{ ... }} }} ]
@@ -103,12 +78,10 @@ TEXT_READ_PROMPT = """Read the distorted text in this captcha image.
 Look carefully at each character, accounting for distortion, rotation, and noise.
 
 Typically, these captchas contain exactly 6 characters.
-Only respond with more than 6 or fewer than 6 characters if you are confident that the captcha clearly shows more or fewer characters.
 
 Respond ONLY with JSON matching this structure:
 {{
-  "analysis": "Brief reasoning",
-  "goal": "Type the text",
+  "goal": "Type the identified text",
   "action": {{
     "action": "type",
     "text": "the text identified",
@@ -118,15 +91,16 @@ Respond ONLY with JSON matching this structure:
 
 
 # For grid selection captchas
-SELECT_GRID_PROMPT = """Solve the captcha grid.
-Instruction: "{instruction}"
+SELECT_GRID_PROMPT = """Solve the captcha grid by choosing the cell numbers that match the description from the captcha image prompt.
+
 Grid: {rows}x{cols} ({total} cells)
 {grid_hint}
 
-Respond ONLY with JSON matching this structure:
+IMPORTANT: If no tiles match the description (e.g., they have all been cleared or none were present), return an empty list for target_ids: [].
+
+Return JSON format ALWAYS:
 {{
-  "analysis": "Briefly describe which cells contain the target objects",
-  "goal": "Select all correct tiles",
+  "goal": "Brief description of what needs to be done to solve the captcha.",
   "action": {{
     "action": "click",
     "target_ids": [list of cell numbers (1-{total})]
@@ -145,17 +119,18 @@ Primary Goal: {primary_goal}
 Object to Move: "{source_desc}"
 Target Destination: "{target_desc}"
 
-CRITICAL: The destination must be DISTINCT from the source. You are never dragging something to itself.
-The draggable item is marked with a LIGHT GREEN box (drawn with padding around the item).
+{iteration_hint}
+
+CRITICAL: 
+1. The destination must be DISTINCT from the source. You are never dragging something to itself.
+2. If multiple potential target objects exist (e.g. multiple strawberries), you MUST SPECIFY which one you are targeting in the "goal" field using spatial descriptors (e.g. "drag the bee to the strawberry on the far left", "align with the bottom-most slot").
+
+The draggable item is marked with a LIGHT GREEN box.
 
 EVALUATION CRITERIA:
 1. **Vertical Position**: Is the object too high or too low? (e.g. Is the head on the stomach? It should be on the neck.)
 2. **Horizontal Position**: Is it too far left or right?
 3. **Connectivity**: Do the lines of the object flow smoothly into the target?
-
-Evaluate this drag destination:
-1. Describe the specific visual alignment. (e.g. "The neck lines are misaligned by...", "The head is overlapping the torso...")
-2. If not perfect, what RELATIVE adjustment is needed?
 
 The image shows:
 - LIGHT GREEN box: The draggable item at its current location.
@@ -165,15 +140,14 @@ Current destination: ({target_x:.1%}, {target_y:.1%})
 {history_text}
 
 Provide adjustments as percentages of image size:
-- dx: positive = move right, negative = move left (e.g., 0.05 = 5% right)
-- dy: positive = move down, negative = move up (e.g., -0.02 = 2% up)
+- dx: positive = move right, negative = move left (e.g., 0.15 = 15% right)
+- dy: positive = move down, negative = move up (e.g., -0.20 = 20% up)
 
-Make SMALL adjustments (typically 1-5%). We can refine iteratively.
+{movement_instruction}
 
 Respond ONLY with JSON:
 {{
-  "analysis": "Specific critique of vertical/horizontal alignment and edge connectivity",
-  "goal": "{primary_goal}",
+  "goal": "SPECIFIC GOAL (e.g. drag the bee to the leftmost strawberry)",
   "action": "refine_drag",
   "decision": "accept" | "adjust",
   "dx": 0.0,
@@ -185,60 +159,37 @@ class ActionPlanner:
     """
     LLM-based captcha planner with tool support.
 
-    Supports backends: ollama, gemini, openrouter, transformers
+    Supports backends: vllm, transformers
     """
 
     def __init__(
         self,
-        backend: Literal["ollama", "gemini", "openrouter", "transformers"] = "transformers",
+        backend: Literal["transformers", "vllm"] = "vllm",
         model: Optional[str] = None,
-        ollama_host: Optional[str] = None,
-        gemini_api_key: Optional[str] = None,
-        openrouter_key: Optional[str] = None,
         debug_callback: Optional[Any] = None,
+        **kwargs
     ):
         self.backend = backend
-        self.ollama_host = ollama_host or os.getenv("OLLAMA_HOST", "http://localhost:11434")
-        self.gemini_api_key = gemini_api_key or os.getenv("GEMINI_API_KEY")
-        self.openrouter_key = openrouter_key or os.getenv("OPENROUTER_KEY")
         self.debug_callback = debug_callback
-        self._genai_client = None
+        self.config = kwargs
         self._model = None
         self._processor = None
         self.token_usage: List[Dict[str, Any]] = []
 
-        # Configure Gemini if selected
-        if self.backend == "gemini":
-            if not genai:
-                raise ImportError("google-genai required. Install: pip install google-genai")
-
-            if not self.gemini_api_key:
-                raise ValueError("GEMINI_API_KEY is required for Gemini backend when not using Vertex AI.")
-
-            # Simple direct Gemini client using API key
-            self._genai_client = genai.Client(api_key=self.gemini_api_key)  # type: ignore[call-arg]
-
         # Default models per backend
         if model is None:
-            if backend == "ollama":
-                self.model = "qwen3-vl:4b"
-            elif backend == "gemini":
-                # Default Gemini model; can be overridden by caller
-                self.model = "gemini-2.5-flash-lite"
-            elif backend == "openrouter":
-                self.model = "google/gemini-2.0-flash-lite-preview-02-05:free"
-            elif backend == "transformers":
+            if backend == "transformers":
                 # Get recommended model based on hardware
                 rec_model, _, rec_msg = get_recommended_model_config()
                 if rec_model == "API":
                     self._log(f"WARNING: {rec_msg}")
-                    # Default to quantized if they still want to try locally
-                    self.model = "Jake-Writer-Jobharvest/qwen3-vl-8b-merged-q8"
+                    # Default to the full merged model if they still want to try locally
+                    self.model = "Jake-Writer-Jobharvest/qwen3-vl-8b-merged-BF16"
                 else:
                     self._log(f"Recommended model: {rec_model} ({rec_msg})")
                     self.model = rec_model
-            else:
-                raise ValueError(f"Unknown backend: {backend}")
+            elif backend == "vllm":
+                self.model = "Jake-Writer-Jobharvest/qwen3-vl-8b-merged-bf16"
         else:
             self.model = model
 
@@ -262,231 +213,172 @@ class ActionPlanner:
         image_paths = [image_path] if isinstance(image_path, str) else image_path
         self._log(f"Input paths: {image_paths}")
 
-        usage = None
-
-        if self.backend == "ollama":
-            import ollama
-
-            self._log("Waiting for Ollama response...")
-            client = ollama.Client(host=self.ollama_host)
-            # Ollama chat supports multiple images in the 'images' list
-            response = client.chat(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt, "images": image_paths}],
-                options={
-                    "temperature": 0.0,
-                    "num_predict": 1024,
-                },
-            )
-            result = response["message"]["content"]
-            
-            if "prompt_eval_count" in response:
-                usage = {
-                    "input_tokens": response["prompt_eval_count"],
-                    "output_tokens": response["eval_count"],
-                    "model": self.model
-                }
-                self.token_usage.append(usage)
-            
-            return result, usage
-
-        if self.backend == "gemini":
-            if not genai or not GenerateContentConfig or not Part:
-                raise ValueError("google-genai not installed or incomplete. Install: pip install google-genai")
-
-            if self._genai_client is None:
-                if not self.gemini_api_key:
-                    raise ValueError("GEMINI_API_KEY is required for Gemini backend when not using Vertex AI.")
-                self._genai_client = genai.Client(api_key=self.gemini_api_key)  # type: ignore[call-arg]
-
-            import mimetypes
-            contents: List[Any] = []
-
-            for path in image_paths:
-                mime_type, _ = mimetypes.guess_type(path)
-                if not mime_type:
-                    mime_type = "image/png"
-                
-                with open(path, "rb") as f:
-                    data = f.read()
-                    contents.append(Part.from_bytes(data=data, mime_type=mime_type))
-            
-            contents.append(prompt)
-
-            # Configure response as JSON (planner expects JSON it can parse)
-            config = GenerateContentConfig(
-                temperature=0.0,
-                response_mime_type="application/json",
-            )
-
-            response = self._genai_client.models.generate_content(  # type: ignore[union-attr]
-                model=self.model,
-                contents=contents,
-                config=config,
-            )
-            result = response.text
-            
-            if response.usage_metadata:
-                usage = {
-                    "input_tokens": response.usage_metadata.prompt_token_count,
-                    "output_tokens": response.usage_metadata.candidates_token_count,
-                    "cached_input_tokens": getattr(response.usage_metadata, "cached_content_token_count", 0),
-                    "model": self.model
-                }
-                self.token_usage.append(usage)
-
-            return result, usage
-
-        if self.backend == "openrouter":
-            import requests
-
-            if not self.openrouter_key:
-                raise ValueError("OPENROUTER_KEY is required for openrouter backend.")
-
-            import mimetypes
-            message_content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
-
-            for path in image_paths:
-                mime_type, _ = mimetypes.guess_type(path)
-                if not mime_type:
-                    mime_type = "image/png"
-
-                with open(path, "rb") as f:
-                    image_base64 = base64.b64encode(f.read()).decode("utf-8")
-                    message_content.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{mime_type};base64,{image_base64}"},
-                    })
-
-            url = "https://openrouter.ai/api/v1/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {self.openrouter_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://github.com/jakewriter/PlaywrightCaptchaKrakenJS",
-                "X-Title": "CaptchaKraken",
-            }
-
-            payload = {
-                "model": self.model,
-                "messages": [{"role": "user", "content": message_content}],
-                "temperature": 0.0,
-                "response_format": {"type": "json_object"} if "json" in prompt.lower() else None,
-            }
-
-            self._log(f"Waiting for OpenRouter response ({self.model})...")
-            response = requests.post(url, headers=headers, json=payload)
-            response.raise_for_status()
-            data = response.json()
-
-            if "choices" in data and len(data["choices"]) > 0:
-                result = data["choices"][0]["message"]["content"]
-            else:
-                self._log(f"OpenRouter Error: {data}")
-                raise ValueError(f"OpenRouter returned no results: {data}")
-
-            # ... usage ...
-            if "usage" in data:
-                usage = {
-                    "input_tokens": data["usage"].get("prompt_tokens", 0),
-                    "output_tokens": data["usage"].get("completion_tokens", 0),
-                    "model": self.model,
-                }
-                self.token_usage.append(usage)
-
-            return result, usage
-
         if self.backend == "transformers":
+            # Check if we should use the tool server for warm inference
+            tool_server_url = os.getenv("CAPTCHA_TOOL_SERVER")
+            if tool_server_url:
+                import requests
+                self._log(f"Calling tool server for planning: {tool_server_url}/plan")
+                try:
+                    resp = requests.post(
+                        f"{tool_server_url}/plan",
+                        json={"image_paths": image_paths, "prompt": prompt},
+                        timeout=300
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    return data.get("response", ""), None
+                except Exception as e:
+                    self._log(f"Tool server call failed: {e}. Falling back to local transformers.")
+
             from PIL import Image
             import torch
-            from transformers import AutoProcessor, AutoModelForImageTextToText
+            from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
+            from qwen_vl_utils import process_vision_info
+            
+            # Get device before model initialization so it's available later
+            from .hardware import get_device
+            device = get_device()
             
             if self._model is None:
                 self._log(f"Loading transformers model: {self.model}")
                 self._processor = AutoProcessor.from_pretrained(self.model, trust_remote_code=True)
                 
-                # Determine best device
-                if torch.cuda.is_available():
-                    device = "cuda"
-                    dtype = torch.bfloat16
-                elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                    device = "mps"
-                    dtype = torch.float16 # MPS prefers float16
-                else:
-                    device = "cpu"
-                    dtype = torch.float32
+                # Use bfloat16 for CUDA, float16 for MPS
+                dtype = torch.bfloat16 if device == "cuda" else torch.float16 if device == "mps" else torch.float32
                 
                 self._log(f"Using device: {device}, dtype: {dtype}")
                 
-                # Use AutoModelForImageTextToText (replaces deprecated AutoModelForVision2Seq)
-                self._model = AutoModelForImageTextToText.from_pretrained(
+                # Use SDPA for speed
+                attn_impl = "sdpa"
+                
+                self._model = Qwen3VLForConditionalGeneration.from_pretrained(
                     self.model,
                     torch_dtype=dtype,
-                    device_map="auto" if device != "cpu" else None,
-                    trust_remote_code=True
-                )
+                    trust_remote_code=True,
+                    attn_implementation=attn_impl
+                ).to(device)
                 
-                if device == "cpu":
-                    self._model = self._model.to("cpu")
+                # No longer need device_map="auto" if we force to device
             
-            messages = [{"role": "user", "content": []}]
+            messages = [
+                {
+                    "role": "system",
+                    "content": "You are an expert captcha solver. Think carefully about the visual cues. Respond ONLY with the JSON action."
+                },
+                {"role": "user", "content": []}
+            ]
             processed_images = []
             
             for path in image_paths:
                 is_video = any(path.lower().endswith(ext) for ext in [".mp4", ".webm", ".gif", ".avi"])
                 if is_video:
-                    # Simple video support: sample first frame for now or implement full sampling
-                    # For captcha, often the first frame or a middle frame is enough
                     import cv2
                     cap = cv2.VideoCapture(path)
                     ret, frame = cap.read()
                     if ret:
                         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                         processed_images.append(Image.fromarray(frame_rgb))
-                        messages[0]["content"].append({"type": "image"})
+                        messages[1]["content"].append({"type": "image", "image": path})
                     cap.release()
                 else:
                     processed_images.append(Image.open(path).convert("RGB"))
-                    messages[0]["content"].append({"type": "image"})
+                    messages[1]["content"].append({"type": "image", "image": path})
             
-            messages[0]["content"].append({"type": "text", "text": prompt})
+            messages[1]["content"].append({"type": "text", "text": prompt})
             
-            # Apply chat template if model supports it, otherwise fallback to simple prompt
             try:
-                text = self._processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                text = self._processor.apply_chat_template(
+                    messages, 
+                    tokenize=False, 
+                    add_generation_prompt=True,
+                    enable_thinking=True
+                )
             except:
-                # Fallback for models without chat template support in processor
                 text = prompt
             
+            image_inputs, video_inputs = process_vision_info(messages)
+            
+            # Optimization: Cap resolution for speed
             inputs = self._processor(
                 text=[text],
-                images=processed_images,
+                images=image_inputs,
+                videos=video_inputs,
                 padding=True,
                 return_tensors="pt",
+                min_pixels=256*256,
+                max_pixels=768*768
             )
             
             # Move inputs to model device
-            try:
-                # If using device_map, the model might not have a single device
-                target_device = next(self._model.parameters()).device
-                self._log(f"Moving inputs to {target_device}")
-                inputs = {k: v.to(target_device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
-            except Exception as e:
-                self._log(f"Error moving inputs to device: {e}")
-                # Fallback: try moving the whole thing if it's a BatchEncoding
-                inputs = inputs.to(self._model.device)
+            inputs = inputs.to(device)
             
             self._log(f"Generating response with {self.model}...")
-            # We use max_new_tokens=1024 as requested
-            generated_ids = self._model.generate(**inputs, max_new_tokens=1024)
+            with torch.no_grad():
+                # Use greedy decoding and reduce tokens
+                generated_ids = self._model.generate(
+                    **inputs, 
+                    max_new_tokens=512, # Reduced as we no longer want analysis
+                    do_sample=False,
+                    use_cache=True
+                )
             
-            # Extract only the newly generated tokens
             generated_ids_trimmed = [
-                out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+                out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs["input_ids"], generated_ids)
             ]
             result = self._processor.batch_decode(
                 generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
             )[0]
             
+            return result, None
+
+        if self.backend == "vllm":
+            try:
+                from vllm import LLM, SamplingParams
+                from PIL import Image
+            except ImportError:
+                raise ImportError("vLLM not installed. Please install with 'pip install vllm'")
+
+            if self._model is None:
+                self._log(f"Loading vLLM model: {self.model}")
+                # Default to 0.65 to allow SAM 3 to coexist on 32GB cards
+                gpu_memory_utilization = float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.6"))
+                
+                self._model = LLM(
+                    model=self.model,
+                    trust_remote_code=True,
+                    max_model_len=8192,
+                    gpu_memory_utilization=gpu_memory_utilization,
+                    **self.config
+                )
+            
+            sampling_params = SamplingParams(
+                temperature=0,
+                max_tokens=512,
+                stop=["<|im_end|>", "<|endoftext|>"]
+            )
+
+            # vLLM multi-modal input format for Qwen2-VL style models
+            mm_data = {}
+            if len(image_paths) == 1:
+                mm_data = {"image": Image.open(image_paths[0]).convert("RGB")}
+            else:
+                mm_data = {"image": [Image.open(p).convert("RGB") for p in image_paths]}
+
+            # vLLM expects the prompt with vision tokens if using multi-modal
+            # For Qwen2-VL/Qwen3-VL, it typically uses <|vision_start|><|image_pad|><|vision_end|> placeholders
+            vision_tokens = "<|vision_start|><|image_pad|><|vision_end|>" * len(image_paths)
+            full_prompt = f"<|im_start|>system\nYou are an expert captcha solver. Think carefully about the visual cues. Respond ONLY with the JSON action.<|im_end|>\n<|im_start|>user\n{vision_tokens}{prompt}<|im_end|>\n<|im_start|>assistant\n"
+
+            outputs = self._model.generate(
+                {
+                    "prompt": full_prompt,
+                    "multi_modal_data": mm_data,
+                },
+                sampling_params=sampling_params
+            )
+            
+            result = outputs[0].outputs[0].text
             return result, None
 
         raise ValueError(f"Unknown backend: {self.backend}")
@@ -541,7 +433,7 @@ class ActionPlanner:
             lines = ["Detected Objects (ID: box [x, y, w, h]):"]
             for obj in sorted(objects, key=lambda x: x.get("id", 0)):
                 lines.append(f"- Object {obj.get('id')}: {obj.get('bbox')}")
-            lines.append("\\nUse these Object IDs in your analysis.")
+            lines.append("\\nUse these Object IDs in your response.")
             object_list_section = "\\n".join(lines)
 
         history_section = ""
@@ -588,19 +480,21 @@ class ActionPlanner:
         source_description: str = "movable item",
         target_description: str = "matching slot",
         primary_goal: str = "Complete the puzzle",
+        iteration: int = 0,
     ) -> Dict[str, Any]:
         """
         Refine a drag destination with visual feedback.
 
         Args:
-            image_path: Path to image with drag overlay (source box, arrow, target box)
+            image_path: Path to image with drag overlay (item to move marked with green box)
             instruction: Original puzzle instruction
             current_target: Current target position [x, y] as percentages (0-1)
             history: List of previous refinements:
-                [{"destination": [x, y], "analysis": "...", "decision": "..."}]
+                [{"destination": [x, y], "decision": "..."}]
             source_description: Description of the item being dragged
             target_description: Description of where it should go
             primary_goal: The specific goal identified by the planner
+            iteration: Current refinement iteration (0 = first attempt)
 
         Returns:
             Dict following the PlannerDragRefineAction schema.
@@ -610,16 +504,22 @@ class ActionPlanner:
             history_lines = ["Previous attempts:"]
             for i, h in enumerate(history):
                 dest = h.get("destination", [0, 0])
-                analysis = h.get("analysis", "")
                 decision = h.get("decision", "")
                 history_lines.append(
                     f"  {i + 1}. destination: ({dest[0]:.1%}, {dest[1]:.1%}), "
-                    f'analysis: "{analysis}", decision: {decision}'
+                    f'decision: {decision}'
                 )
             history_lines.append(f"  {len(history) + 1}. destination: ({current_target[0]:.1%}, {current_target[1]:.1%}) (CURRENT)")
             history_text = "\n".join(history_lines)
         else:
             history_text = "This is the first attempt."
+
+        if iteration == 0:
+            iteration_hint = "This is the INITIAL estimation step."
+            movement_instruction = "Estimate the TOTAL distance needed to reach the target and provide it as dx and dy. We will refine if needed, but aim to reach the target in one step."
+        else:
+            iteration_hint = f"This is refinement step #{iteration}. We have moved the object but it needs fine-tuning."
+            movement_instruction = "Make precise, SMALL adjustments (1-5%) to perfectly align the object. Focus on connectivity and alignment."
 
         prompt = DRAG_REFINE_PROMPT.format(
             instruction=instruction or "Complete the drag puzzle.",
@@ -629,6 +529,8 @@ class ActionPlanner:
             target_x=current_target[0],
             target_y=current_target[1],
             history_text=history_text,
+            iteration_hint=iteration_hint,
+            movement_instruction=movement_instruction,
         )
 
         response, _ = self._chat_with_image(prompt, image_path)
@@ -643,7 +545,6 @@ class ActionPlanner:
 
         # Ensure we have valid adjustment values and return compatible dict
         return {
-            "analysis": result.get("analysis", ""),
             "goal": result.get("goal", primary_goal),
             "action": "refine_drag",
             "decision": result.get("decision", "accept"),
@@ -678,7 +579,7 @@ class ActionPlanner:
     # ------------------------------------------------------------------
     # Grid Selection
     # ------------------------------------------------------------------
-    def get_grid_selection(self, image_path: str, rows: int, cols: int, instruction: str = "Solve the captcha by selecting the correct images") -> List[int]:
+    def get_grid_selection(self, image_path: str, rows: int, cols: int, instruction: str = "") -> List[int]:
         """
         Ask which numbers to select in the grid.
         Returns a list of selected cell numbers.
@@ -686,12 +587,13 @@ class ActionPlanner:
         total = rows * cols
 
         self._log("ActionPlanner.get_grid_selection called")
-        self._log(f"  instruction: '{instruction}'")
+        if instruction:
+            self._log(f"  external instruction: '{instruction}'")
         self._log(f"  grid: {rows}x{cols}")
 
         grid_hint = ""
         if rows == 4 and cols == 4:
-            grid_hint = "Hint: Single large image split into tiles. Select ALL parts."
+            grid_hint = "Hint: Select all tiles that make up the object in the image, even if a tile only has a small part of the object."
         elif rows == 3 and cols == 3:
             grid_hint = "Hint: Separate images. Select only clear matches."
 
@@ -699,7 +601,6 @@ class ActionPlanner:
             rows=rows, 
             cols=cols, 
             total=total, 
-            instruction=instruction,
             grid_hint=grid_hint
         )
         
@@ -716,8 +617,7 @@ class ActionPlanner:
         action = data.get("action", {})
         selected = action.get("target_ids", [])
         
-        # Log model analysis (if present)
-        self._log(f"Analysis: {data.get('analysis', 'N/A')}")
+        # Log final selection
         self._log(f"Final selection: {selected}")
 
         return selected

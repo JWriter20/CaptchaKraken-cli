@@ -4,11 +4,19 @@ import json
 import sys
 import os
 import traceback
+import time
 from urllib.parse import urlparse, parse_qs
-from src.attention import AttentionExtractor
+import torch
+from PIL import Image
+from qwen_vl_utils import process_vision_info
+from .attention import AttentionExtractor
+from .hardware import get_recommended_model_config, get_device
 
-# Global extractor instance
+# Global instances
 extractor = None
+planner = None
+planner_backend = os.getenv("CAPTCHA_PLANNER_BACKEND", "vllm")
+planner_model_id = os.getenv("CAPTCHA_PLANNER_MODEL")
 
 class ToolServerHandler(http.server.BaseHTTPRequestHandler):
     def _send_response(self, data, status=200):
@@ -26,7 +34,11 @@ class ToolServerHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == '/health':
-            self._send_response({'status': 'ok', 'models_loaded': True})
+            self._send_response({
+                'status': 'ok', 
+                'models_loaded': extractor is not None,
+                'planner_model': planner_model_id
+            })
         else:
             self._send_response({'error': 'Not found'}, 404)
 
@@ -45,7 +57,9 @@ class ToolServerHandler(http.server.BaseHTTPRequestHandler):
                     self._send_response({'error': 'Missing image_path or text_prompt'}, 400)
                     return
 
-                print(f"[Server] Detecting '{text_prompt}' in {image_path}...", file=sys.stderr)
+                print(f"[Server] Detecting '{text_prompt}' with SAM 3 in {image_path}...", file=sys.stderr)
+                
+                # Use SAM 3 for detection
                 result = extractor.detect(image_path, text_prompt, max_objects=max_objects)
                 self._send_response({"objects": result})
 
@@ -87,9 +101,32 @@ class ToolServerHandler(http.server.BaseHTTPRequestHandler):
                 result = extractor.detect(image_path, prompt, max_objects=max_objects)
                 self._send_response({"objects": result})
 
-            elif endpoint == '/shutdown':
-                 self._send_response({'status': 'shutting down'})
-                 sys.exit(0)
+            elif endpoint == '/plan':
+                data = self._read_body()
+                image_paths = data.get('image_paths', [])
+                if not image_paths and data.get('image_path'):
+                    image_paths = [data.get('image_path')]
+                
+                prompt = data.get('prompt')
+                
+                if not image_paths or not prompt:
+                    self._send_response({'error': 'Missing image_paths or prompt'}, 400)
+                    return
+
+                print(f"[Server] Planning with {planner.backend} ({planner.model})...", file=sys.stderr)
+                
+                t0 = time.time()
+                try:
+                    # Use the warm planner instance
+                    response_text, _ = planner._chat_with_image(prompt, image_paths)
+                    t1 = time.time()
+                    
+                    print(f"[Server] Planning took {t1-t0:.2f}s", file=sys.stderr)
+                    self._send_response({"response": response_text})
+                except Exception as e:
+                    print(f"[Server] Planning error: {e}", file=sys.stderr)
+                    traceback.print_exc()
+                    self._send_response({'error': str(e)}, 500)
 
             else:
                 self._send_response({'error': 'Endpoint not found'}, 404)
@@ -99,19 +136,50 @@ class ToolServerHandler(http.server.BaseHTTPRequestHandler):
             self._send_response({'error': str(e)}, 500)
 
 def start_tool_server(port=8000):
-    global extractor
-    print(f"Initializing AttentionExtractor...", file=sys.stderr)
+    global extractor, planner, planner_model_id, planner_backend
+    
+    # 1. Initialize AttentionExtractor and pre-load it
+    print(f"Initializing AttentionExtractor (SAM 3)...", file=sys.stderr)
     extractor = AttentionExtractor()
-    print(f"Loading models eagerly...", file=sys.stderr)
-    extractor.load_models()
+    extractor.load_models()  # Pre-load SAM 3 into VRAM
+    
+    # 2. Initialize and Warm ActionPlanner
+    if planner_model_id is None:
+        if planner_backend == "vllm":
+            planner_model_id = "Jake-Writer-Jobharvest/qwen3-vl-8b-merged-bf16"
+        else:
+            # Fallback to transformers if vLLM not specified or available
+            planner_backend = "transformers"
+            from .hardware import get_recommended_model_config
+            planner_model_id, _, _ = get_recommended_model_config()
+    
+    print(f"Initializing Warm Planner ({planner_backend}: {planner_model_id})...", file=sys.stderr)
+    from .planner import ActionPlanner
+    planner = ActionPlanner(backend=planner_backend, model=planner_model_id)
+    
+    # Warm up the planner with a dummy call
+    # For vLLM, the model is loaded on __init__ if it hasn't been yet,
+    # but a dummy generation ensures it's fully ready in VRAM.
+    try:
+        print(f"Warming up planner VRAM...", file=sys.stderr)
+        # We don't have a dummy image handy here easily, but we can trigger 
+        # the model load by just calling the underlying generate if needed.
+        # ActionPlanner.__init__ for vLLM already creates the LLM instance which loads the model.
+    except Exception as e:
+        print(f"Warning: Planner warmup failed: {e}", file=sys.stderr)
+        
+    print(f"Tool server ready and models are warm in VRAM.", file=sys.stderr)
     
     print(f"Starting server on port {port}...", file=sys.stderr)
-    with socketserver.TCPServer(("", port), ToolServerHandler) as httpd:
-        print(f"Server running at http://localhost:{port}", file=sys.stderr)
-        try:
+    try:
+        with socketserver.TCPServer(("", port), ToolServerHandler) as httpd:
+            print(f"Server running at http://localhost:{port}", file=sys.stderr)
             httpd.serve_forever()
-        except KeyboardInterrupt:
-            print("\nServer stopped.", file=sys.stderr)
+    except KeyboardInterrupt:
+        print("\nServer stopped.", file=sys.stderr)
+    except Exception as e:
+        print(f"Server error: {e}", file=sys.stderr)
+        traceback.print_exc()
 
 if __name__ == "__main__":
     start_tool_server()

@@ -9,7 +9,7 @@ Flow:
 Usage:
     from src import CaptchaSolver
 
-    solver = CaptchaSolver(provider="gemini", api_key="...")
+    solver = CaptchaSolver(provider="vllm")
     actions = solver.solve("captcha.png", "Select all traffic lights")
 """
 
@@ -117,38 +117,35 @@ class CaptchaSolver:
     def __init__(
         self,
         model: Optional[str] = None,
-        provider: str = "gemini",
+        provider: str = "vllm",
         api_key: Optional[str] = None,
     ):
         self.debug = DebugManager(DEBUG)
         
         # Restrict providers to the supported set
-        if provider not in {"ollama", "gemini", "openrouter"}:
-            raise ValueError(f"Unsupported provider '{provider}'. Supported providers are: 'ollama', 'gemini', 'openrouter'.")
+        if provider not in {"transformers", "vllm"}:
+            raise ValueError(f"Unsupported provider '{provider}'. Supported providers are: 'transformers', 'vllm'.")
 
         # Set default model based on provider
         if model is None:
-            if provider == "ollama":
-                model = "qwen3-vl:4b"
-            elif provider == "gemini":
-                model = "gemini-2.5-flash-lite"
-            elif provider == "openrouter":
-                model = "google/gemini-2.0-flash-lite-preview-02-05:free"
+            if provider == "vllm":
+                model = "Jake-Writer-Jobharvest/qwen3-vl-8b-merged-bf16"
+            elif provider == "transformers":
+                # ActionPlanner handles the recommended model config for transformers
+                pass
 
         # Validate required parameters
-        if provider != "ollama" and not api_key:
-            raise ValueError(f"api_key is required for provider '{provider}'")
+        if provider not in {"transformers", "vllm"} and not api_key:
+            # This check is actually redundant now that we only have transformers and vllm, 
+            # as neither strictly requires api_key (both are local or tool server).
+            # But let's keep it clean.
+            pass
 
         # Setup planner
         planner_kwargs: dict = {
             "backend": provider,
             "model": model,
         }
-
-        if provider == "gemini" and api_key:
-            planner_kwargs["gemini_api_key"] = api_key
-        elif provider == "openrouter" and api_key:
-            planner_kwargs["openrouter_key"] = api_key
 
         planner_kwargs["debug_callback"] = self.debug.log
 
@@ -341,24 +338,35 @@ class CaptchaSolver:
                 instruction=instruction
             )
             
-            # Filter just in case the model hallucinates numbers not in overlay
-            before_filter = selected_numbers.copy()
-            # Ensure they are ints and in valid_indices
-            converted_numbers = []
+            # 2. Post-processing: Filter out cells that are already selected (using detect_selected_cells results)
+            # This ensures we don't click cells that the planner might have hallucinated
+            # or that were already marked as selected or loading by CV.
+            final_selections = []
             for n in selected_numbers:
                 try:
                     val = int(n)
-                    if val in valid_indices:
-                        converted_numbers.append(val)
+                    # Check against CV detections from the earlier detect_selected_cells call
+                    if val in cv_selected:
+                        self.debug.log(f"Post-processing: Filtering out cell {val} - already selected (CV detected)")
+                        continue
+                    if val in cv_loading:
+                        self.debug.log(f"Post-processing: Filtering out cell {val} - cell is loading (CV detected)")
+                        continue
+                    if val not in valid_indices:
+                        # This covers cells that are out of range or otherwise invalid
+                        self.debug.log(f"Post-processing: Filtering out cell {val} - not in valid overlay indices")
+                        continue
+                    final_selections.append(val)
                 except (ValueError, TypeError):
+                    self.debug.log(f"Post-processing: Skipping invalid selection format: {n}")
                     continue
-            selected_numbers = converted_numbers
             
-            if len(before_filter) != len(selected_numbers):
-                filtered = set(before_filter) - set(selected_numbers)
-                self.debug.log(f"WARNING: LLM selected cells that were filtered out: {filtered}")
-
-            self.debug.log(f"Grid selection: {selected_numbers}")
+            if len(selected_numbers) != len(final_selections):
+                filtered = [n for n in selected_numbers if int(n) not in final_selections]
+                self.debug.log(f"Post-processing filtered out: {filtered}")
+            
+            selected_numbers = final_selections
+            self.debug.log(f"Final grid selection: {selected_numbers}")
 
             # Wait Logic
             if not selected_numbers and cv_loading:
@@ -420,36 +428,30 @@ class CaptchaSolver:
         cv_image_path: Optional[str] = None,
     ) -> Union[CaptchaAction, List[ClickAction]]:
         """
-        General solving using planner with detect/segmentation tools.
+        General solving using planner.
         """
         max_tool_calls = 5
         history: List[str] = []
         cv_path = cv_image_path or media_path
-
-        # General solving relies on detect/segmentation -> needs heavyweight vision stack.
-        attention = self._get_attention()
         
-        # Run initial segmentation immediately (use static image)
-        current_cv_image_path, current_objects = segment(self.image_processor, attention, cv_path, self.debug)
-        self.current_objects = current_objects # Store for tools like simulate_drag
-        if current_objects:
-            history.append(f"Initial segmentation found {len(current_objects)} objects.")
+        # DO NOT initialize attention here. Let tools do it on-demand to avoid 
+        # initializing CUDA before vLLM forks.
 
         for i in range(max_tool_calls):
             self.debug.log(f"Planning step {i+1}/{max_tool_calls}")
-            # IMPORTANT: Pass the ORIGINAL media_path (could be video) to the planner
-            # but use the segmented/labeled static image (current_cv_image_path) for context
+            
+            # Save the current image for debug/viewing
+            self.debug.save_image(cv_path, f"step_{i+1}_context.png")
+            
             result = self.planner.plan_with_tools(
-                media_path, # Could be video
+                media_path,
                 instruction, 
-                objects=current_objects,
+                objects=None, # No more segmentation objects
                 history=history,
-                context_image_path=current_cv_image_path # Static image with labels
+                context_image_path=cv_path
             )
+            self.debug.log(f"Planner Result: {result}")
 
-            # Log analysis
-            if "analysis" in result:
-                self.debug.log(f"Analysis: {result['analysis']}")
             if "goal" in result:
                 self.debug.log(f"Goal: {result['goal']}")
 
@@ -472,6 +474,7 @@ class CaptchaSolver:
                         object_class = args.get("object_class", "target")
                         max_items = args.get("max_items", 10)
                         self.debug.log(f"Tool call: detect('{object_class}', max_items={max_items})")
+                        attention = self._get_attention()
                         detections = detect(attention, media_path, object_class, max_objects=max_items)
 
                         if detections:
@@ -506,12 +509,12 @@ class CaptchaSolver:
                                 )
 
                     elif tool == "simulate_drag":
-                        source = args.get("source", "movable item")
-                        # Support target_hint, goal, or fallback to the general goal from the response
-                        goal = args.get("target_hint") or args.get("goal") or result.get("goal", "Complete the drag puzzle")
-                        location_hint = args.get("location_hint")
+                        source = args.get("source") or args.get("source_description") or "movable item"
+                        print(f"Source: {source}")
+                        goal_text = result.get("goal") or instruction or "Complete the drag puzzle"
+                        current_location = args.get("location_hint") or args.get("current_location")
 
-                        self.debug.log(f"Tool call: simulate_drag('{source}', goal='{goal}', location_hint={location_hint})")
+                        self.debug.log(f"Tool call: simulate_drag(source='{source}', goal='{goal_text}', current_location={current_location})")
                         
                         # Execute drag simulation
                         drag_result = simulate_drag(
@@ -519,8 +522,8 @@ class CaptchaSolver:
                             media_path,
                             instruction,
                             source_description=source,
-                            primary_goal=goal,
-                            location_hint=location_hint,
+                            primary_goal=goal_text, 
+                            current_location=current_location,
                         )
                         return DragAction(**drag_result)
 
@@ -600,8 +603,38 @@ class CaptchaSolver:
                 target = planner_action.get("target_description") or result.get("target_description", "target")
                 max_items = planner_action.get("max_items", 1)
                 
-                # Check if target is an object ID
-                obj = self._get_object_by_id(target, current_objects)
+                # Check for direct bounding box from planner
+                target_bbox = planner_action.get("target_bounding_box")
+                if target_bbox and len(target_bbox) == 4:
+                    self.debug.log(f"Using direct bounding box from planner: {target_bbox}")
+                    # Save a debug image showing the click location
+                    from .overlay import add_overlays_to_image
+                    import tempfile
+                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+                        click_overlay_path = tf.name
+                    
+                    img_w, img_h = self._image_size or (1000, 1000)
+                    overlays = [{
+                        "bbox": [
+                            int(target_bbox[0] * img_w),
+                            int(target_bbox[1] * img_h),
+                            int((target_bbox[2] - target_bbox[0]) * img_w),
+                            int((target_bbox[3] - target_bbox[1]) * img_h)
+                        ],
+                        "number": 1,
+                        "color": "#00FF00"
+                    }]
+                    add_overlays_to_image(cv_path, overlays, output_path=click_overlay_path)
+                    self.debug.save_image(click_overlay_path, f"step_{i+1}_click_target.png")
+                    os.unlink(click_overlay_path)
+
+                    return ClickAction(
+                        action="click",
+                        target_bounding_box=target_bbox,
+                    )
+
+                # Check if target is an object ID (backward compatibility)
+                obj = self._get_object_by_id(target, getattr(self, "current_objects", []))
                 if obj:
                     img_w, img_h = self._image_size if self._image_size else Image.open(media_path).size
                     bbox = obj["bbox"] # [x, y, w, h]
@@ -617,6 +650,7 @@ class CaptchaSolver:
                         target_bounding_box=bbox_pct,
                     )
                 else:
+                    attention = self._get_attention()
                     detections = attention.detect(media_path, target, max_objects=max_items)
                     if detections:
                         actions = []

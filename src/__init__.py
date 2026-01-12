@@ -4,14 +4,8 @@ CaptchaKraken - AI-powered captcha solver using LLM planning + vision tools.
 Usage:
     from src import CaptchaSolver
 
-    # Gemini (default cloud backend)
-    solver = CaptchaSolver(
-        provider="gemini",
-        api_key="your-gemini-api-key"
-    )
-
-    # Ollama (local backend)
-    solver = CaptchaSolver(provider="ollama")
+    # vLLM (high-performance local backend)
+    solver = CaptchaSolver(provider="vllm")
 
     # Solve a captcha
     actions = solver.solve("captcha.png", "Select all traffic lights")
@@ -19,8 +13,7 @@ Usage:
 
 from pathlib import Path
 
-# Best-effort load of .env from project root so GEMINI_API_KEY and others are
-# available even when running scripts directly (e.g. scripts/test_detection.py).
+# Best-effort load of .env from project root
 try:  # pragma: no cover - environment setup
     from dotenv import load_dotenv
 
