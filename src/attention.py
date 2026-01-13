@@ -95,6 +95,15 @@ def clusterDetections(
         }
         if "score" in boxes[0]:
             result["score"] = sum(b["score"] for b in boxes) / n
+            
+        # Merge masks if present
+        if "mask" in boxes[0]:
+            merged_mask = boxes[0]["mask"].copy()
+            for i in range(1, n):
+                if "mask" in boxes[i]:
+                    merged_mask = np.logical_or(merged_mask, boxes[i]["mask"])
+            result["mask"] = merged_mask
+            
         return result
 
     # Greedy clustering: merge boxes based on IoU or distance
@@ -161,8 +170,8 @@ def default_predicate(detection: Dict[str, Any]) -> Optional[float]:
     score = detection.get("score", 0.6) 
 
     # 1. Hard Filters
-    # Too big (> 30% in either dimension - user requested)
-    if w > 0.30 or h > 0.30:
+    # Too big (> 25% in either dimension - refined from 30%)
+    if w > 0.25 or h > 0.25:
         return None
     # Too tiny (< 0.5% in either dimension - original "good" logic)
     if w < 0.005 or h < 0.005:
@@ -442,6 +451,7 @@ class AttentionExtractor:
                         "x_max": float(cmax) / width,
                         "y_max": float(rmax) / height,
                         "score": 0.6,
+                        "mask": mask,
                     })
                 return auto_detections
             except Exception as e:
@@ -459,9 +469,14 @@ class AttentionExtractor:
         # distance_threshold=0.01 is very strict to keep nearby but distinct objects separate
         merged = clusterDetections(all_detections, iou_threshold=0.5, distance_threshold=0.01)
         
+        print(f"[AttentionExtractor] DEBUG: {len(all_detections)} raw detections, {len(merged)} merged", file=sys.stderr)
+        for i, det in enumerate(merged):
+             y_center = (det["y_min"] + det["y_max"]) / 2
+             print(f"[AttentionExtractor] DEBUG: Merged {i}: bbox=[{det['x_min']:.3f}, {det['y_min']:.3f}, {det['x_max']:.3f}, {det['y_max']:.3f}] y_center={y_center:.3f}", file=sys.stderr)
+
         final_results = []
         for det in merged:
-            # 1. Coordinate Filter: 15% top/bottom buffer
+            # 1. Coordinate Filter: 5% top/bottom buffer (reduced from 10% for accuracy)
             y_center = (det["y_min"] + det["y_max"]) / 2
             if y_center < 0.15 or y_center > 0.85:
                 continue

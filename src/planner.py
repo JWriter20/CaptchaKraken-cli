@@ -41,37 +41,47 @@ from .hardware import get_recommended_model_config
 DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
 
 
+'''
+Author's note:
+For now we are prioritizing quality over speed. We may be able to have the model pass in descriptions instead of ids, but this often causes less often detections.
+It is better in my opinion to do two model queries instead of one to call a detect() tool call, then use the id, rather than passing in description
+directly into actions then calling detect in the background and returning immediately. 
+'''
+
 # For general planning with tool support
-PLAN_WITH_TOOLS_PROMPT = """Solve the captcha using ONE direct action or ONE tool call.
+PLAN_WITH_TOOLS_PROMPT = """Analyze the captcha image carefully.
+Your task is: {instruction}
 
-{instruction}
+If the instruction is missing or you need to find it, look for text at the top of the image.
 
+Detected Objects:
 {object_list_section}
 
 {history_section}
 
+Choose ONE action or ONE tool call from the options below.
+
 Direct Actions:
-- {{ "action": "click", "target_description": "...", "max_items": N }} (CRITICAL: Match N to instruction, e.g. "Select ALL 3 buses" -> max_items: 3)
-- {{ "action": "click", "target_ids": [list of item or cell ids] }} 
-- {{ "action": "drag", "source_description": "...", "source_id": N, "target_description": "...", "target_id": N }} (Provide EITHER description OR ID for both source and target)
-- {{ "action": "type", "text": "...", "target_description": "...", "target_id": N }}
+- {{ "action": "click", "target_ids": [id1, id2, ...] }}  (Use IDs from the list above)
+- {{ "action": "drag", "source_id": N, "target_id": N }}
+- {{ "action": "type", "text": "...", "target_id": N }}
 - {{ "action": "wait", "duration_ms": 500 }}
 - {{ "action": "done" }}
 
 Tool Calls:
-- detect(object_description, max_items)
-- simulate_drag(source, target_description) (source=accurate description of the SMALL movable item)
-- simulate_drag(source_id, target_description) (source_id=Object ID of the SMALL movable item)
-- simulate_drag(source, target_id) (target_id=Object ID of the destination)
-- simulate_drag(source_id, target_id)
+- detect(object_description, max_items) (Use this if the target object is not in the 'Detected Objects' list)
+- simulate_drag(source_id) (Use this for drag-and-drop puzzles to get iterative refinement)
 
-CRITICAL: Prioritize using IDs over descriptions. If the item isn't properly bounded/detected, use the description.
+CRITICAL:
+1. ALWAYS use "target_ids" (plural) for click actions, even for a single click.
+2. Use the Object IDs provided in the list above. The IDs correspond to the red dashed boxes in the reference image.
+3. If multiple items match the task, list all their IDs in "target_ids".
+4. Respond ONLY with JSON.
 
-Important: Respond ONLY with JSON. Ensure "max_items" reflects the total number of targets requested in the instruction. For simulate_drag, source MUST be the movable object description. AVOID using the full instruction as a source description.
-Example Click:
+Template:
 {{
-  "goal": "Visual goal",
-  "action": {{ ... }} 
+  "goal": "Explain what you see and why you are taking this action",
+  "action": {{ ... }}
   // OR: "tool_calls": [ {{ "name": "...", "args": {{ ... }} }} ]
 }}"""
 
@@ -84,13 +94,9 @@ Typically, these captchas contain exactly 6 characters.
 
 Respond ONLY with JSON matching this structure:
 {{
-  "goal": "Type the identified text",
-  "action": {{
-    "action": "type",
-    "text": "the text identified",
-    "target_description": "text input field"
-    "target_id": N
-  }}
+  "action": "type",
+  "text": "the text identified",
+  "target_id": N
 }}"""
 
 
@@ -104,11 +110,8 @@ IMPORTANT: If no tiles match the description (e.g., they have all been cleared o
 
 Return JSON format ALWAYS:
 {{
-  "goal": "Brief description of what needs to be done to solve the captcha.",
-  "action": {{
     "action": "click",
     "target_ids": [list of cell numbers (1-{total})]
-  }}
 }}"""
 
 
@@ -345,8 +348,8 @@ class ActionPlanner:
 
             if self._model is None:
                 self._log(f"Loading vLLM model: {self.model}")
-                # Default to 0.65 to allow SAM 3 to coexist on 32GB cards
-                gpu_memory_utilization = float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.6"))
+                # Default to 0.75 to allow SAM 3 to coexist on 32GB cards
+                gpu_memory_utilization = float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.75"))
                 
                 self._model = LLM(
                     model=self.model,
@@ -432,13 +435,15 @@ class ActionPlanner:
         Returns:
             Dict containing the planner's response, following the PlannerPlan schema.
         """
-        object_list_section = ""
+        object_list_section = "No objects detected yet. Use the 'detect' tool to find items."
         if objects:
-            lines = ["Detected Objects (ID: box [x, y, w, h]):"]
+            lines = []
             for obj in sorted(objects, key=lambda x: x.get("id", 0)):
-                lines.append(f"- Object {obj.get('id')}: {obj.get('bbox')}")
-            lines.append("\\nUse these Object IDs in your response.")
-            object_list_section = "\\n".join(lines)
+                obj_id = obj.get("id")
+                label = obj.get("label", "object")
+                bbox = obj.get("bbox")
+                lines.append(f"- Object {obj_id}: {label} at {bbox}")
+            object_list_section = "\n".join(lines)
 
         history_section = ""
         if history:
@@ -565,20 +570,19 @@ class ActionPlanner:
         Read distorted text from a text captcha.
 
         Returns:
-            The text to type
+          the text to type
         """
         response, _ = self._chat_with_image(TEXT_READ_PROMPT, image_path)
         data = self._parse_json(response)
         
-        # Validation
-        if PlannerPlan is not Any:
+        # Validation against PlannerTypeAction instead of PlannerPlan
+        if PlannerTypeAction is not Any:
             try:
-                PlannerPlan.model_validate(data)
+                PlannerTypeAction.model_validate(data)
             except Exception as e:
                 self._log(f"Text reading validation failed: {e}")
                 
-        action = data.get("action", {})
-        return action.get("text", "")
+        return data.get("text", "")
 
     # ------------------------------------------------------------------
     # Grid Selection
@@ -611,15 +615,14 @@ class ActionPlanner:
         response, _ = self._chat_with_image(prompt, image_path)
         data = self._parse_json(response)
         
-        # Validation
-        if PlannerPlan is not Any:
+        # Validation against PlannerClickAction instead of PlannerPlan
+        if PlannerClickAction is not Any:
             try:
-                PlannerPlan.model_validate(data)
+                PlannerClickAction.model_validate(data)
             except Exception as e:
                 self._log(f"Grid selection validation failed: {e}")
 
-        action = data.get("action", {})
-        selected = action.get("target_ids", [])
+        selected = data.get("target_ids", [])
         
         # Log final selection
         self._log(f"Final selection: {selected}")

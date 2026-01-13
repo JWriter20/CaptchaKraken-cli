@@ -188,7 +188,7 @@ class CaptchaSolver:
         self,
         media_path: str,
         instruction: str = "",
-    ) -> Union[CaptchaAction, List[ClickAction], Dict[str, Any]]:
+    ) -> Union[CaptchaAction, Dict[str, Any]]:
         """
         Solve a captcha image or video.
         """
@@ -241,7 +241,7 @@ class CaptchaSolver:
                 x, y, w, h = checkbox_box
                 return ClickAction(
                     action="click",
-                    target_bounding_box=[x / img_w, y / img_h, (x + w) / img_w, (y + h) / img_h],
+                    target_bounding_boxes=[[x / img_w, y / img_h, (x + w) / img_w, (y + h) / img_h]],
                 )
 
         # 3. General solving with tool use
@@ -257,7 +257,7 @@ class CaptchaSolver:
         image_path: str,
         instruction: str,
         grid_boxes: List[Tuple[int, int, int, int]],
-    ) -> Union[List[ClickAction], DoneAction, WaitAction]:
+    ) -> Union[ClickAction, DoneAction, WaitAction]:
         """
         Solve grid selection captcha.
         """
@@ -376,7 +376,7 @@ class CaptchaSolver:
                 return DoneAction(action="done")
 
             # Convert to ClickActions
-            actions = []
+            target_bounding_boxes = []
             assert self._image_size is not None
             img_w, img_h = self._image_size
             for num in selected_numbers:
@@ -389,18 +389,15 @@ class CaptchaSolver:
                 if 0 <= idx < len(grid_boxes):
                     x1, y1, x2, y2 = grid_boxes[idx]
                     bbox_pct = [x1 / img_w, y1 / img_h, x2 / img_w, y2 / img_h]
-                    actions.append(
-                        ClickAction(
-                            action="click",
-                            target_number=num,
-                            target_bounding_box=bbox_pct,
-                        )
-                    )
+                    target_bounding_boxes.append(bbox_pct)
 
-            if not actions:
+            if not target_bounding_boxes:
                 return DoneAction(action="done")
 
-            return actions
+            return ClickAction(
+                action="click",
+                target_bounding_boxes=target_bounding_boxes,
+            )
 
         finally:
             if os.path.exists(overlay_path):
@@ -426,7 +423,7 @@ class CaptchaSolver:
         media_path: str,
         instruction: str,
         cv_image_path: Optional[str] = None,
-    ) -> Union[CaptchaAction, List[ClickAction]]:
+    ) -> CaptchaAction:
         """
         General solving using planner.
         """
@@ -440,21 +437,53 @@ class CaptchaSolver:
         # 1. Pre-detect all objects to provide IDs for the planner
         self.debug.log("Running detect_all to identify objects...")
         attention = self._get_attention()
-        self.current_objects = attention.detect_all(cv_path)
+        # Use more descriptive prompts to catch varied objects
+        raw_objects = attention.detect_all(cv_path)
+        
+        # Assign initial IDs
+        self.current_objects = []
+        for i, obj in enumerate(raw_objects):
+            obj["id"] = i + 1
+            # Add a generic label if none exists
+            if not obj.get("label"):
+                obj["label"] = "item"
+            self.current_objects.append(obj)
+        self.next_object_id = len(self.current_objects) + 1
+        
         self.debug.log(f"Detected {len(self.current_objects)} objects")
+
+        # 2. Create labeled context image for the planner
+        ext = os.path.splitext(cv_path)[1] or ".png"
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tf:
+            labeled_path = tf.name
+        self._temp_files.append(labeled_path)
+        
+        shutil.copy2(cv_path, labeled_path)
+        if self.current_objects:
+            overlays = []
+            for obj in self.current_objects:
+                overlays.append({
+                    "bbox": obj["bbox"],
+                    "number": obj["id"],
+                    "color": "#FF0000",
+                    "box_style": "dashed"
+                })
+            add_overlays_to_image(labeled_path, overlays)
+            self.debug.save_image(labeled_path, "01_detected_objects.png")
 
         for i in range(max_tool_calls):
             self.debug.log(f"Planning step {i+1}/{max_tool_calls}")
             
-            # Save the current image for debug/viewing
-            self.debug.save_image(cv_path, f"step_{i+1}_context.png")
+            # Use labeled image as context if objects were found
+            current_context = labeled_path if self.current_objects else cv_path
+            self.debug.save_image(current_context, f"step_{i+1}_context.png")
             
             result = self.planner.plan_with_tools(
                 media_path,
                 instruction, 
                 objects=self.current_objects,
                 history=history,
-                context_image_path=cv_path
+                context_image_path=current_context
             )
             self.debug.log(f"Planner Result: {result}")
 
@@ -471,10 +500,10 @@ class CaptchaSolver:
             
             # Process all requested tools
             if tool_calls:
+                new_detections_found = False
                 for call in tool_calls:
                     tool = call["name"]
                     args = call.get("args", {})
-                    history.append(f"Tool call: {tool}({args})")
                     
                     if tool == "detect":
                         object_class = args.get("object_class", "target")
@@ -484,58 +513,33 @@ class CaptchaSolver:
                         detections = detect(attention, media_path, object_class, max_objects=max_items)
 
                         if detections:
-                            # Limit to max_items
+                            new_ids = []
                             for det in detections[:max_items]:
-                                bbox = det["bbox"]
-                                collected_actions.append(
-                                    ClickAction(
-                                        action="click",
-                                        target_bounding_box=bbox,
-                                    )
-                                )
+                                det["id"] = self.next_object_id
+                                self.next_object_id += 1
+                                self.current_objects.append(det)
+                                new_ids.append(det["id"])
+                            
+                            msg = f"detect('{object_class}') found {len(new_ids)} items with IDs: {new_ids}"
+                            history.append(f"Tool call: {msg}")
+                            self.debug.log(msg)
+                            new_detections_found = True
                         else:
-                            # Fallback to detect with max_objects=1
-                            self.debug.log("No detections, trying fallback...")
-                            fallback_detections = attention.detect(media_path, object_class, max_objects=1)
-                            if fallback_detections:
-                                obj = fallback_detections[0]
-                                x1, y1, x2, y2 = obj["x_min"], obj["y_min"], obj["x_max"], obj["y_max"]
-                                collected_actions.append(
-                                    ClickAction(
-                                        action="click",
-                                        target_bounding_box=[x1, y1, x2, y2],
-                                    )
-                                )
-                            else:
-                                collected_actions.append(
-                                    ClickAction(
-                                        action="click",
-                                        target_bounding_box=[0.45, 0.45, 0.55, 0.55],
-                                    )
-                                )
+                            msg = f"detect('{object_class}') found no items."
+                            history.append(f"Tool call: {msg}")
+                            self.debug.log(msg)
 
                     elif tool == "simulate_drag":
-                        source = args.get("source") or args.get("source_description")
                         source_id = args.get("source_id")
-                        target = args.get("target_description") or args.get("target")
-                        target_id = args.get("target_id")
-                            
-                        print(f"Source: {source}, Target: {target}, SourceID: {source_id}, TargetID: {target_id}")
-                        goal_text = target or result.get("goal") or instruction or "Complete the drag puzzle"
-                        current_location = args.get("location_hint") or args.get("current_location")
-
-                        self.debug.log(f"Tool call: simulate_drag(source='{source}', goal='{goal_text}', current_location={current_location})")
+                        self.debug.log(f"Tool call: simulate_drag(source_id={source_id})")
                         
                         # Execute drag simulation
                         drag_result = simulate_drag(
                             self,
                             media_path,
                             instruction,
-                            source_description=source,
-                            primary_goal=goal_text, 
-                            current_location=current_location,
+                            primary_goal=result.get("goal") or instruction or "Complete the drag puzzle",
                             source_id=source_id,
-                            target_id=target_id,
                         )
                         return DragAction(**drag_result)
 
@@ -545,32 +549,27 @@ class CaptchaSolver:
                         connected_detections = find_connected_elems(media_path, conn_instruction)
                         
                         if connected_detections:
+                            new_ids = []
                             for det in connected_detections:
-                                collected_actions.append(
-                                    ClickAction(
-                                        action="click",
-                                        target_bounding_box=det.get("bbox"),
-                                    )
-                                )
+                                det["id"] = self.next_object_id
+                                self.next_object_id += 1
+                                self.current_objects.append(det)
+                                new_ids.append(det["id"])
+                            
+                            msg = f"find_connected_elems found {len(new_ids)} items with IDs: {new_ids}"
+                            history.append(f"Tool call: {msg}")
+                            new_detections_found = True
                         else:
-                            # If not implemented or no results, fallback to center box
-                            collected_actions.append(
-                                ClickAction(
-                                    action="click",
-                                    target_bounding_box=[0.45, 0.45, 0.55, 0.55],
-                                )
-                            )
+                            history.append("Tool call: find_connected_elems found no items.")
 
-                # Return collected actions if any
-                if collected_actions:
-                    if len(collected_actions) == 1:
-                        return collected_actions[0]
-                    return collected_actions
+                # If we found new detections, continue the planning loop so the planner can use the new IDs
+                if new_detections_found:
+                    continue
                 
-                # If tool calls produced nothing (and no segmentation), try next iteration
+                # If tool calls produced nothing, try next iteration anyway
                 continue
 
-            # Handle direct actions (supports new { "action": { "action": "click", ... } } and old { "action_type": "click", ... } formats)
+            # Handle direct actions
             planner_action = result.get("action")
             if not isinstance(planner_action, dict):
                 planner_action = result # Fallback to top-level if "action" is not a dict
@@ -584,22 +583,22 @@ class CaptchaSolver:
             if action_type == "type":
                 text = planner_action.get("text", "")
                 target_id = planner_action.get("target_id")
-                target_desc = planner_action.get("target_description")
                 
                 target_bbox = None
                 obj = None
                 if target_id is not None:
-                    for o in getattr(self, "current_objects", []):
-                        if o.get("id") == target_id:
-                            obj = o
-                            break
-                if not obj and target_desc:
-                    obj = self._get_object_by_id(target_desc, getattr(self, "current_objects", []))
+                    try:
+                        target_id_int = int(target_id)
+                        for o in self.current_objects:
+                            if o.get("id") == target_id_int:
+                                obj = o
+                                break
+                    except (ValueError, TypeError):
+                        pass
                 
                 if obj:
-                    img_w, img_h = self._image_size or (1000, 1000)
-                    b = obj["bbox"]
-                    target_bbox = [b[0]/img_w, b[1]/img_h, (b[0]+b[2])/img_w, (b[1]+b[3])/img_h]
+                    # Normalized [x1, y1, x2, y2]
+                    target_bbox = obj["bbox"] if "bbox" in obj else [obj["x_min"], obj["y_min"], obj["x_max"], obj["y_max"]]
 
                 return TypeAction(
                     action="type",
@@ -615,112 +614,56 @@ class CaptchaSolver:
 
             elif action_type == "drag":
                 source_id = planner_action.get("source_id")
-                source_desc = planner_action.get("source_description") or result.get("source_description")
-                
                 target_id = planner_action.get("target_id")
-                target_desc = planner_action.get("target_description") or result.get("drag_target_description") or result.get("target_description")
-                    
-                location_hint = planner_action.get("location_hint")
                 
-                # If these are Object IDs, simulate_drag will handle it via self.current_objects
-                # If they are descriptions, simulate_drag will handle it via attention.detect
-                
+                try:
+                    source_id = int(source_id) if source_id is not None else None
+                    target_id = int(target_id) if target_id is not None else None
+                except (ValueError, TypeError):
+                    pass
+
                 drag_result = simulate_drag(
                     self,
                     media_path,
                     instruction,
-                    source_description=source_desc,
-                    primary_goal=target_desc or result.get("goal") or "Complete the drag puzzle",
-                    location_hint=location_hint,
+                    primary_goal=result.get("goal") or "Complete the drag puzzle",
                     source_id=source_id,
                     target_id=target_id,
                 )
                 return DragAction(**drag_result)
 
             elif action_type == "click":
-                target_id = planner_action.get("target_id")
-                target = planner_action.get("target_description") or result.get("target_description", "target")
+                target_ids = planner_action.get("target_ids")
+                if not target_ids and planner_action.get("target_id"):
+                    target_ids = [planner_action["target_id"]]
                 
-                # Try lookup by explicit target_id first
-                obj = None
-                if target_id is not None:
-                    for o in getattr(self, "current_objects", []):
-                        if o.get("id") == target_id:
+                if not target_ids:
+                    return DoneAction(action="done")
+
+                bboxes = []
+                for tid in target_ids:
+                    try:
+                        target_id_int = int(tid)
+                    except (ValueError, TypeError):
+                        continue
+
+                    obj = None
+                    for o in self.current_objects:
+                        if o.get("id") == target_id_int:
                             obj = o
                             break
-                
-                # Fallback to string-based ID lookup (backward compatibility)
-                if not obj:
-                    obj = self._get_object_by_id(target, getattr(self, "current_objects", []))
                     
-                max_items = planner_action.get("max_items", 1)
+                    if obj:
+                        bbox_pct = obj["bbox"] if "bbox" in obj else [obj["x_min"], obj["y_min"], obj["x_max"], obj["y_max"]]
+                        bboxes.append(bbox_pct)
                 
-                # Check for direct bounding box from planner
-                target_bbox = planner_action.get("target_bounding_box")
-                if target_bbox and len(target_bbox) == 4:
-                    self.debug.log(f"Using direct bounding box from planner: {target_bbox}")
-                    # Save a debug image showing the click location
-                    from .overlay import add_overlays_to_image
-                    import tempfile
-                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                        click_overlay_path = tf.name
-                    
-                    img_w, img_h = self._image_size or (1000, 1000)
-                    overlays = [{
-                        "bbox": [
-                            int(target_bbox[0] * img_w),
-                            int(target_bbox[1] * img_h),
-                            int((target_bbox[2] - target_bbox[0]) * img_w),
-                            int((target_bbox[3] - target_bbox[1]) * img_h)
-                        ],
-                        "number": 1,
-                        "color": "#00FF00"
-                    }]
-                    add_overlays_to_image(cv_path, overlays, output_path=click_overlay_path)
-                    self.debug.save_image(click_overlay_path, f"step_{i+1}_click_target.png")
-                    os.unlink(click_overlay_path)
+                if not bboxes:
+                    return DoneAction(action="done")
 
-                    return ClickAction(
-                        action="click",
-                        target_bounding_box=target_bbox,
-                    )
-
-                # Check if target is an object ID (backward compatibility)
-                obj = self._get_object_by_id(target, getattr(self, "current_objects", []))
-                if obj:
-                    img_w, img_h = self._image_size if self._image_size else Image.open(media_path).size
-                    bbox = obj["bbox"] # [x, y, w, h]
-                    # Normalize to [x1, y1, x2, y2]
-                    bbox_pct = [
-                        bbox[0] / img_w,
-                        bbox[1] / img_h,
-                        (bbox[0] + bbox[2]) / img_w,
-                        (bbox[1] + bbox[3]) / img_h
-                    ]
-                    return ClickAction(
-                        action="click",
-                        target_bounding_box=bbox_pct,
-                    )
-                else:
-                    attention = self._get_attention()
-                    detections = attention.detect(media_path, target, max_objects=max_items)
-                    if detections:
-                        actions = []
-                        for obj in detections:
-                            # Normalize detections[0] (attention.detect returns x_min, y_min, x_max, y_max)
-                            bbox_pct = [obj["x_min"], obj["y_min"], obj["x_max"], obj["y_max"]]
-                            actions.append(ClickAction(
-                                action="click",
-                                target_bounding_box=bbox_pct,
-                            ))
-                        if len(actions) == 1:
-                            return actions[0]
-                        return actions
-                    else:
-                        return ClickAction(
-                            action="click",
-                            target_bounding_box=[0.45, 0.45, 0.55, 0.55],
-                        )
+                return ClickAction(
+                    action="click",
+                    target_bounding_boxes=bboxes,
+                )
 
             elif action_type == "done":
                 return DoneAction(action="done")
@@ -729,7 +672,7 @@ class CaptchaSolver:
         return DoneAction(action="done")
 
 # Convenience function
-def solve_captcha(media_path: str, instruction: str = "", **kwargs) -> Union[CaptchaAction, List[ClickAction]]:
+def solve_captcha(media_path: str, instruction: str = "", **kwargs) -> Union[CaptchaAction, Dict[str, Any]]:
     """
     Convenience function to solve a captcha image or video.
     """

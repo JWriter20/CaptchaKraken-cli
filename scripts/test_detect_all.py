@@ -17,6 +17,7 @@ def test_detect_all():
         ("captchaimages/hcaptchaDragImage4.png", (4, 6)),
         ("captchaimages/hcaptchaPuzzle.png", (6, 8)),
         ("captchaimages/hcaptchaPuzzle2.png", 5),
+        ("captchaimages/hcaptcha_1768163587607_3nv3u.png", 7),
     ]
     
     output_dir = "detect_all_prompts_only"

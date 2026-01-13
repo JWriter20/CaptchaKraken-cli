@@ -57,10 +57,9 @@ def detect(
                 if "bbox" in det:
                     formatted.append(det)
                 else:
-                    formatted.append({
-                        "bbox": [det["x_min"], det["y_min"], det["x_max"], det["y_max"]],
-                        "score": det.get("score", 0.0)
-                    })
+                    res = det.copy()
+                    res["bbox"] = [det["x_min"], det["y_min"], det["x_max"], det["y_max"]]
+                    formatted.append(res)
             return formatted[:max_objects]
         except Exception as e:
             print(f"[detect] Tool server detect failed: {e}. Falling back to local.", file=sys.stderr)
@@ -109,6 +108,7 @@ def detect(
 
         boxes = results["boxes"] # [num_objs, 4] in XYXY absolute
         scores = results["scores"] # [num_objs]
+        masks = results.get("masks") # [num_objs, H, W]
 
         raw_objects = []
         for i in range(len(scores)):
@@ -119,13 +119,19 @@ def detect(
             box = boxes[i]
             x_min, y_min, x_max, y_max = box.tolist()
 
-            raw_objects.append({
+            det = {
                 "x_min": x_min / width,
                 "y_min": y_min / height,
                 "x_max": x_max / width,
                 "y_max": y_max / height,
                 "score": score,
-            })
+            }
+            if masks is not None:
+                mask = masks[i]
+                if hasattr(mask, "cpu"): mask = mask.cpu().numpy()
+                det["mask"] = mask
+            
+            raw_objects.append(det)
 
         # Merge overlapping detections
         detections = clusterDetections(raw_objects, iou_threshold=0.4, distance_threshold=0.1)
@@ -165,6 +171,7 @@ def detect(
             obj_ids = processed_outputs["object_ids"].tolist()
             scores = processed_outputs["scores"].tolist()
             boxes = processed_outputs["boxes"] # [num_objs, 4] in XYXY absolute
+            masks = processed_outputs.get("masks")
             
             h, w = inference_session.video_height, inference_session.video_width
 
@@ -173,23 +180,41 @@ def detect(
                     tracked_paths[obj_id] = []
                 
                 box = boxes[i]
-                tracked_paths[obj_id].append({
+                det_frame = {
                     "x_min": float(box[0]) / w,
                     "y_min": float(box[1]) / h,
                     "x_max": float(box[2]) / w,
                     "y_max": float(box[3]) / h,
                     "score": float(scores[i]),
-                })
+                }
+                if masks is not None:
+                    mask = masks[i]
+                    if hasattr(mask, "cpu"): mask = mask.cpu().numpy()
+                    det_frame["mask"] = mask
+                    
+                tracked_paths[obj_id].append(det_frame)
 
         for path in tracked_paths.values():
             if not path: continue
-            detections.append({
+            
+            # Encompass all boxes in the track
+            res = {
                 "x_min": min(d["x_min"] for d in path),
                 "y_min": min(d["y_min"] for d in path),
                 "x_max": max(d["x_max"] for d in path),
                 "y_max": max(d["y_max"] for d in path),
                 "score": sum(d["score"] for d in path) / len(path),
-            })
+            }
+            
+            # Merge masks across frames if present
+            if "mask" in path[0]:
+                merged_mask = path[0]["mask"].copy()
+                for i in range(1, len(path)):
+                    if "mask" in path[i]:
+                        merged_mask = np.logical_or(merged_mask, path[i]["mask"])
+                res["mask"] = merged_mask
+                
+            detections.append(res)
 
     # 3. Format, Filter and Weight
     final_results = []

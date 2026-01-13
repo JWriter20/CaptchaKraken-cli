@@ -32,134 +32,62 @@ def simulate_drag(
     solver,
     media_path: str,
     instruction: str,
-    source_description: str,
     primary_goal: str,
-    max_iterations: int = 5,
-    source_bbox_override: Optional[List[float]] = None,
-    current_location: Optional[List[float]] = None,
-    mask_points_override: Optional[List[List[float]]] = None,
-    source_id: Optional[int] = None,
+    source_id: int,
     target_id: Optional[int] = None,
+    max_iterations: int = 5,
 ) -> Dict[str, Any]:
     """
     Solve drag puzzle with iterative refinement.
     Supports both images and videos.
     Returns a DragAction-compatible dictionary.
     """
-    source_desc = source_description or "movable item"
     img_w, img_h = solver._image_size
-    attention = solver._get_attention()
-    mask_points = mask_points_override
+    
+    # 1. Find source object by ID
+    found_obj = None
+    objects = getattr(solver, "current_objects", [])
+    for o in objects:
+        if o.get("id") == source_id:
+            found_obj = o
+            break
+    
+    if not found_obj:
+        if solver.debug:
+            solver.debug.log(f"Error: source_id {source_id} not found in current objects")
+        # Return a dummy or fail? Let's return empty/done-like
+        return {
+            "action": "done",
+            "source_bounding_box": [0, 0, 0, 0],
+            "target_bounding_box": [0, 0, 0, 0],
+        }
 
-    # 1. Find source
-    if source_bbox_override:
-        source_bbox_px = source_bbox_override
-        source_x = (source_bbox_px[0] + source_bbox_px[2]) / 2 / img_w
-        source_y = (source_bbox_px[1] + source_bbox_px[3]) / 2 / img_h
-    else:
-        # Check if source_id is provided or source_desc is an Object ID (e.g. "Object 4")
-        found_obj = None
-        obj_id = source_id
-        if obj_id is None:
-            import re
-            obj_match = re.search(r"Object\s*(\d+)", str(source_desc), re.IGNORECASE)
-            if obj_match:
-                obj_id = int(obj_match.group(1))
-        
-        if obj_id is not None:
-            # solver might have current_objects if called from _solve_general
-            objects = getattr(solver, "current_objects", [])
-            for o in objects:
-                if o.get("id") == obj_id:
-                    found_obj = o
-                    break
-        
-        if found_obj:
-            b = found_obj["bbox"] # [x, y, w, h]
-            source_bbox_px = [b[0], b[1], b[0] + b[2], b[1] + b[3]]
-            source_x = (b[0] + b[2]/2) / img_w
-            source_y = (b[1] + b[3]/2) / img_h
-            if "mask_points" in found_obj:
-                mask_points = found_obj["mask_points"]
-        else:
-            # Use the same detection + predicate logic as drag_labeler.py
-            # Request more detections to allow for filtering
-            objs_to_detect = 10
-            detections = attention.detect(media_path, str(source_desc), max_objects=objs_to_detect)
-            print(f"Detections: {detections}")
-            if detections:
-                # Apply predicate and filter
-                scored_detections = []
-                for d in detections:
-                    priority = dragPuzzlePredicate(d)
-                    if priority is not None:
-                        d["priority"] = priority
-                        scored_detections.append(d)
-                
-                if scored_detections:
-                    # Sort by priority descending
-                    scored_detections.sort(key=lambda x: x["priority"], reverse=True)
-                    # Take the best detection
-                    obj = scored_detections[0]
-                    source_x = (obj["x_min"] + obj["x_max"]) / 2
-                    source_y = (obj["y_min"] + obj["y_max"]) / 2
-                    if solver.debug: solver.debug.log(f"Detected source '{source_desc}' at center ({source_x:.3f}, {source_y:.3f}) with priority {obj.get('priority', 0.0):.2f}")
-                    source_bbox_px = [
-                        obj["x_min"] * img_w,
-                        obj["y_min"] * img_h,
-                        obj["x_max"] * img_w,
-                        obj["y_max"] * img_h
-                    ]
-                    # Some detectors might provide mask points
-                    if "mask_points" in obj:
-                        mask_points = obj["mask_points"]
-                else:
-                    # All detections filtered out, use fallback
-                    if solver.debug: solver.debug.log(f"All detections for '{source_desc}' were filtered out by dragPuzzlePredicate, using fallback")
-                    source_x, source_y = 0.5, 0.5
-                    box_size = 0.1
-                    source_bbox_px = [
-                        (source_x - box_size/2) * img_w,
-                        (source_y - box_size/2) * img_h,
-                        (source_x + box_size/2) * img_w,
-                        (source_y + box_size/2) * img_h
-                    ]
-            else:
-                source_x, source_y = 0.5, 0.5
-                box_size = 0.1
-                source_bbox_px = [
-                    (source_x - box_size/2) * img_w,
-                    (source_y - box_size/2) * img_h,
-                    (source_x + box_size/2) * img_w,
-                    (source_y + box_size/2) * img_h
-                ]
+    b = found_obj["bbox"] # [x1, y1, x2, y2] normalized
+    source_bbox_px = [b[0] * img_w, b[1] * img_h, b[2] * img_w, b[3] * img_h]
+    source_x = (b[0] + b[2]) / 2
+    source_y = (b[1] + b[3]) / 2
+    mask_points = found_obj.get("mask_points")
+    source_desc = found_obj.get("label", f"Object {source_id}")
 
-
-    # 2. Initial target estimate
-    if current_location and len(current_location) >= 2:
-        target_x, target_y = current_location[0], current_location[1]
-    elif target_id is not None:
-        # Try to find the target object by ID to get its center
+    # 2. Find target location
+    target_x, target_y = 0.5, 0.5 # Default fallback
+    if target_id is not None:
         found_target = None
-        objects = getattr(solver, "current_objects", [])
         for o in objects:
             if o.get("id") == target_id:
                 found_target = o
                 break
         
         if found_target:
-            b = found_target["bbox"] # [x, y, w, h]
-            target_x = (b[0] + b[2]/2) / img_w
-            target_y = (b[1] + b[3]/2) / img_h
-            if solver.debug: solver.debug.log(f"Using target_id {target_id} at ({target_x:.3f}, {target_y:.3f})")
-        else:
-            target_x, target_y = 0.5, 0.5
-    else:
-        target_x, target_y = 0.5, 0.5
+            tb = found_target["bbox"]
+            target_x = (tb[0] + tb[2]) / 2
+            target_y = (tb[1] + tb[3]) / 2
+            if solver.debug:
+                solver.debug.log(f"Using target_id {target_id} at ({target_x:.3f}, {target_y:.3f})")
 
     current_target = [target_x, target_y]
 
-    # 4. Prepare foreground image (optional but helpful for visual refinement)
+    # 3. Prepare foreground image (cutout of the source object)
     foreground_image = None
     try:
         x1, y1, x2, y2 = map(int, source_bbox_px)
@@ -191,40 +119,11 @@ def simulate_drag(
                 rgba_img.putalpha(mask)
                 foreground_image = rgba_img.crop((x1, y1, x2, y2))
             else:
-                # Add 10% padding to the crop for better context during background removal
-                bw = x2 - x1
-                bh = y2 - y1
-                pad_x = int(bw * 0.1)
-                pad_y = int(bh * 0.1)
-                
-                cx1 = max(0, x1 - pad_x)
-                cy1 = max(0, y1 - pad_y)
-                cx2 = min(w, x2 + pad_x)
-                cy2 = min(h, y2 + pad_y)
-                
-                if cx2 > cx1 and cy2 > cy1:
-                    source_crop = img.crop((cx1, cy1, cx2, cy2))
-                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                        crop_path = tf.name
-                    source_crop.save(crop_path)
-                    
-                    # Try background removal on the padded crop
-                    foreground_image = solver.image_processor.remove_background(
-                        crop_path, 
-                        prompt=source_desc,
-                        max_objects=1
-                    )
-                    
-                    # If foreground removal succeeded, we need to crop the padding back out
-                    # or ensure it matches the original requested bbox size.
-                    if foreground_image:
-                        # The foreground image is RGBA. We want to return just the object part.
-                        # Actually, remove_background already does that.
-                        pass
-                    
-                    os.unlink(crop_path)
+                # Fallback to simple crop if no mask points
+                foreground_image = img.crop((x1, y1, x2, y2)).convert("RGBA")
     except Exception as e:
-        if solver.debug: solver.debug.log(f"Failed to prepare foreground image: {e}")
+        if solver.debug:
+            solver.debug.log(f"Failed to prepare foreground image: {e}")
 
     history: List[dict] = []
 
@@ -244,7 +143,7 @@ def simulate_drag(
     with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tf:
         work_path = tf.name
 
-    target_bbox_px = [0, 0, 0, 0] # Initialize
+    target_bbox_px = [0, 0, 0, 0]
     try:
         for i in range(max_iterations):
             shutil.copy2(frame_path, work_path)
@@ -277,7 +176,7 @@ def simulate_drag(
                 current_target,
                 history,
                 source_description=source_desc,
-                target_description=primary_goal, # Use the clean target description
+                target_description=primary_goal,
                 primary_goal=primary_goal,
                 iteration=i,
             )
@@ -285,11 +184,9 @@ def simulate_drag(
             decision = result.get("decision", "accept")
             dx, dy = result.get("dx", 0.0), result.get("dy", 0.0)
 
-            # Adaptive max_step: Allow large initial move, then force refinement
             if i == 0:
-                max_step = 0.5  # Up to 50% for initial estimation
+                max_step = 0.5
             else:
-                # Decrease max_step as we iterate to force smaller refinements
                 max_step = max(0.02, 0.15 / (i + 1))
             
             dx = math.copysign(min(abs(dx), max_step), dx)
@@ -312,7 +209,6 @@ def simulate_drag(
         if is_video and os.path.exists(frame_path):
             os.unlink(frame_path)
 
-    # Final conversion to percentages for return
     source_bbox_pct = [
         source_bbox_px[0] / img_w,
         source_bbox_px[1] / img_h,
@@ -320,7 +216,6 @@ def simulate_drag(
         source_bbox_px[3] / img_h
     ]
     
-    # For target, we use the last calculated target_bbox_px
     target_bbox_pct = [
         target_bbox_px[0] / img_w,
         target_bbox_px[1] / img_h,

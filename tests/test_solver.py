@@ -31,7 +31,7 @@ def get_solver():
     if _SOLVER_INSTANCE is None:
         _SOLVER_INSTANCE = CaptchaSolver(
             provider="vllm",
-            model="Jake-Writer-Jobharvest/qwen3-vl-8b-merged-bf16"
+            model="Qwen/Qwen3-VL-8B-Instruct"
         )
     return _SOLVER_INSTANCE
 
@@ -74,14 +74,14 @@ def save_final_result_overlay(image_path, actions, test_name):
     overlays = []
     for i, action in enumerate(actions):
         if isinstance(action, ClickAction):
-            bbox = action.target_bounding_box
-            # [x1, y1, x2, y2] normalized
-            overlays.append({
-                "bbox": bbox,
-                "number": i + 1,
-                "color": "#FF0000",
-                "box_style": "dashed"
-            })
+            for j, bbox in enumerate(action.target_bounding_boxes):
+                # [x1, y1, x2, y2] normalized
+                overlays.append({
+                    "bbox": bbox,
+                    "number": j + 1,
+                    "color": "#FF0000",
+                    "box_style": "dashed"
+                })
         elif isinstance(action, DragAction):
             if hasattr(action, 'source_bounding_box') and action.source_bounding_box:
                 overlays.append({
@@ -135,7 +135,15 @@ def run_solver_test(image_path, test_name, expected_action_type=ClickAction, min
         else:
             actions = []
             
-    assert len(actions) >= min_actions, f"Expected at least {min_actions} actions, got {len(actions)}"
+    # Calculate total elements to compare with min_actions
+    total_elements = 0
+    for action in actions:
+        if isinstance(action, ClickAction):
+            total_elements += len(action.target_bounding_boxes)
+        else:
+            total_elements += 1
+
+    assert total_elements >= min_actions, f"Expected at least {min_actions} elements, got {total_elements}"
     
     # We don't always expect ClickAction (could be DoneAction if no matches)
     # but we check if they are the right types if provided.
