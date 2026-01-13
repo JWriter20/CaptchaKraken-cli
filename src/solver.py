@@ -437,6 +437,12 @@ class CaptchaSolver:
         # DO NOT initialize attention here. Let tools do it on-demand to avoid 
         # initializing CUDA before vLLM forks.
 
+        # 1. Pre-detect all objects to provide IDs for the planner
+        self.debug.log("Running detect_all to identify objects...")
+        attention = self._get_attention()
+        self.current_objects = attention.detect_all(cv_path)
+        self.debug.log(f"Detected {len(self.current_objects)} objects")
+
         for i in range(max_tool_calls):
             self.debug.log(f"Planning step {i+1}/{max_tool_calls}")
             
@@ -446,7 +452,7 @@ class CaptchaSolver:
             result = self.planner.plan_with_tools(
                 media_path,
                 instruction, 
-                objects=None, # No more segmentation objects
+                objects=self.current_objects,
                 history=history,
                 context_image_path=cv_path
             )
@@ -509,9 +515,13 @@ class CaptchaSolver:
                                 )
 
                     elif tool == "simulate_drag":
-                        source = args.get("source") or args.get("source_description") or "movable item"
-                        print(f"Source: {source}")
-                        goal_text = result.get("goal") or instruction or "Complete the drag puzzle"
+                        source = args.get("source") or args.get("source_description")
+                        source_id = args.get("source_id")
+                        target = args.get("target_description") or args.get("target")
+                        target_id = args.get("target_id")
+                            
+                        print(f"Source: {source}, Target: {target}, SourceID: {source_id}, TargetID: {target_id}")
+                        goal_text = target or result.get("goal") or instruction or "Complete the drag puzzle"
                         current_location = args.get("location_hint") or args.get("current_location")
 
                         self.debug.log(f"Tool call: simulate_drag(source='{source}', goal='{goal_text}', current_location={current_location})")
@@ -524,6 +534,8 @@ class CaptchaSolver:
                             source_description=source,
                             primary_goal=goal_text, 
                             current_location=current_location,
+                            source_id=source_id,
+                            target_id=target_id,
                         )
                         return DragAction(**drag_result)
 
@@ -570,9 +582,29 @@ class CaptchaSolver:
             history.append(f"Action proposed: {action_type}")
 
             if action_type == "type":
+                text = planner_action.get("text", "")
+                target_id = planner_action.get("target_id")
+                target_desc = planner_action.get("target_description")
+                
+                target_bbox = None
+                obj = None
+                if target_id is not None:
+                    for o in getattr(self, "current_objects", []):
+                        if o.get("id") == target_id:
+                            obj = o
+                            break
+                if not obj and target_desc:
+                    obj = self._get_object_by_id(target_desc, getattr(self, "current_objects", []))
+                
+                if obj:
+                    img_w, img_h = self._image_size or (1000, 1000)
+                    b = obj["bbox"]
+                    target_bbox = [b[0]/img_w, b[1]/img_h, (b[0]+b[2])/img_w, (b[1]+b[3])/img_h]
+
                 return TypeAction(
                     action="type",
-                    text=planner_action.get("text", ""),
+                    text=text,
+                    target_bounding_box=target_bbox,
                 )
 
             elif action_type == "wait":
@@ -582,8 +614,12 @@ class CaptchaSolver:
                 )
 
             elif action_type == "drag":
+                source_id = planner_action.get("source_id")
                 source_desc = planner_action.get("source_description") or result.get("source_description")
+                
+                target_id = planner_action.get("target_id")
                 target_desc = planner_action.get("target_description") or result.get("drag_target_description") or result.get("target_description")
+                    
                 location_hint = planner_action.get("location_hint")
                 
                 # If these are Object IDs, simulate_drag will handle it via self.current_objects
@@ -596,11 +632,27 @@ class CaptchaSolver:
                     source_description=source_desc,
                     primary_goal=target_desc or result.get("goal") or "Complete the drag puzzle",
                     location_hint=location_hint,
+                    source_id=source_id,
+                    target_id=target_id,
                 )
                 return DragAction(**drag_result)
 
             elif action_type == "click":
+                target_id = planner_action.get("target_id")
                 target = planner_action.get("target_description") or result.get("target_description", "target")
+                
+                # Try lookup by explicit target_id first
+                obj = None
+                if target_id is not None:
+                    for o in getattr(self, "current_objects", []):
+                        if o.get("id") == target_id:
+                            obj = o
+                            break
+                
+                # Fallback to string-based ID lookup (backward compatibility)
+                if not obj:
+                    obj = self._get_object_by_id(target, getattr(self, "current_objects", []))
+                    
                 max_items = planner_action.get("max_items", 1)
                 
                 # Check for direct bounding box from planner

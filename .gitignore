@@ -56,4 +56,6 @@ recaptcha_overlay_test.png
 latestDebugRun
 latestDebugRun_inputs/
 debug_output
-
+debug/
+sam3_auto_test/
+detect_all_prompts_only/

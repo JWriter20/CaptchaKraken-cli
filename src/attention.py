@@ -12,10 +12,20 @@ from __future__ import annotations
 import os
 import sys
 import time
+import torch
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image
+
+try:
+    from .image_processor import ImageProcessor
+except (ImportError, ValueError):
+    try:
+        from image_processor import ImageProcessor
+    except ImportError:
+        ImageProcessor = None
 
 if TYPE_CHECKING:
     pass
@@ -24,7 +34,7 @@ if TYPE_CHECKING:
 def clusterDetections(
     detections: List[Dict[str, Any]],
     iou_threshold: float = 0.5,
-    distance_threshold: Optional[float] = None,
+    distance_threshold: Optional[float] = 0.04,
 ) -> List[Dict[str, Any]]:
     """
     Cluster and merge overlapping or very close detection bounding boxes.
@@ -37,7 +47,7 @@ def clusterDetections(
         iou_threshold: IoU threshold for merging (default: 0.5)
         distance_threshold: If set, use center distance instead of IoU.
                           Boxes with centers closer than this are merged.
-                          (Recommended: 0.1-0.3 for normalized coordinates)
+                          (Default: 0.04 for normalized coordinates)
 
     Returns:
         List of merged bounding boxes in same format
@@ -133,29 +143,55 @@ def clusterDetections(
 
 def default_predicate(detection: Dict[str, Any]) -> Optional[float]:
     """
-    Default filtering and weighting for detections.
-    - Ignores boxes with width or height > 25% of image.
-    - Boosts score for more square-like boxes.
+    Refined filtering and weighting for detections.
+    - Ignores boxes with width or height > 30% of image (requested change).
+    - Filters out very tiny detections (< 0.5% of image dimension).
+    - Penalizes very rectangular shapes (height > 2x width or vice versa).
+    - Penalizes boxes > 20% dimension and very small boxes (< 5% dimension).
+    - Boosts score for square-like boxes.
     """
-    # Handle both formats: dict with direct keys or dict with 'bbox' list
     if "bbox" in detection:
         x1, y1, x2, y2 = detection["bbox"]
     else:
         x1, y1, x2, y2 = detection["x_min"], detection["y_min"], detection["x_max"], detection["y_max"]
 
-    w = x2 - x1
-    h = y2 - y1
-    score = detection.get("score", 0.0)
+    w = max(0, x2 - x1)
+    h = max(0, y2 - y1)
+    # Start with a healthy baseline
+    score = detection.get("score", 0.6) 
 
-    # 1. Filter: Size limit (max 25% in either dimension)
-    if w > 0.25 or h > 0.25:
+    # 1. Hard Filters
+    # Too big (> 30% in either dimension - user requested)
+    if w > 0.30 or h > 0.30:
+        return None
+    # Too tiny (< 0.5% in either dimension - original "good" logic)
+    if w < 0.005 or h < 0.005:
         return None
 
-    # 2. Squareness boost: width/height similarity
+    # Too tall/wide (> 3x in either dimension - original "good" logic)
+    if w > h * 3 or h > w * 3:
+        return None
+
+    # 2. Aspect Ratio Penalties
     if w > 0 and h > 0:
-        # Use min/max ratio as squareness (1.0 = perfect square)
+        aspect_ratio = w / h
+        if aspect_ratio > 2.0 or aspect_ratio < 0.5:
+            score -= 0.1 # Penalty for very thin/flat shapes
+        
+        # Squareness boost (up to 0.1)
         squareness = min(w, h) / max(w, h)
-        score += squareness * 0.1  # Small boost up to 0.1
+        score += squareness * 0.1
+
+    # 3. Size-based Penalties
+    # Large but not filtered (20-30%)
+    if w > 0.20 or h > 0.20:
+        score -= 0.1
+    # Tiny but not filtered (0.5-2.5%)
+    if w < 0.025 or h < 0.025:
+        score -= 0.10
+
+    if score < 0.1:
+        return None
 
     return score
 
@@ -239,6 +275,7 @@ class AttentionExtractor:
         self._sam3_processor = None
         self._sam3_video_model = None
         self._sam3_video_processor = None
+        self._sam3_auto_generator = None
 
     def unload_models(self, models: Optional[List[str]] = None):
         """
@@ -252,7 +289,7 @@ class AttentionExtractor:
         import torch
 
         all_models = {
-            "sam3": ["_sam3_model", "_sam3_processor", "_sam3_video_model", "_sam3_video_processor"],
+            "sam3": ["_sam3_model", "_sam3_processor", "_sam3_video_model", "_sam3_video_processor", "_sam3_auto_generator"],
         }
         
         targets = models if models else all_models.keys()
@@ -308,6 +345,20 @@ class AttentionExtractor:
         t1 = time.time()
         print(f"[AttentionExtractor] Loaded SAM 3 models in {t1 - t0:.2f}s", file=sys.stderr)
 
+    def _load_sam3_auto(self):
+        """Lazy load SAM 3 automatic mask generator pipeline."""
+        if self._sam3_auto_generator is not None:
+            return
+        
+        from transformers import pipeline
+        print(f"[AttentionExtractor] Loading SAM 3 mask-generation pipeline...", file=sys.stderr)
+        self._sam3_auto_generator = pipeline(
+            "mask-generation", 
+            model="facebook/sam3", 
+            device=self.device, 
+            trust_remote_code=True
+        )
+
     def detect(
         self,
         media_path: str,
@@ -335,107 +386,101 @@ class AttentionExtractor:
     def detect_all(
         self,
         media_path: str,
-        method: str = "prompts",
         max_objects: int = 8,
+        min_score_threshold: float = 0.1,
     ) -> List[Dict[str, Any]]:
         """
-        Detect all significant items in the image without a specific prompt.
-        
-        Args:
-            media_path: Path to the image or video
-            method: "points" or "prompts"
-            max_objects: Maximum number of objects to return
+        Detect all significant items in the image using parallelized multi-prompt
+        and automatic mask generation.
+        Filters out detections in the top and bottom 15% of the image.
         """
-        if method == "prompts":
-            # Method 2: Multi-prompt detection
-            prompts = ["animal", "shape", "object"]
-            all_detections = []
-            for prompt in prompts:
-                detections = self.detect(media_path, prompt, max_objects=max_objects)
-                all_detections.extend(detections)
-            
-            # Merge overlapping detections
-            merged = clusterDetections(all_detections, iou_threshold=0.4, distance_threshold=0.1)
-            
-            # Filter and sort using default_predicate
-            final_results = []
-            for det in merged:
-                score = default_predicate(det)
-                if score is not None:
-                    det["score"] = score
-                    # Ensure bbox is present
-                    if "bbox" not in det:
-                        det["bbox"] = [det["x_min"], det["y_min"], det["x_max"], det["y_max"]]
-                    final_results.append(det)
-            
-            final_results.sort(key=lambda x: x["score"], reverse=True)
-            return final_results[:max_objects]
+        t0 = time.time()
+        all_detections = []
 
-        elif method == "points":
-            # Method 1: Point-based segmentation
-            # Load image to get dimensions
-            is_video = any(media_path.lower().endswith(ext) for ext in [".mp4", ".webm", ".gif", ".avi"])
-            if is_video:
-                import cv2
-                cap = cv2.VideoCapture(media_path)
-                ret, frame = cap.read()
-                cap.release()
-                if not ret:
-                    return []
-                height, width = frame.shape[:2]
-            else:
+        # Simplified but effective prompt list
+        prompts = ["item", "object", "animal", "symbol"]
+
+        def run_prompt_detect(prompt):
+            try:
+                # Use a very low threshold for raw detections to catch everything
+                return self.detect(media_path, prompt, max_objects=24)
+            except Exception as e:
+                print(f"[AttentionExtractor] Prompt '{prompt}' failed: {e}", file=sys.stderr)
+                return []
+
+        def run_auto_detect():
+            try:
+                # Unload prompt models to free memory for the automatic generator
+                self.unload_models(["sam3"])
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+                self._load_sam3_auto()
                 image = Image.open(media_path).convert("RGB")
                 width, height = image.size
-            
-            # Generate points: ignore top/bottom 15%
-            # Grid of 5x5 points
-            points = []
-            y_start, y_end = 0.15, 0.85
-            x_start, x_end = 0.15, 0.85
-            for y in np.linspace(y_start, y_end, 5):
-                for x in np.linspace(x_start, x_end, 5):
-                    points.append([float(x), float(y)])
-            
-            # Get masks for these points
-            # We use get_mask which uses the SAM 3 model
-            masks = self.get_mask(media_path, points=points, max_objects=24)
-            
-            detections = []
-            for mask in masks:
-                # Find bounding box of mask
-                if len(mask.shape) == 3:
-                    mask = mask[0]
                 
-                rows = np.any(mask, axis=1)
-                cols = np.any(mask, axis=0)
-                if not np.any(rows) or not np.any(cols):
-                    continue
+                # Higher point density to find missing objects
+                auto_results = self._sam3_auto_generator(image, points_per_side=32)
+                auto_masks = auto_results.get("masks", [])
                 
-                rmin, rmax = np.where(rows)[0][[0, -1]]
-                cmin, cmax = np.where(cols)[0][[0, -1]]
-                
-                # Normalize coordinates
-                det = {
-                    "x_min": float(cmin) / width,
-                    "y_min": float(rmin) / height,
-                    "x_max": float(cmax) / width,
-                    "y_max": float(rmax) / height,
-                    "score": 0.5, # Base score
-                }
-                
-                score = default_predicate(det)
-                if score is not None:
-                    det["score"] = score
-                    det["bbox"] = [det["x_min"], det["y_min"], det["x_max"], det["y_max"]]
-                    detections.append(det)
-            
-            # Merge overlapping detections
-            merged = clusterDetections(detections, iou_threshold=0.4, distance_threshold=0.1)
-            merged.sort(key=lambda x: x.get("score", 0), reverse=True)
-            return merged[:max_objects]
+                auto_detections = []
+                for mask in auto_masks:
+                    if hasattr(mask, "cpu"): mask = mask.cpu().numpy()
+                    if len(mask.shape) == 3: mask = mask[0]
+                    
+                    rows = np.any(mask, axis=1)
+                    cols = np.any(mask, axis=0)
+                    if not np.any(rows) or not np.any(cols): continue
+                    
+                    rmin, rmax = np.where(rows)[0][[0, -1]]
+                    cmin, cmax = np.where(cols)[0][[0, -1]]
+                    
+                    auto_detections.append({
+                        "x_min": float(cmin) / width,
+                        "y_min": float(rmin) / height,
+                        "x_max": float(cmax) / width,
+                        "y_max": float(rmax) / height,
+                        "score": 0.6,
+                    })
+                return auto_detections
+            except Exception as e:
+                print(f"[AttentionExtractor] Automatic detection failed: {e}", file=sys.stderr)
+                return []
+
+        # 1. Run prompt detections
+        for prompt in prompts:
+            all_detections.extend(run_prompt_detect(prompt))
+
+        # 2. Run automatic detection (unloads prompts first)
+        all_detections.extend(run_auto_detect())
+
+        # Merge overlapping detections with stricter thresholds
+        # distance_threshold=0.01 is very strict to keep nearby but distinct objects separate
+        merged = clusterDetections(all_detections, iou_threshold=0.5, distance_threshold=0.01)
         
-        else:
-            raise ValueError(f"Unknown method: {method}")
+        final_results = []
+        for det in merged:
+            # 1. Coordinate Filter: 15% top/bottom buffer
+            y_center = (det["y_min"] + det["y_max"]) / 2
+            if y_center < 0.15 or y_center > 0.85:
+                continue
+
+            # 2. Refined Predicate (Size, Aspect Ratio, Score Boosts)
+            score = default_predicate(det)
+            if score is not None and score >= min_score_threshold:
+                det["score"] = score
+                if "bbox" not in det:
+                    det["bbox"] = [det["x_min"], det["y_min"], det["x_max"], det["y_max"]]
+                final_results.append(det)
+        
+        # Sort by score descending and return top N
+        final_results.sort(key=lambda x: x["score"], reverse=True)
+        
+        t1 = time.time()
+        print(f"[AttentionExtractor] detect_all found {len(final_results)} objects in {t1-t0:.2f}s", file=sys.stderr)
+        
+        return final_results[:max_objects]
 
     def get_mask(
         self,
@@ -481,8 +526,6 @@ class AttentionExtractor:
                 print(f"[AttentionExtractor] Tool server get_mask failed: {e}. Falling back to local.", file=sys.stderr)
 
         self._load_sam3()
-
-        self._load_sam3()
         
         is_video = any(media_path.lower().endswith(ext) for ext in [".mp4", ".webm", ".gif", ".avi"])
         if is_video:
@@ -503,12 +546,24 @@ class AttentionExtractor:
             # Convert [N, 4] to [1, N, 4] for transformers
             inputs_kwargs["input_boxes"] = [scaled_bboxes]
         if points:
-            # Convert normalized [x, y] to pixel coordinates
-            scaled_points = [[p[0] * width, p[1] * height] for p in points]
-            # Convert [N, 2] to [1, N, 2] for transformers
-            inputs_kwargs["input_points"] = [scaled_points]
-            # Need labels too (1 for foreground)
-            inputs_kwargs["input_labels"] = [[1] * len(points)]
+            # SAM 3 might not support points directly in some versions, or uses boxes instead.
+            # Convert points to small normalized boxes [cx, cy, w, h] as SAM 3 forward docs suggest
+            # or [x1, y1, x2, y2] if the processor expects that.
+            # Looking at Sam3Processor docs, it takes 'input_boxes'.
+            # We'll use very small boxes (2% of image size) centered at the points.
+            box_size = 0.02 
+            small_boxes = []
+            for p in points:
+                x, y = p[0], p[1]
+                # [x1, y1, x2, y2] normalized
+                x1 = max(0, x - box_size/2)
+                y1 = max(0, y - box_size/2)
+                x2 = min(1.0, x + box_size/2)
+                y2 = min(1.0, y + box_size/2)
+                small_boxes.append([x1 * width, y1 * height, x2 * width, y2 * height])
+            
+            inputs_kwargs["input_boxes"] = [small_boxes]
+            inputs_kwargs["input_boxes_labels"] = [[1] * len(points)]
             
         inputs = self._sam3_processor(**inputs_kwargs).to(self.device)
         

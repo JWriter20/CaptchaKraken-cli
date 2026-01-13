@@ -38,6 +38,8 @@ def simulate_drag(
     source_bbox_override: Optional[List[float]] = None,
     current_location: Optional[List[float]] = None,
     mask_points_override: Optional[List[List[float]]] = None,
+    source_id: Optional[int] = None,
+    target_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Solve drag puzzle with iterative refinement.
@@ -55,12 +57,16 @@ def simulate_drag(
         source_x = (source_bbox_px[0] + source_bbox_px[2]) / 2 / img_w
         source_y = (source_bbox_px[1] + source_bbox_px[3]) / 2 / img_h
     else:
-        # Check if source_desc is an Object ID (e.g. "Object 4")
-        import re
-        obj_match = re.search(r"Object\s*(\d+)", str(source_desc), re.IGNORECASE)
+        # Check if source_id is provided or source_desc is an Object ID (e.g. "Object 4")
         found_obj = None
-        if obj_match:
-            obj_id = int(obj_match.group(1))
+        obj_id = source_id
+        if obj_id is None:
+            import re
+            obj_match = re.search(r"Object\s*(\d+)", str(source_desc), re.IGNORECASE)
+            if obj_match:
+                obj_id = int(obj_match.group(1))
+        
+        if obj_id is not None:
             # solver might have current_objects if called from _solve_general
             objects = getattr(solver, "current_objects", [])
             for o in objects:
@@ -132,6 +138,22 @@ def simulate_drag(
     # 2. Initial target estimate
     if current_location and len(current_location) >= 2:
         target_x, target_y = current_location[0], current_location[1]
+    elif target_id is not None:
+        # Try to find the target object by ID to get its center
+        found_target = None
+        objects = getattr(solver, "current_objects", [])
+        for o in objects:
+            if o.get("id") == target_id:
+                found_target = o
+                break
+        
+        if found_target:
+            b = found_target["bbox"] # [x, y, w, h]
+            target_x = (b[0] + b[2]/2) / img_w
+            target_y = (b[1] + b[3]/2) / img_h
+            if solver.debug: solver.debug.log(f"Using target_id {target_id} at ({target_x:.3f}, {target_y:.3f})")
+        else:
+            target_x, target_y = 0.5, 0.5
     else:
         target_x, target_y = 0.5, 0.5
 

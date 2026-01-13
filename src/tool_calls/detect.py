@@ -10,6 +10,11 @@ try:
 except (ImportError, ValueError):
     from attention import clusterDetections, default_predicate
 
+try:
+    from ..image_processor import ImageProcessor
+except (ImportError, ValueError):
+    from image_processor import ImageProcessor
+
 def detect(
     attention_extractor, 
     media_path: str, 
@@ -73,6 +78,9 @@ def detect(
     if not is_video:
         # IMAGE LOGIC
         image = Image.open(media_path).convert("RGB")
+        # Enhance for better detection (sharpen + color distinction)
+        image = ImageProcessor.enhance_for_detection(image)
+        
         width, height = image.size
         
         # Ensure models are loaded
@@ -129,6 +137,9 @@ def detect(
         video_frames, _ = load_video(media_path)
         actual_max = min(len(video_frames), max_frames)
         video_frames = video_frames[:actual_max]
+
+        # Enhance frames for better detection
+        video_frames = [ImageProcessor.enhance_for_detection(f) for f in video_frames]
 
         print(f"[detect] Processing video: {media_path} ({len(video_frames)} frames)", file=sys.stderr)
 

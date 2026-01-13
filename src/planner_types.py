@@ -9,6 +9,7 @@ class PlannerAction(BaseModel):
 class PlannerClickAction(PlannerAction):
     action: Literal["click"]
     target_description: Optional[str] = Field(None, description="Object ID (e.g. 'Object 1') or description (e.g. 'the traffic light') to click")
+    target_id: Optional[int] = Field(None, description="Object ID to click")
     target_ids: Optional[List[int]] = Field(None, description="List of object IDs or grid cell numbers to click")
     max_items: int = Field(default=1, description="Maximum number of items to click if description matches multiple objects")
 
@@ -17,9 +18,17 @@ class PlannerDragAction(PlannerAction):
     action: Literal["drag"]
     source_description: Optional[str] = Field(None, description="Object ID or description of item to drag")
     source_id: Optional[int] = Field(None, description="Object ID of item to drag")
-    target_description: str = Field(description="Description of where it should go (e.g. 'matching slot')")
+    target_description: Optional[str] = Field(None, description="Description of where it should go (e.g. 'matching slot')")
     target_id: Optional[int] = Field(None, description="Object ID of destination")
     location_hint: Optional[List[float]] = Field(None, description="[x, y] (0.0-1.0) rough destination center if known")
+
+    @model_validator(mode="after")
+    def check_drag_targets(self) -> "PlannerDragAction":
+        if not self.source_description and self.source_id is None:
+            raise ValueError("Provide EITHER 'source_description' OR 'source_id'.")
+        if not self.target_description and self.target_id is None:
+            raise ValueError("Provide EITHER 'target_description' OR 'target_id'.")
+        return self
 
 
 class PlannerTypeAction(PlannerAction):

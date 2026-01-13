@@ -189,6 +189,51 @@ class ImageProcessor:
         quantized_bgr = cv2.cvtColor(quantized_img, cv2.COLOR_RGB2BGR)
         cv2.imwrite(output_path, quantized_bgr)
 
+    @staticmethod
+    def enhance_for_detection(image: Image.Image) -> Image.Image:
+        """
+        Enhance color distinction (saturation/contrast) for better detection.
+        Works on PIL Image.
+        """
+        # Convert PIL to BGR for OpenCV
+        img_np = np.array(image)
+        if len(img_np.shape) == 2: # Greyscale
+            img_bgr = cv2.cvtColor(img_np, cv2.COLOR_GRAY2BGR)
+        elif img_np.shape[2] == 4: # RGBA
+             img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR)
+        else:
+             img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+        
+        # 1. Color Distinction (Saturation boost)
+        # Convert to HSV to easily manipulate saturation
+        hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+        h, s, v = cv2.split(hsv)
+        
+        # Increase saturation significantly to make colors distinct
+        # Adding 50 is quite a strong boost
+        s = cv2.add(s, 50) 
+        
+        # Optionally boost Value/Brightness contrast slightly as well
+        v = cv2.addWeighted(v, 1.1, np.zeros_like(v), 0, -10)
+        
+        hsv_enhanced = cv2.merge((h, s, v))
+        bgr_enhanced = cv2.cvtColor(hsv_enhanced, cv2.COLOR_HSV2BGR)
+        
+        # 2. Local Contrast Enhancement (CLAHE)
+        # This helps with local structure and making boundaries more distinct
+        lab = cv2.cvtColor(bgr_enhanced, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        
+        # Use a slightly higher clipLimit for more contrast
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        l_enhanced = clahe.apply(l)
+        
+        lab_enhanced = cv2.merge((l_enhanced, a, b))
+        final_bgr = cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2BGR)
+        
+        # Convert back to PIL RGB
+        return Image.fromarray(cv2.cvtColor(final_bgr, cv2.COLOR_BGR2RGB))
+
     # =========================================================================
     # Background Removal Logic (Stateful)
     # =========================================================================

@@ -19,7 +19,8 @@ def test_detect_all():
         ("captchaimages/hcaptchaPuzzle2.png", 5),
     ]
     
-    methods = ["prompts", "points"]
+    output_dir = "detect_all_prompts_only"
+    os.makedirs(output_dir, exist_ok=True)
     
     results = {}
 
@@ -29,40 +30,30 @@ def test_detect_all():
             continue
             
         print(f"\nTesting {img_path} (Expected: {expected})")
-        results[img_path] = {}
         
-        for method in methods:
-            print(f"  Running method: {method}...", end="", flush=True)
-            try:
-                detections = extractor.detect_all(img_path, method=method, max_objects=8)
-                count = len(detections)
-                results[img_path][method] = count
-                
-                # Check if within expected range
-                if isinstance(expected, tuple):
-                    passed = expected[0] <= count <= expected[1]
-                else:
-                    passed = count == expected
-                
-                status = "PASS" if passed else "FAIL"
-                print(f" Found {count} objects. [{status}]")
-                
-                # Visualize
-                output_path = f"latestDebugRun/detect_all_{os.path.basename(img_path)}_{method}.png"
-                os.makedirs("latestDebugRun", exist_ok=True)
-                extractor.visualize_detections(img_path, detections, output_path=output_path)
-            except Exception as e:
-                print(f" Error: {e}")
-                results[img_path][method] = str(e)
+        print(f"  Running detect_all (prompts method with 15% y-filter)...", end="", flush=True)
+        try:
+            detections = extractor.detect_all(img_path, max_objects=12)
+            count = len(detections)
+            results[img_path] = count
+            
+            print(f" Found {count} objects.")
+            for i, d in enumerate(detections):
+                print(f"    {i}: {d['bbox']} score={d['score']:.2f}")
+            
+            # Visualize
+            img_name = os.path.basename(img_path).replace(".png", "")
+            output_path = os.path.join(output_dir, f"{img_name}_prompts.png")
+            extractor.visualize_detections(img_path, detections, output_path=output_path)
+        except Exception as e:
+            print(f" Error: {e}")
+            results[img_path] = str(e)
 
     print("\n" + "="*50)
-    print("SUMMARY")
+    print("SUMMARY (Prompts Method)")
     print("="*50)
-    for img_path, res in results.items():
-        print(f"{img_path}:")
-        for method, count in res.items():
-            print(f"  {method}: {count}")
+    for img_path, count in results.items():
+        print(f"{img_path}: {count}")
 
 if __name__ == "__main__":
     test_detect_all()
-

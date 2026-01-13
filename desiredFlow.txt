@@ -1,0 +1,47 @@
+We want to solve captchas with a kind of MoLoRa flow, here is the method we want to use:
+
+Steps to solve:
+1. Run lightweight CV detection to find grids, and checkboxes in captcha image
+  a. If we find a grid, solve using our image-grid solving LoRa model, and return the click actions.
+  b. If we find a checkbox we can just return a click action for that checkbox.
+  c. else continue
+
+2. Run our general solver/tool caller, this should return one of the following:
+  a. A simulate_drag tool call with a description of the source object we need to drag. We should prioritize entries that are too the far right. Solve the drag with a larger-mask item first
+  b. A detect call, usually when there are multiple of the same object and we need additional labels to differentiate them (numbering)
+  c. A direct click (or clicks) action, where we provide a description of what to click, then we run detect on those descriptions to solve
+  d. A direct drag action, where we provide a description of the starting locaiton and ending location for the drag, then we use detect internally to find both, and then can return a drag action from one bounding box to the other.
+
+3. If simulate_drag was called, we use our lora specialized in solving drag problems, and a description of the goal to solve
+4. If a detect call was made, we pass the resulting image after making the detect call back into the general solver and let it decide.
+
+In order to train each of the models, we should use the following data: 
+- For the grid solving LoRa, we should just use all of the coreHcaptcha/labelled/hcaptcha_images... images and their solutions and the coreRecaptcha/labelledIamges/* images and their solutions.
+- For the simulate drag LoRa, we should use all of the 
+
+
+
+Our general solver should handle the following situations, so it should have data for each.
+
+- For all of the drag images with only 1 description in the file name ex. hcaptcha_drag_shape24.png
+  - Our general Lora model should output a JSON object for a simulate_drag tool call with with a description of the source image and a goal describing precisely where to drag the source image to solve the captcha. 
+  - In order to generate this description, you may need to create a goal description for each type of captcha in our data set ("drag colored segment to the spot where it fits in the larger colored wire", drag the missing half of the tractor to its other half to complete it", "drag the geometric shape half to connect it with its other half", etc )
+- For all of the drag images with two descriptions separated by "_and_" ex. hcaptcha_drag_bottom_left_parrot_to_top_left_watermelon.png
+  - In this case this lora should just directly return a JSON drag action with the source and destination descriptions
+- For all of the click puzzle entries, ex. hcaptcha_click_puzzle_bulldozer_labelled.png
+- For unlabelled images/videos (in our data it is mainly videos) where we need to chose one of many similar/same items based on rotation or movement
+  - Call detect on the object to number them with a description of the similar/same items.
+- For already labelled images/videos (in our data it is mainly videos) where we need to chose one of many similar/same items based on rotation or movement:
+  - This should return a click action with the id/ids of the items we should click
+
+
+- Grid and checkbox captcha images should not be passed in to the general solver ever
+
+
+
+Inference setup:
+
+We want to load in the 8B parameter model into memory: unsloth/Qwen3-VL-8B-Instruct (this is the one we trained with, if the official qwen one is the same then that is fine as well)
+We also want all three loras loaded into memory, and to use vLLM for the inference itself. We should be able to easily and dynamically switch our usage of the loras, creating 
+an almost MoLoRa model that has three "experts" and we choose the correct lora depending on the task. All of this inference must be fast, so we should have this, and sam3 all loaded into 
+memory

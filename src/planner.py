@@ -53,16 +53,19 @@ PLAN_WITH_TOOLS_PROMPT = """Solve the captcha using ONE direct action or ONE too
 Direct Actions:
 - {{ "action": "click", "target_description": "...", "max_items": N }} (CRITICAL: Match N to instruction, e.g. "Select ALL 3 buses" -> max_items: 3)
 - {{ "action": "click", "target_ids": [list of item or cell ids] }} 
-- {{ "action": "drag", "source_description": "...", "target_description": "...", "location_hint": [x, y] }}
-- {{ "action": "type", "text": "...", "target_description": "..." }}
+- {{ "action": "drag", "source_description": "...", "source_id": N, "target_description": "...", "target_id": N }} (Provide EITHER description OR ID for both source and target)
+- {{ "action": "type", "text": "...", "target_description": "...", "target_id": N }}
 - {{ "action": "wait", "duration_ms": 500 }}
 - {{ "action": "done" }}
 
 Tool Calls:
-- detect(object_class, max_items)
-- simulate_drag(source, location_hint) (source=accurate description of the SMALL movable item)
+- detect(object_description, max_items)
+- simulate_drag(source, target_description) (source=accurate description of the SMALL movable item)
+- simulate_drag(source_id, target_description) (source_id=Object ID of the SMALL movable item)
+- simulate_drag(source, target_id) (target_id=Object ID of the destination)
+- simulate_drag(source_id, target_id)
 
-CRITICAL: If multiple similar objects exist (e.g., three strawberries), you MUST specify which one you are targeting in the "goal" and "target_description" fields using spatial descriptors (e.g., "the strawberry on the far right", "the leftmost bus").
+CRITICAL: Prioritize using IDs over descriptions. If the item isn't properly bounded/detected, use the description.
 
 Important: Respond ONLY with JSON. Ensure "max_items" reflects the total number of targets requested in the instruction. For simulate_drag, source MUST be the movable object description. AVOID using the full instruction as a source description.
 Example Click:
@@ -86,6 +89,7 @@ Respond ONLY with JSON matching this structure:
     "action": "type",
     "text": "the text identified",
     "target_description": "text input field"
+    "target_id": N
   }}
 }}"""
 

@@ -54,7 +54,7 @@ def draw_enhanced_bounding_box(
     image_size=None,
     color="#C0392B",
     label_position="top-left",
-    box_style: str = "dashed",
+    box_style: str = "thin",
 ):
     x1, y1, x2, y2 = bbox
     # color is passed as argument
@@ -286,7 +286,7 @@ def add_overlays_to_image(image_path: str, boxes: list[dict], output_path: str =
                 text = box.get("text")
                 number = box.get("number")
                 color = box.get("color", "#FF6B6B")
-                box_style = box.get("box_style") or box.get("style") or "dashed"
+                box_style = box.get("box_style") or box.get("style") or "thin"
 
                 draw_enhanced_bounding_box(
                     draw,
