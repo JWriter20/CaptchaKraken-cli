@@ -18,26 +18,28 @@ except (ImportError, ValueError):
 def detect(
     attention_extractor, 
     media_path: str, 
-    object_class: str, 
+    object_class: Any, 
     max_objects: int = 24, 
     predicate=default_predicate,
-    max_frames: int = 5
-) -> List[Dict[str, Any]]:
+    max_frames: int = 5,
+    return_per_frame: bool = False
+) -> Any:
     """
-    Find all instances of an object class in the image or video.
+    Find all instances of an object class or list of classes in the image or video.
     This is the main entry point for object detection.
     
     Args:
         attention_extractor: AttentionExtractor instance
         media_path: Path to the image or video
-        object_class: Description of what to find
+        object_class: Description or list of descriptions of what to find
         max_objects: Maximum number of objects to return
         predicate: Optional filtering/weighting function
         max_frames: Maximum frames to process if media is a video
+        return_per_frame: If True and media is video, returns detections per frame
     """
     # 1. Check for tool server fallback
     tool_server_url = os.getenv("CAPTCHA_TOOL_SERVER")
-    if tool_server_url:
+    if tool_server_url and not return_per_frame and isinstance(object_class, str):
         import requests
         try:
             # Resolve absolute path for the server
@@ -73,6 +75,7 @@ def detect(
     )
 
     detections = []
+    frames_detections = [] # Used if return_per_frame is True
 
     if not is_video:
         # IMAGE LOGIC
@@ -85,62 +88,84 @@ def detect(
         # Ensure models are loaded
         attention_extractor._load_sam3()
         
-        # Segment using text prompt
-        inputs = attention_extractor._sam3_processor(
-            images=image, text=object_class, return_tensors="pt"
-        ).to(attention_extractor.device)
+        # Segment using text prompt(s)
+        prompts = [object_class] if isinstance(object_class, str) else object_class
         
-        # Ensure floating point inputs match model dtype
-        for k, v in inputs.items():
-            if isinstance(v, torch.Tensor) and torch.is_floating_point(v):
-                inputs[k] = v.to(attention_extractor._sam3_model.dtype)
-
-        with torch.no_grad():
-            outputs = attention_extractor._sam3_model(**inputs)
-
-        # Post-process results
-        results = attention_extractor._sam3_processor.post_process_instance_segmentation(
-            outputs,
-            threshold=0.1,
-            mask_threshold=0.5,
-            target_sizes=inputs.get("original_sizes").tolist()
-        )[0]
-
-        boxes = results["boxes"] # [num_objs, 4] in XYXY absolute
-        scores = results["scores"] # [num_objs]
-        masks = results.get("masks") # [num_objs, H, W]
-
         raw_objects = []
-        for i in range(len(scores)):
-            score = float(scores[i])
-            if score < 0.1:
-                continue
-                
-            box = boxes[i]
-            x_min, y_min, x_max, y_max = box.tolist()
-
-            det = {
-                "x_min": x_min / width,
-                "y_min": y_min / height,
-                "x_max": x_max / width,
-                "y_max": y_max / height,
-                "score": score,
-            }
-            if masks is not None:
-                mask = masks[i]
-                if hasattr(mask, "cpu"): mask = mask.cpu().numpy()
-                det["mask"] = mask
+        for prompt in prompts:
+            inputs = attention_extractor._sam3_processor(
+                images=image, text=prompt, return_tensors="pt"
+            ).to(attention_extractor.device)
             
-            raw_objects.append(det)
+            # Ensure floating point inputs match model dtype
+            for k, v in inputs.items():
+                if isinstance(v, torch.Tensor) and torch.is_floating_point(v):
+                    inputs[k] = v.to(attention_extractor._sam3_model.dtype)
+
+            with torch.no_grad():
+                outputs = attention_extractor._sam3_model(**inputs)
+
+            # Post-process results
+            results = attention_extractor._sam3_processor.post_process_instance_segmentation(
+                outputs,
+                threshold=0.1,
+                mask_threshold=0.5,
+                target_sizes=inputs.get("original_sizes").tolist()
+            )[0]
+
+            boxes = results["boxes"] # [num_objs, 4] in XYXY absolute
+            scores = results["scores"] # [num_objs]
+            masks = results.get("masks") # [num_objs, H, W]
+
+            for i in range(len(scores)):
+                score = float(scores[i])
+                if score < 0.1:
+                    continue
+                    
+                box = boxes[i]
+                x_min, y_min, x_max, y_max = box.tolist()
+
+                det = {
+                    "x_min": x_min / width,
+                    "y_min": y_min / height,
+                    "x_max": x_max / width,
+                    "y_max": y_max / height,
+                    "score": score,
+                    "prompt": prompt
+                }
+                if masks is not None:
+                    mask = masks[i]
+                    if hasattr(mask, "cpu"): mask = mask.cpu().numpy()
+                    det["mask"] = mask
+                
+                raw_objects.append(det)
 
         # Merge overlapping detections
         detections = clusterDetections(raw_objects, iou_threshold=0.4, distance_threshold=0.1)
     else:
         # VIDEO LOGIC
         attention_extractor._load_sam3()
-        from transformers.video_utils import load_video
         
-        video_frames, _ = load_video(media_path)
+        # Try to load video using transformers utils, fallback to OpenCV
+        try:
+            from transformers.video_utils import load_video
+            video_frames, _ = load_video(media_path)
+        except (ImportError, Exception):
+            import cv2
+            print(f"[detect] Falling back to OpenCV for video loading: {media_path}", file=sys.stderr)
+            cap = cv2.VideoCapture(media_path)
+            video_frames = []
+            while True:
+                ret, frame = cap.read()
+                if not ret: break
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                video_frames.append(Image.fromarray(frame_rgb))
+            cap.release()
+
+        if not video_frames:
+            print(f"[detect] Failed to load any frames from {media_path}", file=sys.stderr)
+            return []
+
         actual_max = min(len(video_frames), max_frames)
         video_frames = video_frames[:actual_max]
 
@@ -156,11 +181,13 @@ def detect(
             dtype=dtype,
         )
 
+        # Supports single string or list of strings
         inference_session = attention_extractor._sam3_video_processor.add_text_prompt(
             inference_session=inference_session,
             text=object_class,
         )
 
+        print(f"[detect] Propagating prompts through {actual_max} frames...", file=sys.stderr)
         tracked_paths = {}
         for model_outputs in attention_extractor._sam3_video_model.propagate_in_video_iterator(
             inference_session=inference_session, 
@@ -171,10 +198,10 @@ def detect(
             obj_ids = processed_outputs["object_ids"].tolist()
             scores = processed_outputs["scores"].tolist()
             boxes = processed_outputs["boxes"] # [num_objs, 4] in XYXY absolute
-            masks = processed_outputs.get("masks")
             
             h, w = inference_session.video_height, inference_session.video_width
 
+            current_frame_detections = []
             for i, obj_id in enumerate(obj_ids):
                 if obj_id not in tracked_paths:
                     tracked_paths[obj_id] = []
@@ -186,13 +213,12 @@ def detect(
                     "x_max": float(box[2]) / w,
                     "y_max": float(box[3]) / h,
                     "score": float(scores[i]),
+                    "obj_id": int(obj_id),
                 }
-                if masks is not None:
-                    mask = masks[i]
-                    if hasattr(mask, "cpu"): mask = mask.cpu().numpy()
-                    det_frame["mask"] = mask
-                    
                 tracked_paths[obj_id].append(det_frame)
+                current_frame_detections.append(det_frame)
+            
+            frames_detections.append(current_frame_detections)
 
         for path in tracked_paths.values():
             if not path: continue
@@ -205,18 +231,76 @@ def detect(
                 "y_max": max(d["y_max"] for d in path),
                 "score": sum(d["score"] for d in path) / len(path),
             }
-            
-            # Merge masks across frames if present
-            if "mask" in path[0]:
-                merged_mask = path[0]["mask"].copy()
-                for i in range(1, len(path)):
-                    if "mask" in path[i]:
-                        merged_mask = np.logical_or(merged_mask, path[i]["mask"])
-                res["mask"] = merged_mask
                 
             detections.append(res)
 
     # 3. Format, Filter and Weight
+    if is_video and return_per_frame:
+        final_frames = []
+        for frame_dets in frames_detections:
+            processed_frame = []
+            for det in frame_dets:
+                score = det.get("score", 0.0)
+                if predicate:
+                    score = predicate(det)
+                    if score is None:
+                        continue
+                
+                result = det.copy()
+                result["score"] = score
+                result["bbox"] = [det["x_min"], det["y_min"], det["x_max"], det["y_max"]]
+                processed_frame.append(result)
+            processed_frame.sort(key=lambda x: x["score"], reverse=True)
+            final_frames.append(processed_frame[:max_objects])
+        
+        # Ensure we return exactly actual_max frames even if some are empty
+        while len(final_frames) < (actual_max if is_video else 0):
+             final_frames.append([])
+             
+        return final_frames
+
+    final_results = []
+    for det in detections:
+        score = det.get("score", 0.0)
+        if predicate:
+            score = predicate(det)
+            if score is None:
+                continue
+        
+        # Keep all original keys plus add bbox for convenience
+        result = det.copy()
+        result["score"] = score
+        result["bbox"] = [det["x_min"], det["y_min"], det["x_max"], det["y_max"]]
+        final_results.append(result)
+    
+    final_results.sort(key=lambda x: x["score"], reverse=True)
+    
+    t1 = time.time()
+    prompt_str = str(object_class) if isinstance(object_class, str) else f"{len(object_class)} prompts"
+    print(f"[detect] Detection for {prompt_str} took {t1 - t0:.2f}s, found {len(final_results)} objects", file=sys.stderr)
+    
+    return final_results[:max_objects]
+
+    # 3. Format, Filter and Weight
+    if is_video and return_per_frame:
+        final_frames = []
+        for frame_dets in frames_detections:
+            processed_frame = []
+            for det in frame_dets:
+                score = det.get("score", 0.0)
+                if predicate:
+                    score = predicate(det)
+                    if score is None:
+                        continue
+                
+                result = det.copy()
+                result["score"] = score
+                result["bbox"] = [det["x_min"], det["y_min"], det["x_max"], det["y_max"]]
+                processed_frame.append(result)
+            processed_frame.sort(key=lambda x: x["score"], reverse=True)
+            final_frames.append(processed_frame[:max_objects])
+        return final_frames
+
     final_results = []
     for det in detections:
         score = det.get("score", 0.0)

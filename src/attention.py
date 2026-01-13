@@ -93,8 +93,16 @@ def clusterDetections(
             "x_max": max(b["x_max"] for b in boxes),
             "y_max": max(b["y_max"] for b in boxes),
         }
+        
+        # Pick the best score
         if "score" in boxes[0]:
-            result["score"] = sum(b["score"] for b in boxes) / n
+            result["score"] = max(b["score"] for b in boxes)
+            
+        # Preserve the object ID if it exists (pick the one from the highest scoring box)
+        if "obj_id" in boxes[0]:
+            # Sort by score descending to pick the best ID
+            sorted_by_score = sorted(boxes, key=lambda x: x.get("score", 0), reverse=True)
+            result["obj_id"] = sorted_by_score[0]["obj_id"]
             
         # Merge masks if present
         if "mask" in boxes[0]:
@@ -153,10 +161,10 @@ def clusterDetections(
 def default_predicate(detection: Dict[str, Any]) -> Optional[float]:
     """
     Refined filtering and weighting for detections.
-    - Ignores boxes with width or height > 30% of image (requested change).
-    - Filters out very tiny detections (< 0.5% of image dimension).
+    - Ignores boxes with width or height > 25% of image.
+    - Filters out very tiny detections (< 5% of image dimension).
     - Penalizes very rectangular shapes (height > 2x width or vice versa).
-    - Penalizes boxes > 20% dimension and very small boxes (< 5% dimension).
+    - Penalizes boxes > 20% dimension.
     - Boosts score for square-like boxes.
     """
     if "bbox" in detection:
@@ -170,11 +178,11 @@ def default_predicate(detection: Dict[str, Any]) -> Optional[float]:
     score = detection.get("score", 0.6) 
 
     # 1. Hard Filters
-    # Too big (> 25% in either dimension - refined from 30%)
+    # Too big (> 25% in either dimension)
     if w > 0.25 or h > 0.25:
         return None
-    # Too tiny (< 0.5% in either dimension - original "good" logic)
-    if w < 0.005 or h < 0.005:
+    # Too tiny (< 5% in either dimension - discard very small noise)
+    if w < 0.05 and h < 0.05 or (w < 0.02 or h < 0.02):
         return None
 
     # Too tall/wide (> 3x in either dimension - original "good" logic)
@@ -192,12 +200,9 @@ def default_predicate(detection: Dict[str, Any]) -> Optional[float]:
         score += squareness * 0.1
 
     # 3. Size-based Penalties
-    # Large but not filtered (20-30%)
+    # Large but not filtered (20-25%)
     if w > 0.20 or h > 0.20:
         score -= 0.1
-    # Tiny but not filtered (0.5-2.5%)
-    if w < 0.025 or h < 0.025:
-        score -= 0.10
 
     if score < 0.1:
         return None
@@ -374,50 +379,188 @@ class AttentionExtractor:
         object_description: str,
         max_objects: int = 24,
         max_frames: int = 5,
-    ) -> List[Dict[str, Any]]:
+        predicate: Any = None,
+        return_per_frame: bool = False,
+    ) -> Any:
         """
         Detect all instances of object class using SAM 3.
         Delegates to the implementation in tool_calls.detect.
         """
         try:
             from .tool_calls.detect import detect as run_detect
+            from .tool_calls.detect import default_predicate as d_pred
         except (ImportError, ValueError):
             from tool_calls.detect import detect as run_detect
+            from tool_calls.detect import default_predicate as d_pred
             
         return run_detect(
             self, 
             media_path, 
             object_description, 
             max_objects=max_objects, 
-            max_frames=max_frames
+            max_frames=max_frames,
+            predicate=predicate if predicate is not None else d_pred,
+            return_per_frame=return_per_frame
         )
+
+    def visualize_video(
+        self,
+        video_path: str,
+        object_description: Optional[str] = None,
+        output_path: str = "labeled_video.mp4",
+        max_frames: int = 20,
+        max_objects: int = 10,
+        fps: int = 10,
+    ) -> str:
+        """
+        Create a labeled video showing detections for each frame.
+        
+        Args:
+            video_path: Path to the input video
+            object_description: Text prompt for detection. If None, uses detect_all logic.
+            output_path: Where to save the result video
+            max_frames: Max frames to process
+            max_objects: Max objects to show per frame
+            fps: Output video frames per second
+        """
+        import cv2
+        print(f"[AttentionExtractor] Generating labeled video: {output_path}...", file=sys.stderr)
+        
+        # 1. Get detections per frame
+        if object_description:
+            # Single prompt detection
+            frames_detections = self.detect(
+                video_path, 
+                object_description, 
+                max_objects=max_objects, 
+                max_frames=max_frames, 
+                return_per_frame=True
+            )
+        else:
+            # Multi-prompt/All detection logic
+            frames_detections = self.detect_all(
+                video_path, 
+                max_objects=max_objects, 
+                max_frames=max_frames, 
+                return_per_frame=True
+            )
+
+        # 2. Render video
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise ValueError(f"Could not open video: {video_path}")
+            
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        # If OpenCV metadata failed, try to get from first frame
+        ret, first_frame = cap.read()
+        if ret:
+            height, width = first_frame.shape[:2]
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+        
+        # Colors for labels - expanded set for more variety
+        color_palette = [
+            (255, 0, 0), (0, 255, 0), (0, 0, 255), 
+            (255, 255, 0), (255, 0, 255), (0, 255, 255),
+            (255, 128, 0), (128, 0, 255), (0, 255, 128)
+        ]
+        # Rendering logic: Map raw tracker IDs to clean sequential display IDs
+        raw_to_display_id = {}
+        next_display_id = 1
+        id_to_color = {}
+        
+        # Pre-scan all frames to establish a stable ID mapping
+        for frame_dets in frames_detections:
+            for det in frame_dets:
+                raw_id = det.get('obj_id')
+                if raw_id is not None and raw_id not in raw_to_display_id:
+                    raw_to_display_id[raw_id] = next_display_id
+                    next_display_id += 1
+
+        frame_idx = 0
+        while frame_idx < len(frames_detections):
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            dets = frames_detections[frame_idx]
+            for det in dets:
+                raw_id = det.get('obj_id')
+                display_id = raw_to_display_id.get(raw_id, raw_id) if raw_id is not None else 0
+                
+                # Consistent color per Display ID
+                if display_id not in id_to_color:
+                    id_to_color[display_id] = color_palette[len(id_to_color) % len(color_palette)]
+                color = id_to_color[display_id]
+                
+                x1, y1, x2, y2 = det["bbox"]
+                px1, py1 = int(x1 * width), int(y1 * height)
+                px2, py2 = int(x2 * width), int(y2 * height)
+                
+                # Draw thinner box
+                cv2.rectangle(frame, (px1, py1), (px2, py2), color, 1)
+                
+                # Draw thicker number in top left
+                label = str(display_id)
+                # Larger font scale and thickness for better readability
+                font_scale = 0.5
+                thickness = 2
+                (lw, lh), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+                
+                # Draw solid background for the number
+                cv2.rectangle(frame, (px1, py1), (px1 + lw + 4, py1 + lh + 4), color, -1)
+                
+                # Draw black stroke for the text
+                cv2.putText(frame, label, (px1 + 2, py1 + lh + 2), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), thickness + 2)
+                # Draw white text over the stroke
+                cv2.putText(frame, label, (px1 + 2, py1 + lh + 2), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness)
+            
+            out.write(frame)
+            frame_idx += 1
+            
+        cap.release()
+        out.release()
+        
+        print(f"[AttentionExtractor] Finished labeled video: {output_path}", file=sys.stderr)
+        return output_path
 
     def detect_all(
         self,
         media_path: str,
         max_objects: int = 8,
         min_score_threshold: float = 0.1,
-    ) -> List[Dict[str, Any]]:
+        max_frames: int = 5,
+        return_per_frame: bool = False,
+    ) -> Any:
         """
-        Detect all significant items in the image using parallelized multi-prompt
+        Detect all significant items in the image or video using parallelized multi-prompt
         and automatic mask generation.
         Filters out detections in the top and bottom 15% of the image.
         """
         t0 = time.time()
-        all_detections = []
 
-        # Simplified but effective prompt list
-        prompts = ["item", "object", "animal", "symbol"]
+        is_video = any(
+            media_path.lower().endswith(ext) for ext in [".mp4", ".webm", ".gif", ".avi"]
+        )
 
-        def run_prompt_detect(prompt):
-            try:
-                # Use a very low threshold for raw detections to catch everything
-                return self.detect(media_path, prompt, max_objects=24)
-            except Exception as e:
-                print(f"[AttentionExtractor] Prompt '{prompt}' failed: {e}", file=sys.stderr)
-                return []
+        # Expanded prompt list for better coverage in generic "all" detection
+        # Including common captcha targets and generic object nouns
+        prompts = [
+            "item", "object", "thing", "shape", "entity", "symbol", "mark",
+            "small object", "colored object", "discrete item", "target",
+            "car", "bus", "airplane", "boat", "hydrant", "traffic light", "crosswalk", "bicycle", 
+            "mountain", "chimney", "bridge", "statue", "stairs", "motorcycle", "train", "truck"
+        ]
 
         def run_auto_detect():
+            if is_video:
+                # Automatic mask generation pipeline doesn't support video propagation easily
+                return []
+                
             try:
                 # Unload prompt models to free memory for the automatic generator
                 self.unload_models(["sam3"])
@@ -458,25 +601,70 @@ class AttentionExtractor:
                 print(f"[AttentionExtractor] Automatic detection failed: {e}", file=sys.stderr)
                 return []
 
-        # 1. Run prompt detections
-        for prompt in prompts:
-            all_detections.extend(run_prompt_detect(prompt))
+        # 1. VIDEO PATH: Multi-prompt single-pass detection
+        if is_video:
+            all_frames_raw = self.detect(
+                media_path, 
+                prompts, 
+                max_objects=max_objects * 2, # Catch more candidates before merging
+                max_frames=max_frames,
+                predicate=lambda x: x.get("score", 0.6), # Pass through scores
+                return_per_frame=return_per_frame
+            )
+            
+            if return_per_frame:
+                final_frames = []
+                for frame_dets in all_frames_raw:
+                    merged = clusterDetections(frame_dets, iou_threshold=0.5, distance_threshold=0.01)
+                    processed = []
+                    for det in merged:
+                        # APPLY COORDINATE FILTER TO ALL (including video frames)
+                        y_center = (det["y_min"] + det["y_max"]) / 2
+                        if y_center < 0.15 or y_center > 0.85:
+                            continue
 
-        # 2. Run automatic detection (unloads prompts first)
+                        score = default_predicate(det)
+                        if score is not None and score >= min_score_threshold:
+                            det["score"] = score
+                            det["bbox"] = [det["x_min"], det["y_min"], det["x_max"], det["y_max"]]
+                            processed.append(det)
+                    processed.sort(key=lambda x: x["score"], reverse=True)
+                    final_frames.append(processed[:max_objects])
+                return final_frames
+            else:
+                # Video-merged (single list)
+                merged = clusterDetections(all_frames_raw, iou_threshold=0.5, distance_threshold=0.01)
+                final_results = []
+                for det in merged:
+                    # Apply coordinate filter
+                    y_center = (det["y_min"] + det["y_max"]) / 2
+                    if y_center < 0.15 or y_center > 0.85:
+                        continue
+
+                    score = default_predicate(det)
+                    if score is not None and score >= min_score_threshold:
+                        det["score"] = score
+                        det["bbox"] = [det["x_min"], det["y_min"], det["x_max"], det["y_max"]]
+                        final_results.append(det)
+                final_results.sort(key=lambda x: x["score"], reverse=True)
+                return final_results[:max_objects]
+
+        # 2. IMAGE PATH: Multi-prompt followed by auto-generator
+        all_detections = self.detect(
+            media_path, 
+            prompts, 
+            max_objects=24, 
+            predicate=lambda x: x.get("score", 0.6)
+        )
+
         all_detections.extend(run_auto_detect())
 
         # Merge overlapping detections with stricter thresholds
-        # distance_threshold=0.01 is very strict to keep nearby but distinct objects separate
         merged = clusterDetections(all_detections, iou_threshold=0.5, distance_threshold=0.01)
         
-        print(f"[AttentionExtractor] DEBUG: {len(all_detections)} raw detections, {len(merged)} merged", file=sys.stderr)
-        for i, det in enumerate(merged):
-             y_center = (det["y_min"] + det["y_max"]) / 2
-             print(f"[AttentionExtractor] DEBUG: Merged {i}: bbox=[{det['x_min']:.3f}, {det['y_min']:.3f}, {det['x_max']:.3f}, {det['y_max']:.3f}] y_center={y_center:.3f}", file=sys.stderr)
-
         final_results = []
         for det in merged:
-            # 1. Coordinate Filter: 5% top/bottom buffer (reduced from 10% for accuracy)
+            # 1. Coordinate Filter: 15% top/bottom buffer
             y_center = (det["y_min"] + det["y_max"]) / 2
             if y_center < 0.15 or y_center > 0.85:
                 continue
