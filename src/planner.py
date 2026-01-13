@@ -49,13 +49,7 @@ directly into actions then calling detect in the background and returning immedi
 '''
 
 # For general planning with tool support
-PLAN_WITH_TOOLS_PROMPT = """Analyze the captcha image carefully.
-Your task is: {instruction}
-
-If the instruction is missing or you need to find it, look for text at the top of the image.
-
-Detected Objects:
-{object_list_section}
+PLAN_WITH_TOOLS_PROMPT = """Your task is to solve the captcha using the tools provided, look at the top of the image for instructions.
 
 {history_section}
 
