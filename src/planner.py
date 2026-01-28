@@ -272,7 +272,7 @@ class ActionPlanner:
             processed_images = []
             
             for path in image_paths:
-                is_video = any(path.lower().endswith(ext) for ext in [".mp4", ".webm", ".gif", ".avi"])
+                is_video = any(path.lower().endswith(ext) for ext in [".mp4", ".gif", ".avi"])
                 if is_video:
                     import cv2
                     cap = cv2.VideoCapture(path)

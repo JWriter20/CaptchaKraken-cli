@@ -6,9 +6,9 @@ import numpy as np
 from PIL import Image
 
 try:
-    from ..attention import clusterDetections, default_predicate
+    from ..attention import clusterDetections, default_predicate, complete_tracks
 except (ImportError, ValueError):
-    from attention import clusterDetections, default_predicate
+    from attention import clusterDetections, default_predicate, complete_tracks
 
 try:
     from ..image_processor import ImageProcessor
@@ -71,7 +71,7 @@ def detect(
 
     # 2. Check if media is video
     is_video = any(
-        media_path.lower().endswith(ext) for ext in [".mp4", ".webm", ".gif", ".avi"]
+        media_path.lower().endswith(ext) for ext in [".mp4", ".gif", ".avi"]
     )
 
     detections = []
@@ -149,8 +149,9 @@ def detect(
         # Try to load video using transformers utils, fallback to OpenCV
         try:
             from transformers.video_utils import load_video
-            video_frames, _ = load_video(media_path)
-        except (ImportError, Exception):
+            video_result = load_video(media_path)
+            video_frames, _ = video_result
+        except Exception as e:
             import cv2
             print(f"[detect] Falling back to OpenCV for video loading: {media_path}", file=sys.stderr)
             cap = cv2.VideoCapture(media_path)
@@ -162,8 +163,8 @@ def detect(
                 video_frames.append(Image.fromarray(frame_rgb))
             cap.release()
 
-        if not video_frames:
-            print(f"[detect] Failed to load any frames from {media_path}", file=sys.stderr)
+        # Handle numpy array vs list for video_frames to avoid ambiguous truth value errors
+        if video_frames is None or len(video_frames) == 0:
             return []
 
         actual_max = min(len(video_frames), max_frames)
@@ -189,6 +190,7 @@ def detect(
 
         print(f"[detect] Propagating prompts through {actual_max} frames...", file=sys.stderr)
         tracked_paths = {}
+        frame_idx = 0
         for model_outputs in attention_extractor._sam3_video_model.propagate_in_video_iterator(
             inference_session=inference_session, 
             max_frame_num_to_track=actual_max
@@ -214,14 +216,16 @@ def detect(
                     "y_max": float(box[3]) / h,
                     "score": float(scores[i]),
                     "obj_id": int(obj_id),
+                    "frame_idx": frame_idx,
                 }
                 tracked_paths[obj_id].append(det_frame)
                 current_frame_detections.append(det_frame)
             
             frames_detections.append(current_frame_detections)
+            frame_idx += 1
 
         for path in tracked_paths.values():
-            if not path: continue
+            if path is None or len(path) == 0: continue
             
             # Encompass all boxes in the track
             res = {
@@ -236,6 +240,9 @@ def detect(
 
     # 3. Format, Filter and Weight
     if is_video and return_per_frame:
+        # Complete tracks (interpolation and padding)
+        frames_detections = complete_tracks(frames_detections, actual_max)
+        
         final_frames = []
         for frame_dets in frames_detections:
             processed_frame = []
@@ -278,47 +285,6 @@ def detect(
     t1 = time.time()
     prompt_str = str(object_class) if isinstance(object_class, str) else f"{len(object_class)} prompts"
     print(f"[detect] Detection for {prompt_str} took {t1 - t0:.2f}s, found {len(final_results)} objects", file=sys.stderr)
-    
-    return final_results[:max_objects]
-
-    # 3. Format, Filter and Weight
-    if is_video and return_per_frame:
-        final_frames = []
-        for frame_dets in frames_detections:
-            processed_frame = []
-            for det in frame_dets:
-                score = det.get("score", 0.0)
-                if predicate:
-                    score = predicate(det)
-                    if score is None:
-                        continue
-                
-                result = det.copy()
-                result["score"] = score
-                result["bbox"] = [det["x_min"], det["y_min"], det["x_max"], det["y_max"]]
-                processed_frame.append(result)
-            processed_frame.sort(key=lambda x: x["score"], reverse=True)
-            final_frames.append(processed_frame[:max_objects])
-        return final_frames
-
-    final_results = []
-    for det in detections:
-        score = det.get("score", 0.0)
-        if predicate:
-            score = predicate(det)
-            if score is None:
-                continue
-        
-        # Keep all original keys plus add bbox for convenience
-        result = det.copy()
-        result["score"] = score
-        result["bbox"] = [det["x_min"], det["y_min"], det["x_max"], det["y_max"]]
-        final_results.append(result)
-    
-    final_results.sort(key=lambda x: x["score"], reverse=True)
-    
-    t1 = time.time()
-    print(f"[detect] Detection for '{object_class}' took {t1 - t0:.2f}s, found {len(final_results)} objects", file=sys.stderr)
     
     return final_results[:max_objects]
 

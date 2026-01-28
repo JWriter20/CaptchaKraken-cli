@@ -35,7 +35,8 @@ def clusterDetections(
     detections: List[Dict[str, Any]],
     iou_threshold: float = 0.5,
     distance_threshold: Optional[float] = 0.04,
-) -> List[Dict[str, Any]]:
+    return_clusters: bool = False,
+) -> Any:
     """
     Cluster and merge overlapping or very close detection bounding boxes.
 
@@ -48,71 +49,127 @@ def clusterDetections(
         distance_threshold: If set, use center distance instead of IoU.
                           Boxes with centers closer than this are merged.
                           (Default: 0.04 for normalized coordinates)
+        return_clusters: If True, return the raw clusters (list of lists) instead of merged boxes.
 
     Returns:
-        List of merged bounding boxes in same format
+        List of merged bounding boxes in same format, or list of clusters if return_clusters is True.
     """
-    if not detections:
+    if detections is None or len(detections) == 0:
         return []
 
     def calculate_iou(box1: Dict[str, float], box2: Dict[str, float]) -> float:
         """Calculate Intersection over Union between two boxes."""
-        # Calculate intersection area
-        x_min_inter = max(box1["x_min"], box2["x_min"])
-        y_min_inter = max(box1["y_min"], box2["y_min"])
-        x_max_inter = min(box1["x_max"], box2["x_max"])
-        y_max_inter = min(box1["y_max"], box2["y_max"])
+        try:
+            def to_f(v):
+                if hasattr(v, "item"): v = v.item()
+                if isinstance(v, (list, tuple, np.ndarray)):
+                    v = np.array(v).flatten()
+                    v = v[0] if v.size > 0 else 0.0
+                return float(v)
 
-        if x_max_inter < x_min_inter or y_max_inter < y_min_inter:
+            # Calculate intersection area
+            x_min1, y_min1, x_max1, y_max1 = to_f(box1["x_min"]), to_f(box1["y_min"]), to_f(box1["x_max"]), to_f(box1["y_max"])
+            x_min2, y_min2, x_max2, y_max2 = to_f(box2["x_min"]), to_f(box2["y_min"]), to_f(box2["x_max"]), to_f(box2["y_max"])
+
+            x_min_inter = max(x_min1, x_min2)
+            y_min_inter = max(y_min1, y_min2)
+            x_max_inter = min(x_max1, x_max2)
+            y_max_inter = min(y_max1, y_max2)
+
+            if x_max_inter < x_min_inter or y_max_inter < y_min_inter:
+                return 0.0
+
+            intersection = (x_max_inter - x_min_inter) * (y_max_inter - y_min_inter)
+
+            # Calculate union area
+            area1 = (x_max1 - x_min1) * (y_max1 - y_min1)
+            area2 = (x_max2 - x_min2) * (y_max2 - y_min2)
+            union = area1 + area2 - intersection
+
+            return intersection / union if union > 0 else 0.0
+        except Exception as e:
+            print(f"[calculate_iou] Error: {e}. Box1: {box1}, Box2: {box2}", file=sys.stderr)
             return 0.0
-
-        intersection = (x_max_inter - x_min_inter) * (y_max_inter - y_min_inter)
-
-        # Calculate union area
-        area1 = (box1["x_max"] - box1["x_min"]) * (box1["y_max"] - box1["y_min"])
-        area2 = (box2["x_max"] - box2["x_min"]) * (box2["y_max"] - box2["y_min"])
-        union = area1 + area2 - intersection
-
-        return intersection / union if union > 0 else 0.0
 
     def calculate_center_distance(box1: Dict[str, float], box2: Dict[str, float]) -> float:
         """Calculate Euclidean distance between box centers."""
-        center1_x = (box1["x_min"] + box1["x_max"]) / 2
-        center1_y = (box1["y_min"] + box1["y_max"]) / 2
-        center2_x = (box2["x_min"] + box2["x_max"]) / 2
-        center2_y = (box2["y_min"] + box2["y_max"]) / 2
+        try:
+            def to_f(v):
+                if hasattr(v, "item"): v = v.item()
+                if isinstance(v, (list, tuple, np.ndarray)):
+                    v = np.array(v).flatten()
+                    v = v[0] if v.size > 0 else 0.0
+                return float(v)
 
-        return ((center1_x - center2_x) ** 2 + (center1_y - center2_y) ** 2) ** 0.5
+            x_min1, y_min1, x_max1, y_max1 = to_f(box1["x_min"]), to_f(box1["y_min"]), to_f(box1["x_max"]), to_f(box1["y_max"])
+            x_min2, y_min2, x_max2, y_max2 = to_f(box2["x_min"]), to_f(box2["y_min"]), to_f(box2["x_max"]), to_f(box2["y_max"])
+
+            center1_x = (x_min1 + x_max1) / 2
+            center1_y = (y_min1 + y_max1) / 2
+            center2_x = (x_min2 + x_max2) / 2
+            center2_y = (y_min2 + y_max2) / 2
+
+            return ((center1_x - center2_x) ** 2 + (center1_y - center2_y) ** 2) ** 0.5
+        except Exception as e:
+            print(f"[calculate_center_distance] Error: {e}. Box1: {box1}, Box2: {box2}", file=sys.stderr)
+            return float('inf')
 
     def merge_cluster_boxes(boxes: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Encompass all boxes in the cluster (Union) and average scores."""
         n = len(boxes)
-        result = {
-            "x_min": min(b["x_min"] for b in boxes),
-            "y_min": min(b["y_min"] for b in boxes),
-            "x_max": max(b["x_max"] for b in boxes),
-            "y_max": max(b["y_max"] for b in boxes),
-        }
         
-        # Pick the best score
-        if "score" in boxes[0]:
-            result["score"] = max(b["score"] for b in boxes)
+        def get_val(b, key):
+            try:
+                val = b[key]
+                if hasattr(val, "item"): val = val.item()
+                if isinstance(val, (list, tuple, np.ndarray)): 
+                    # Flatten and get first
+                    val = np.array(val).flatten()
+                    val = val[0] if val.size > 0 else 0.0
+                return float(val)
+            except Exception as e:
+                print(f"[merge_cluster_boxes] Error getting {key}: {e}. Box: {b}", file=sys.stderr)
+                return 0.0
+
+        try:
+            result = {
+                "x_min": min(get_val(b, "x_min") for b in boxes),
+                "y_min": min(get_val(b, "y_min") for b in boxes),
+                "x_max": max(get_val(b, "x_max") for b in boxes),
+                "y_max": max(get_val(b, "y_max") for b in boxes),
+            }
             
-        # Preserve the object ID if it exists (pick the one from the highest scoring box)
-        if "obj_id" in boxes[0]:
-            # Sort by score descending to pick the best ID
-            sorted_by_score = sorted(boxes, key=lambda x: x.get("score", 0), reverse=True)
-            result["obj_id"] = sorted_by_score[0]["obj_id"]
-            
-        # Merge masks if present
-        if "mask" in boxes[0]:
-            merged_mask = boxes[0]["mask"].copy()
-            for i in range(1, n):
-                if "mask" in boxes[i]:
-                    merged_mask = np.logical_or(merged_mask, boxes[i]["mask"])
-            result["mask"] = merged_mask
-            
-        return result
+            # Pick the best score
+            if "score" in boxes[0]:
+                result["score"] = max(get_val(b, "score") for b in boxes)
+                
+            # Preserve the object ID if it exists (pick the one from the highest scoring box)
+            ids_with_scores = [(b.get("obj_id"), get_val(b, "score")) for b in boxes if "obj_id" in b]
+            if ids_with_scores:
+                # Sort by score descending to pick the best ID
+                ids_with_scores.sort(key=lambda x: x[1], reverse=True)
+                result["obj_id"] = ids_with_scores[0][0]
+                
+            # Merge masks if present
+            if "mask" in boxes[0]:
+                merged_mask = boxes[0]["mask"].copy()
+                for i in range(1, n):
+                    if "mask" in boxes[i]:
+                        merged_mask = np.logical_or(merged_mask, boxes[i]["mask"])
+                result["mask"] = merged_mask
+                
+            return result
+        except Exception as e:
+            print(f"[merge_cluster_boxes] Error: {e}", file=sys.stderr)
+            return boxes[0]
+
+    # Aliases for convenience, used by should_merge
+    calc_iou = calculate_iou
+    calc_dist = calculate_center_distance
+    merge_boxes = merge_cluster_boxes
+
+    if not detections:
+        return []
 
     # Greedy clustering: merge boxes based on IoU or distance
     clusters = []
@@ -120,8 +177,19 @@ def clusterDetections(
 
     # Use BOTH IoU and distance for robustness
     def should_merge(box1: Dict[str, Any], box2: Dict[str, Any]) -> bool:
-        iou = calculate_iou(box1, box2)
-        dist = calculate_center_distance(box1, box2)
+        iou = calc_iou(box1, box2)
+        dist = calc_dist(box1, box2)
+        
+        # Ensure scalars
+        def to_f(v):
+            if hasattr(v, "item"): v = v.item()
+            if isinstance(v, (list, tuple, np.ndarray)):
+                v = np.array(v).flatten()
+                v = v[0] if v.size > 0 else 0.0
+            return float(v)
+
+        iou = to_f(iou)
+        dist = to_f(dist)
         
         # Merge if they overlap significantly OR if centers are close
         return iou > iou_threshold or (distance_threshold is not None and dist < distance_threshold)
@@ -152,62 +220,166 @@ def clusterDetections(
 
         clusters.append(cluster)
 
+    if return_clusters:
+        return clusters
+
     # Use union (encompassing box) instead of average to avoid cutting off parts
-    merged = [merge_cluster_boxes(cluster) for cluster in clusters]
+    merged = [merge_boxes(cluster) for cluster in clusters]
 
     return merged
+
+
+def complete_tracks(
+    frames_detections: List[List[Dict[str, Any]]],
+    num_frames: int,
+) -> List[List[Dict[str, Any]]]:
+    """
+    Ensure every tracked object exists in every frame of the video.
+    Fills gaps using linear interpolation and start/end gaps using constant padding.
+    """
+    if not frames_detections:
+        return frames_detections
+
+    # 1. Group by obj_id
+    id_to_track = {}
+    for frame_idx, detections in enumerate(frames_detections):
+        for det in detections:
+            obj_id = det.get("obj_id")
+            if obj_id is None:
+                continue
+            if obj_id not in id_to_track:
+                id_to_track[obj_id] = {}
+            # Use dictionary for sparse frame access
+            id_to_track[obj_id][frame_idx] = det
+
+    # 2. Complete each track
+    completed_frames = [[] for _ in range(num_frames)]
+    
+    for obj_id, track in id_to_track.items():
+        known_frames = sorted(track.keys())
+        if not known_frames:
+            continue
+            
+        first_known = known_frames[0]
+        last_known = known_frames[-1]
+        
+        for f in range(num_frames):
+            if f in track:
+                completed_frames[f].append(track[f])
+            elif f < first_known:
+                # Forward project (Constant padding)
+                new_det = track[first_known].copy()
+                new_det["frame_idx"] = f
+                new_det["score"] *= 0.9 # Slight penalty for synthesized detection
+                new_det["synthesized"] = True
+                completed_frames[f].append(new_det)
+            elif f > last_known:
+                # Backward project (Constant padding)
+                new_det = track[last_known].copy()
+                new_det["frame_idx"] = f
+                new_det["score"] *= 0.9
+                new_det["synthesized"] = True
+                completed_frames[f].append(new_det)
+            else:
+                # Internal gap: Linear interpolation
+                # Find nearest known frames
+                prev_f = max(k for k in known_frames if k < f)
+                next_f = min(k for k in known_frames if k > f)
+                
+                d1 = track[prev_f]
+                d2 = track[next_f]
+                
+                alpha = (f - prev_f) / (next_f - prev_f)
+                
+                def interp(k):
+                    return d1[k] + alpha * (d2[k] - d1[k])
+                
+                new_det = d1.copy()
+                new_det["x_min"] = interp("x_min")
+                new_det["y_min"] = interp("y_min")
+                new_det["x_max"] = interp("x_max")
+                new_det["y_max"] = interp("y_max")
+                new_det["score"] = interp("score") * 0.95 # Higher confidence for interpolation than padding
+                new_det["frame_idx"] = f
+                new_det["synthesized"] = True
+                completed_frames[f].append(new_det)
+                
+    return completed_frames
 
 
 def default_predicate(detection: Dict[str, Any]) -> Optional[float]:
     """
     Refined filtering and weighting for detections.
-    - Ignores boxes with width or height > 25% of image.
-    - Filters out very tiny detections (< 5% of image dimension).
-    - Penalizes very rectangular shapes (height > 2x width or vice versa).
-    - Penalizes boxes > 20% dimension.
-    - Boosts score for square-like boxes.
     """
-    if "bbox" in detection:
-        x1, y1, x2, y2 = detection["bbox"]
-    else:
-        x1, y1, x2, y2 = detection["x_min"], detection["y_min"], detection["x_max"], detection["y_max"]
+    try:
+        if "bbox" in detection:
+            x1, y1, x2, y2 = detection["bbox"]
+        else:
+            x1, y1, x2, y2 = detection["x_min"], detection["y_min"], detection["x_max"], detection["y_max"]
 
-    w = max(0, x2 - x1)
-    h = max(0, y2 - y1)
-    # Start with a healthy baseline
-    score = detection.get("score", 0.6) 
+        # Safely convert to float scalars, handling numpy arrays
+        def to_float(val):
+            try:
+                if val is None: return 0.0
+                if hasattr(val, "item"): val = val.item()
+                if isinstance(val, (list, tuple, np.ndarray)):
+                    # Flatten if needed
+                    val = np.array(val).flatten()
+                    if val.size > 0:
+                        val = val[0]
+                    else:
+                        return 0.0
+                return float(val)
+            except Exception as e:
+                # print(f"to_float error: {e}", file=sys.stderr)
+                return 0.0
 
-    # 1. Hard Filters
-    # Too big (> 25% in either dimension)
-    if w > 0.25 or h > 0.25:
-        return None
-    # Too tiny (< 5% in either dimension - discard very small noise)
-    if w < 0.05 and h < 0.05 or (w < 0.02 or h < 0.02):
-        return None
+        x1 = to_float(x1)
+        y1 = to_float(y1)
+        x2 = to_float(x2)
+        y2 = to_float(y2)
 
-    # Too tall/wide (> 3x in either dimension - original "good" logic)
-    if w > h * 3 or h > w * 3:
-        return None
-
-    # 2. Aspect Ratio Penalties
-    if w > 0 and h > 0:
-        aspect_ratio = w / h
-        if aspect_ratio > 2.0 or aspect_ratio < 0.5:
-            score -= 0.1 # Penalty for very thin/flat shapes
+        w = max(0.0, x2 - x1)
+        h = max(0.0, y2 - y1)
         
-        # Squareness boost (up to 0.1)
-        squareness = min(w, h) / max(w, h)
-        score += squareness * 0.1
+        # Start with a healthy baseline
+        score = detection.get("score", 0.6) 
+        score = to_float(score)
 
-    # 3. Size-based Penalties
-    # Large but not filtered (20-25%)
-    if w > 0.20 or h > 0.20:
-        score -= 0.1
+        # 1. Hard Filters
+        # Too big (> 25% in either dimension)
+        if w > 0.25 or h > 0.25:
+            return None
+        # Too tiny (< 2% in either dimension - discard very small noise)
+        if (w < 0.02 and h < 0.02) or (w < 0.01 or h < 0.01):
+            return None
 
-    if score < 0.1:
+        # Too tall/wide (> 3x in either dimension - original "good" logic)
+        if w > h * 3 or h > w * 3:
+            return None
+
+        # 2. Aspect Ratio Penalties
+        if w > 0 and h > 0:
+            aspect_ratio = w / h
+            if aspect_ratio > 2.0 or aspect_ratio < 0.5:
+                score -= 0.1 # Penalty for very thin/flat shapes
+            
+            # Squareness boost (up to 0.1)
+            squareness = min(w, h) / max(w, h)
+            score += squareness * 0.1
+
+        # 3. Size-based Penalties
+        # Large but not filtered (20-25%)
+        if w > 0.20 or h > 0.20:
+            score -= 0.1
+
+        if score < 0.1:
+            return None
+
+        return score
+    except Exception as e:
+        print(f"Error in default_predicate: {e}. Detection: {detection}", file=sys.stderr)
         return None
-
-    return score
 
 
 class SimpleTracker:
@@ -411,6 +583,7 @@ class AttentionExtractor:
         max_frames: int = 20,
         max_objects: int = 10,
         fps: int = 10,
+        detections: Optional[List[List[Dict[str, Any]]]] = None,
     ) -> str:
         """
         Create a labeled video showing detections for each frame.
@@ -422,12 +595,15 @@ class AttentionExtractor:
             max_frames: Max frames to process
             max_objects: Max objects to show per frame
             fps: Output video frames per second
+            detections: Pre-computed per-frame detections (optional)
         """
         import cv2
         print(f"[AttentionExtractor] Generating labeled video: {output_path}...", file=sys.stderr)
         
         # 1. Get detections per frame
-        if object_description:
+        if detections is not None:
+            frames_detections = detections
+        elif object_description:
             # Single prompt detection
             frames_detections = self.detect(
                 video_path, 
@@ -454,13 +630,38 @@ class AttentionExtractor:
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
         # If OpenCV metadata failed, try to get from first frame
-        ret, first_frame = cap.read()
-        if ret:
-            height, width = first_frame.shape[:2]
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        if width <= 0 or height <= 0:
+            ret, first_frame = cap.read()
+            if ret:
+                height, width = first_frame.shape[:2]
+                # Re-open capture to ensure we start from the beginning
+                cap.release()
+                cap = cv2.VideoCapture(video_path)
+            
+        # Use web-friendly codecs if possible
+        ext = os.path.splitext(output_path)[1].lower()
+        out = None
         
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+        if ext == '.webm':
+            # Try various webm codecs
+            for codec in ['VP8 ', 'VP80', 'VP08', 'VP90', 'vp08', 'vp09', 'AV01']:
+                fourcc = cv2.VideoWriter_fourcc(*codec)
+                out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+                if out.isOpened():
+                    print(f"[AttentionExtractor] Using webm codec: {codec}", file=sys.stderr)
+                    break
+        else:
+            # For .mp4, try avc1 (H.264) then mp4v
+            for codec in ['avc1', 'H264', 'X264', 'h264', 'mp4v']:
+                fourcc = cv2.VideoWriter_fourcc(*codec)
+                out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+                if out.isOpened():
+                    break
+
+        if out is None or not out.isOpened():
+            # Final fallback: let OpenCV decide or use raw
+            fourcc = 0 # Raw / Default
+            out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
         
         # Colors for labels - expanded set for more variety
         color_palette = [
@@ -544,16 +745,13 @@ class AttentionExtractor:
         t0 = time.time()
 
         is_video = any(
-            media_path.lower().endswith(ext) for ext in [".mp4", ".webm", ".gif", ".avi"]
+            media_path.lower().endswith(ext) for ext in [".mp4", ".gif", ".avi", ".webm"]
         )
 
         # Expanded prompt list for better coverage in generic "all" detection
         # Including common captcha targets and generic object nouns
         prompts = [
-            "item", "object", "thing", "shape", "entity", "symbol", "mark",
-            "small object", "colored object", "discrete item", "target",
-            "car", "bus", "airplane", "boat", "hydrant", "traffic light", "crosswalk", "bicycle", 
-            "mountain", "chimney", "bridge", "statue", "stairs", "motorcycle", "train", "truck"
+            "item", "shape", "symbol", "colored object"
         ]
 
         def run_auto_detect():
@@ -613,17 +811,59 @@ class AttentionExtractor:
             )
             
             if return_per_frame:
+                # 0. Complete tracks (ensure all frames have the same objects if they appeared at least once)
+                all_frames_raw = complete_tracks(all_frames_raw, len(all_frames_raw))
+
+                # 1. Establish global ID equivalence across all frames to ensure stable numbering.
+                # Since multiple prompts might match the same physical object, they'll have different obj_ids
+                # that SAM 3 tracks. We merge these if they overlap significantly in any frame.
+                id_to_stable = {}
+                def get_stable_id(rid):
+                    while rid in id_to_stable:
+                        rid = id_to_stable[rid]
+                    return rid
+
+                for frame_dets in all_frames_raw:
+                    clusters = clusterDetections(frame_dets, iou_threshold=0.5, distance_threshold=0.01, return_clusters=True)
+                    for cluster in clusters:
+                        ids = sorted([d["obj_id"] for d in cluster if "obj_id" in d])
+                        if len(ids) > 1:
+                            # Use the smallest ID as the root for stability
+                            target = get_stable_id(ids[0])
+                            for other in ids[1:]:
+                                root_other = get_stable_id(other)
+                                if root_other != target:
+                                    # Always point the larger ID to the smaller one
+                                    smaller = min(target, root_other)
+                                    larger = max(target, root_other)
+                                    id_to_stable[larger] = smaller
+                                    target = smaller
+
                 final_frames = []
                 for frame_dets in all_frames_raw:
                     merged = clusterDetections(frame_dets, iou_threshold=0.5, distance_threshold=0.01)
                     processed = []
                     for det in merged:
+                        if "obj_id" in det:
+                            det["obj_id"] = get_stable_id(det["obj_id"])
+                            
                         # APPLY COORDINATE FILTER TO ALL (including video frames)
-                        y_center = (det["y_min"] + det["y_max"]) / 2
+                        def to_f(v):
+                            if hasattr(v, "item"): v = v.item()
+                            if isinstance(v, (list, tuple, np.ndarray)):
+                                v = np.array(v).flatten()
+                                v = v[0] if v.size > 0 else 0.0
+                            return float(v)
+
+                        y_min = to_f(det["y_min"])
+                        y_max = to_f(det["y_max"])
+                        y_center = (y_min + y_max) / 2
+                        
                         if y_center < 0.15 or y_center > 0.85:
                             continue
 
                         score = default_predicate(det)
+
                         if score is not None and score >= min_score_threshold:
                             det["score"] = score
                             det["bbox"] = [det["x_min"], det["y_min"], det["x_max"], det["y_max"]]
@@ -637,11 +877,22 @@ class AttentionExtractor:
                 final_results = []
                 for det in merged:
                     # Apply coordinate filter
-                    y_center = (det["y_min"] + det["y_max"]) / 2
+                    def to_f(v):
+                        if hasattr(v, "item"): v = v.item()
+                        if isinstance(v, (list, tuple, np.ndarray)):
+                            v = np.array(v).flatten()
+                            v = v[0] if v.size > 0 else 0.0
+                        return float(v)
+
+                    y_min = to_f(det["y_min"])
+                    y_max = to_f(det["y_max"])
+                    y_center = (y_min + y_max) / 2
+                    
                     if y_center < 0.15 or y_center > 0.85:
                         continue
 
                     score = default_predicate(det)
+
                     if score is not None and score >= min_score_threshold:
                         det["score"] = score
                         det["bbox"] = [det["x_min"], det["y_min"], det["x_max"], det["y_max"]]
@@ -665,12 +916,23 @@ class AttentionExtractor:
         final_results = []
         for det in merged:
             # 1. Coordinate Filter: 15% top/bottom buffer
-            y_center = (det["y_min"] + det["y_max"]) / 2
+            def to_f(v):
+                if hasattr(v, "item"): v = v.item()
+                if isinstance(v, (list, tuple, np.ndarray)):
+                    v = np.array(v).flatten()
+                    v = v[0] if v.size > 0 else 0.0
+                return float(v)
+
+            y_min = to_f(det["y_min"])
+            y_max = to_f(det["y_max"])
+            y_center = (y_min + y_max) / 2
+            
             if y_center < 0.15 or y_center > 0.85:
                 continue
 
             # 2. Refined Predicate (Size, Aspect Ratio, Score Boosts)
             score = default_predicate(det)
+
             if score is not None and score >= min_score_threshold:
                 det["score"] = score
                 if "bbox" not in det:
@@ -730,7 +992,7 @@ class AttentionExtractor:
 
         self._load_sam3()
         
-        is_video = any(media_path.lower().endswith(ext) for ext in [".mp4", ".webm", ".gif", ".avi"])
+        is_video = any(media_path.lower().endswith(ext) for ext in [".mp4", ".gif", ".avi", ".webm"])
         if is_video:
             from transformers.video_utils import load_video
             video_frames, _ = load_video(media_path)

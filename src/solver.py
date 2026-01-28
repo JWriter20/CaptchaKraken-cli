@@ -198,7 +198,7 @@ class CaptchaSolver:
             raise FileNotFoundError(f"Media not found: {media_path}")
 
         # Check if input is video
-        is_video = any(media_path.lower().endswith(ext) for ext in [".mp4", ".webm", ".gif", ".avi"])
+        is_video = any(media_path.lower().endswith(ext) for ext in [".mp4", ".gif", ".avi"])
         
         # For CV processing, we need a static image. 
         # If it's a video, we extract the first frame.

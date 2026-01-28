@@ -12,7 +12,7 @@ def segment(image_processor, attention_extractor, media_path: str, debug_manager
     ext = os.path.splitext(media_path)[1] or ".png"
     
     # 1. Ensure we have a static frame for processing if media is video
-    is_video = any(media_path.lower().endswith(ext) for ext in [".mp4", ".webm", ".gif", ".avi"])
+    is_video = any(media_path.lower().endswith(ext) for ext in [".mp4", ".gif", ".avi"])
     
     if is_video:
         import cv2

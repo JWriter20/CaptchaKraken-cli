@@ -142,7 +142,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Visualize SAM3 detections on video with object tracking.")
     parser.add_argument("--input", default=os.path.join(PROJECT_ROOT, "captchaimages", "hcaptcha_1766539373078.webm"), help="Input video path")
-    parser.add_argument("--output", default=os.path.join(PROJECT_ROOT, "video_verification.mp4"), help="Output video path")
+    parser.add_argument("--output", default=os.path.join(PROJECT_ROOT, "video_verification.webm"), help="Output video path")
     parser.add_argument("--prompt", default="pink object", help="SAM3 prompt")
     parser.add_argument("--frames", type=int, default=30, help="Max frames to process")
     

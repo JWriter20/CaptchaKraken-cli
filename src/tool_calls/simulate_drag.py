@@ -91,7 +91,7 @@ def simulate_drag(
     foreground_image = None
     try:
         x1, y1, x2, y2 = map(int, source_bbox_px)
-        is_video = any(media_path.lower().endswith(ext) for ext in [".mp4", ".webm", ".gif", ".avi"])
+        is_video = any(media_path.lower().endswith(ext) for ext in [".mp4", ".gif", ".avi"])
         
         if is_video:
             import cv2
