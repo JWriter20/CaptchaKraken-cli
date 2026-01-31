@@ -53,30 +53,44 @@ PLAN_WITH_TOOLS_PROMPT = """Your task is to solve the captcha using the tools pr
 
 {history_section}
 
-Choose ONE action or ONE tool call from the options below.
+Choose ONE action, ONE tool call, or follow the DRAG REFINEMENT process.
 
-Direct Actions:
-- {{ "action": "click", "target_ids": [id1, id2, ...] }}  (Use IDs from the list above)
+DRAG REFINEMENT PROCESS:
+Step 1: Detect all draggable items (if not already done).
+- {{ "objectDescription": "colored segment" }}
+
+Step 2: Initial guess for destination.
+- "output": [
+    {{
+      "Action": "simulate_drag",
+      "SourceID": N,
+      "DestinationDescription": "...",
+      "EstimatedPosition": {{ "x": 1-1000, "y": 1-1000 }}
+    }}
+  ]
+
+Step 3: Refinement (handled by a specialized LoRa).
+
+DIRECT ACTIONS & TOOLS:
+- {{ "action": "click", "target_ids": [id1, id2, ...] }}
 - {{ "action": "drag", "source_id": N, "target_id": N }}
 - {{ "action": "type", "text": "...", "target_id": N }}
 - {{ "action": "wait", "duration_ms": 500 }}
 - {{ "action": "done" }}
-
-Tool Calls:
-- detect(object_description, max_items) (Use this if the target object is not in the 'Detected Objects' list)
-- simulate_drag(source_id) (Use this for drag-and-drop puzzles to get iterative refinement)
+- detect(object_description, max_items)
 
 CRITICAL:
-1. ALWAYS use "target_ids" (plural) for click actions, even for a single click.
-2. Use the Object IDs provided in the list above. The IDs correspond to the red dashed boxes in the reference image.
-3. If multiple items match the task, list all their IDs in "target_ids".
-4. Respond ONLY with JSON.
+1. For drag puzzles requiring precision, ALWAYS start with Step 1: {{ "objectDescription": "colored segment" }}.
+2. After Step 1 is done and items are labelled, proceed to Step 2.
+3. Respond ONLY with JSON.
 
 Template:
 {{
   "goal": "Explain what you see and why you are taking this action",
   "action": {{ ... }}
   // OR: "tool_calls": [ {{ "name": "...", "args": {{ ... }} }} ]
+  // OR: "objectDescription": "colored segment"
+  // OR: "output": [ {{ "Action": "simulate_drag", ... }} ]
 }}"""
 
 
@@ -100,7 +114,7 @@ SELECT_GRID_PROMPT = """Solve the captcha grid by choosing the cell numbers that
 Grid: {rows}x{cols} ({total} cells)
 {grid_hint}
 
-IMPORTANT: If no tiles match the description (e.g., they have all been cleared or none were present), return an empty list for target_ids: [].
+If no tiles match the description (e.g., they have all been cleared or none were present), return an empty list for target_ids: [].
 
 Return JSON format ALWAYS:
 {{
@@ -109,51 +123,44 @@ Return JSON format ALWAYS:
 }}"""
 
 
-# For drag refinement: iterative adjustment
+# For drag refinement: iterative adjustment (Step 3)
 DRAG_REFINE_PROMPT = """You are refining a drag action for a captcha puzzle.
 
-{instruction}
+Given the history of previous guesses and the current image, estimate the remaining distance to the target.
 
-Primary Goal: {primary_goal}
-(Use this goal to judge success. Do NOT change this goal.)
+Input format:
+[
+  {{
+    "DestinationDescription": "...",
+    "SourceId": N,
+    "History": [
+      {{
+        "guess": {{ "x": N, "y": N }},
+        "estimatedVerticalDistanceFromTarget": N,
+        "estimatedHorizontalDistanceFromTarget": N
+      }}
+    ]
+  }}
+]
 
-Object to Move: "{source_desc}"
-Target Destination: "{target_desc}"
-
-{iteration_hint}
-
-CRITICAL: 
-1. The destination must be DISTINCT from the source. You are never dragging something to itself.
-2. If multiple potential target objects exist (e.g. multiple strawberries), you MUST SPECIFY which one you are targeting in the "goal" field using spatial descriptors (e.g. "drag the bee to the strawberry on the far left", "align with the bottom-most slot").
-
-The draggable item is marked with a LIGHT GREEN box.
-
-EVALUATION CRITERIA:
-1. **Vertical Position**: Is the object too high or too low? (e.g. Is the head on the stomach? It should be on the neck.)
-2. **Horizontal Position**: Is it too far left or right?
-3. **Connectivity**: Do the lines of the object flow smoothly into the target?
-
-The image shows:
-- LIGHT GREEN box: The draggable item at its current location.
-
-Current destination: ({target_x:.1%}, {target_y:.1%})
-
-{history_text}
-
-Provide adjustments as percentages of image size:
-- dx: positive = move right, negative = move left (e.g., 0.15 = 15% right)
-- dy: positive = move down, negative = move up (e.g., -0.20 = 20% up)
-
-{movement_instruction}
+Evaluation Criteria:
+1. Vertical Position: Is the object too high (negative) or too low (positive)?
+2. Horizontal Position: Is it too far left (negative) or too far right (positive)?
 
 Respond ONLY with JSON:
-{{
-  "goal": "SPECIFIC GOAL (e.g. drag the bee to the leftmost strawberry)",
-  "action": "refine_drag",
-  "decision": "accept" | "adjust",
-  "dx": 0.0,
-  "dy": 0.0
-}}"""
+[
+  {{
+    "SourceId": N,
+    "estimatedVerticalDistanceFromTarget": Y_DISTANCE,
+    "estimatedHorizontalDistanceFromTarget": X_DISTANCE
+  }}
+]
+
+CRITICAL:
+- Distances are on a 1-1000 scale.
+- 0 means perfectly aligned.
+- -100 means 100 units above/left of target.
+- 100 means 100 units below/right of target."""
 
 
 class ActionPlanner:
@@ -165,9 +172,11 @@ class ActionPlanner:
 
     def __init__(
         self,
-        backend: Literal["transformers", "vllm"] = "vllm",
+        backend: Literal["transformers", "vllm", "captchaKrakenApi"] = "captchaKrakenApi",
         model: Optional[str] = None,
         debug_callback: Optional[Any] = None,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
         **kwargs
     ):
         self.backend = backend
@@ -176,6 +185,12 @@ class ActionPlanner:
         self._model = None
         self._processor = None
         self.token_usage: List[Dict[str, Any]] = []
+        
+        # API config for captchaKrakenApi backend
+        self.base_url = base_url or os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")
+        self.api_key = api_key or os.getenv("CAPTCHA_KRAKEN_API_KEY") or os.getenv("VLLM_API_KEY", "EMPTY")
+        
+        self.chat_callback = kwargs.get("chat_callback")
 
         # Default models per backend
         if model is None:
@@ -189,10 +204,16 @@ class ActionPlanner:
                 else:
                     self._log(f"Recommended model: {rec_model} ({rec_msg})")
                     self.model = rec_model
-            elif backend == "vllm":
-                self.model = "Jake-Writer-Jobharvest/qwen3-vl-8b-merged-bf16"
+            elif backend == "vllm" or backend == "captchaKrakenApi":
+                self.model = "Qwen/Qwen3-VL-8B-Instruct-FP8"
         else:
             self.model = model
+
+        # LoRA configurations
+        self.loras = {
+            "general": "Jake-Writer-Jobharvest/qwen3-vl-8b-general-lora",
+            "grid": "Jake-Writer-Jobharvest/qwen3-vl-8b-grid-lora"
+        }
 
     def _log(self, message: str) -> None:
         """Log message to callback and/or stderr."""
@@ -207,10 +228,15 @@ class ActionPlanner:
     # ------------------------------------------------------------------
     # Core helper: chat with image
     # ------------------------------------------------------------------
-    def _chat_with_image(self, prompt: str, image_path: Union[str, List[str]]) -> Tuple[str, Optional[Dict[str, Any]]]:
+    def _chat_with_image(self, prompt: str, image_path: Union[str, List[str]], lora_name: Optional[str] = None) -> Tuple[str, Optional[Dict[str, Any]]]:
         """Send a prompt + image(s)/video(s) to the LLM backend, get response."""
         self._log(f"Backend: {self.backend}, Model: {self.model}")
         
+        # Use callback if provided (e.g., for docker server integration)
+        if self.chat_callback:
+            self._log(f"Using chat_callback...")
+            return self.chat_callback(prompt, image_path, lora_name)
+
         image_paths = [image_path] if isinstance(image_path, str) else image_path
         self._log(f"Input paths: {image_paths}")
 
@@ -220,10 +246,16 @@ class ActionPlanner:
             if tool_server_url:
                 import requests
                 self._log(f"Calling tool server for planning: {tool_server_url}/plan")
+                headers = {}
+                api_key = os.getenv("VLLM_API_KEY")
+                if api_key:
+                    headers["Authorization"] = f"Bearer {api_key}"
+                
                 try:
                     resp = requests.post(
                         f"{tool_server_url}/plan",
-                        json={"image_paths": image_paths, "prompt": prompt},
+                        json={"image_paths": image_paths, "prompt": prompt, "lora": lora_name},
+                        headers=headers,
                         timeout=300
                     )
                     resp.raise_for_status()
@@ -260,7 +292,32 @@ class ActionPlanner:
                     attn_implementation=attn_impl
                 ).to(device)
                 
-                # No longer need device_map="auto" if we force to device
+                # Load LoRAs if using transformers
+                from peft import PeftModel
+                for name, path in self.loras.items():
+                    self._log(f"Loading LoRA adapter: {name} from {path}")
+                    try:
+                        if hasattr(self._model, "add_adapter"):
+                            self._model.load_adapter(path, adapter_name=name)
+                        else:
+                            # Fallback if load_adapter is not available (older peft)
+                            self._model = PeftModel.from_pretrained(self._model, path, adapter_name=name)
+                    except Exception as e:
+                        self._log(f"Failed to load LoRA {name}: {e}")
+
+            # Switch adapter if needed
+            if lora_name and lora_name in self.loras:
+                self._log(f"Switching to LoRA: {lora_name}")
+                try:
+                    self._model.set_adapter(lora_name)
+                except Exception as e:
+                    self._log(f"Failed to set adapter {lora_name}: {e}")
+            else:
+                # Use base model if no lora requested or not found
+                try:
+                    self._model.disable_adapters()
+                except:
+                    pass
             
             messages = [
                 {
@@ -336,7 +393,16 @@ class ActionPlanner:
         if self.backend == "vllm":
             try:
                 from vllm import LLM, SamplingParams
+                from vllm.lora.request import LoRARequest
                 from PIL import Image
+                
+                # Patch for Qwen3-VL config issues in some vLLM/transformers combinations
+                try:
+                    from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLTextConfig
+                    if not hasattr(Qwen3VLTextConfig, "tie_word_embeddings"):
+                        Qwen3VLTextConfig.tie_word_embeddings = False
+                except ImportError:
+                    pass
             except ImportError:
                 raise ImportError("vLLM not installed. Please install with 'pip install vllm'")
 
@@ -344,12 +410,16 @@ class ActionPlanner:
                 self._log(f"Loading vLLM model: {self.model}")
                 # Default to 0.75 to allow SAM 3 to coexist on 32GB cards
                 gpu_memory_utilization = float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.75"))
+                quantization = os.getenv("VLLM_QUANTIZATION", "fp8")
                 
                 self._model = LLM(
                     model=self.model,
                     trust_remote_code=True,
                     max_model_len=8192,
                     gpu_memory_utilization=gpu_memory_utilization,
+                    enable_lora=True,
+                    max_loras=4,
+                    quantization=quantization,
                     **self.config
                 )
             
@@ -358,6 +428,15 @@ class ActionPlanner:
                 max_tokens=512,
                 stop=["<|im_end|>", "<|endoftext|>"]
             )
+
+            # Handle LoRA request
+            lora_request = None
+            if lora_name and lora_name in self.loras:
+                lora_path = self.loras[lora_name]
+                self._log(f"Using LoRA: {lora_name} ({lora_path})")
+                # Use a stable integer ID for the LoRA
+                lora_id = 1 if lora_name == "general" else 2
+                lora_request = LoRARequest(lora_name, lora_id, lora_path)
 
             # vLLM multi-modal input format for Qwen2-VL style models
             mm_data = {}
@@ -376,17 +455,112 @@ class ActionPlanner:
                     "prompt": full_prompt,
                     "multi_modal_data": mm_data,
                 },
-                sampling_params=sampling_params
+                sampling_params=sampling_params,
+                lora_request=lora_request
             )
             
             result = outputs[0].outputs[0].text
             return result, None
 
+        if self.backend == "captchaKrakenApi":
+            import requests
+            import base64
+            from mimetypes import guess_type
+
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+
+            content = []
+            
+            # Add images first
+            for path in image_paths:
+                is_video = any(path.lower().endswith(ext) for ext in [".mp4", ".gif", ".avi", ".webm"])
+                if is_video:
+                    self._log("Video not fully supported in captchaKrakenApi backend via HTTP yet (needs frame extraction). Sending prompt only.")
+                    # TODO: Extract frames and send as images
+                    continue
+                
+                with open(path, "rb") as image_file:
+                    base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+                    mime_type, _ = guess_type(path)
+                    if mime_type is None: mime_type = "image/jpeg"
+                    
+                    content.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{mime_type};base64,{base64_image}"
+                        }
+                    })
+
+            # Add text prompt
+            content.append({
+                "type": "text",
+                "text": prompt
+            })
+
+            messages = [
+                {
+                    "role": "system",
+                    "content": "You are an expert captcha solver. Think carefully about the visual cues. Respond ONLY with the JSON action."
+                },
+                {
+                    "role": "user",
+                    "content": content
+                }
+            ]
+
+            # Resolve LoRA name to model ID if possible
+            model_id = self.model
+            if lora_name:
+                if lora_name == "general":
+                    model_id = "general-lora"
+                elif lora_name == "grid":
+                    model_id = "grid-lora"
+                else:
+                    model_id = lora_name
+
+            payload = {
+                "model": model_id,
+                "messages": messages,
+                "max_tokens": 512,
+                "temperature": 0
+            }
+            
+            self._log(f"Sending request to {self.base_url}/chat/completions with model {payload['model']}")
+            
+            try:
+                response = requests.post(
+                    f"{self.base_url}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=120
+                )
+                response.raise_for_status()
+                data = response.json()
+                
+                result = data['choices'][0]['message']['content']
+                usage = data.get('usage', {})
+                self.token_usage.append(usage)
+                
+                return result, None
+            except Exception as e:
+                self._log(f"OpenAI API call failed: {e}")
+                if hasattr(e, 'response') and e.response is not None:
+                    self._log(f"Response: {e.response.text}")
+                raise e
+
         raise ValueError(f"Unknown backend: {self.backend}")
 
     def _parse_json(self, text: str) -> Dict[str, Any]:
         """Extract and parse JSON from LLM response."""
+        self._log(f"Raw response to parse: {text}")
         text = text.strip()
+
+        # Handle <think> blocks if present
+        if "<think>" in text:
+            text = text.split("</think>")[1].strip()
 
         # Remove markdown code blocks
         if "```json" in text:
@@ -394,15 +568,24 @@ class ActionPlanner:
         elif "```" in text:
             text = text.split("```", 1)[1].split("```", 1)[0]
 
-        # Find JSON object
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        if start != -1 and end > start:
-            text = text[start:end]
+        # Find JSON object or list
+        start_obj = text.find("{")
+        start_list = text.find("[")
+        
+        if start_obj != -1 and (start_list == -1 or start_obj < start_list):
+            end = text.rfind("}") + 1
+            if end > start_obj:
+                text = text[start_obj:end]
+        elif start_list != -1:
+            end = text.rfind("]") + 1
+            if end > start_list:
+                text = text[start_list:end]
 
+        self._log(f"Cleaned text to parse: {text}")
         try:
             return json.loads(text)
         except json.JSONDecodeError:
+            self._log("JSON decode failed")
             return {}
 
     # ------------------------------------------------------------------
@@ -411,7 +594,6 @@ class ActionPlanner:
     def plan_with_tools(
         self,
         image_path: str,
-        instruction: str = "",
         objects: Optional[List[Dict[str, Any]]] = None,
         history: Optional[List[str]] = None,
         context_image_path: Optional[str] = None,
@@ -421,7 +603,6 @@ class ActionPlanner:
 
         Args:
             image_path: Path to the captcha image or video
-            instruction: Optional instruction text
             objects: Optional list of detected objects
             history: Optional list of previous actions
             context_image_path: Optional path to a static image with overlays/labels
@@ -448,8 +629,6 @@ class ActionPlanner:
             history_section = "\\n".join(lines)
 
         prompt = PLAN_WITH_TOOLS_PROMPT.format(
-            instruction=instruction or "Solve this captcha.",
-            object_list_section=object_list_section,
             history_section=history_section,
         )
         
@@ -458,7 +637,7 @@ class ActionPlanner:
             images.append(context_image_path)
             prompt += "\n\nNOTE: Multiple images/media provided. The first item is the raw captcha (could be video), the second is a static frame with red boxes and Object IDs for reference."
 
-        response, _ = self._chat_with_image(prompt, images)
+        response, _ = self._chat_with_image(prompt, images, lora_name="general")
         data = self._parse_json(response)
         
         # Validation if Pydantic is available
@@ -477,83 +656,59 @@ class ActionPlanner:
     def refine_drag(
         self,
         image_path: str,
-        instruction: str,
-        current_target: List[float],
+        current_guess: Dict[str, int],
         history: List[Dict[str, Any]],
-        source_description: str = "movable item",
+        source_id: int = 0,
         target_description: str = "matching slot",
-        primary_goal: str = "Complete the puzzle",
-        iteration: int = 0,
-    ) -> Dict[str, Any]:
+    ) -> List[Dict[str, Any]]:
         """
-        Refine a drag destination with visual feedback.
+        Refine a drag destination with visual feedback (Step 3).
 
         Args:
-            image_path: Path to image with drag overlay (item to move marked with green box)
-            instruction: Original puzzle instruction
-            current_target: Current target position [x, y] as percentages (0-1)
+            image_path: Path to image with drag overlay
+            current_guess: Current guess {"x": 1-1000, "y": 1-1000}
             history: List of previous refinements:
-                [{"destination": [x, y], "decision": "..."}]
-            source_description: Description of the item being dragged
+                [{"guess": {"x": N, "y": N}, "v_dist": N, "h_dist": N}]
+            source_id: ID of the item being dragged
             target_description: Description of where it should go
-            primary_goal: The specific goal identified by the planner
-            iteration: Current refinement iteration (0 = first attempt)
 
         Returns:
-            Dict following the PlannerDragRefineAction schema.
+            List of refinement results as per Step 3 instructions.
         """
-        # Format history for context
-        if history:
-            history_lines = ["Previous attempts:"]
-            for i, h in enumerate(history):
-                dest = h.get("destination", [0, 0])
-                decision = h.get("decision", "")
-                history_lines.append(
-                    f"  {i + 1}. destination: ({dest[0]:.1%}, {dest[1]:.1%}), "
-                    f'decision: {decision}'
-                )
-            history_lines.append(f"  {len(history) + 1}. destination: ({current_target[0]:.1%}, {current_target[1]:.1%}) (CURRENT)")
-            history_text = "\n".join(history_lines)
-        else:
-            history_text = "This is the first attempt."
+        history_data = []
+        for h in history:
+            history_data.append({
+                "guess": h.get("guess", {"x": 500, "y": 500}),
+                "estimatedVerticalDistanceFromTarget": h.get("v_dist", 0),
+                "estimatedHorizontalDistanceFromTarget": h.get("h_dist", 0)
+            })
+        
+        # Add current guess to history for the prompt context
+        history_data.append({
+            "guess": current_guess,
+            "estimatedVerticalDistanceFromTarget": "???",
+            "estimatedHorizontalDistanceFromTarget": "???"
+        })
 
-        if iteration == 0:
-            iteration_hint = "This is the INITIAL estimation step."
-            movement_instruction = "Estimate the TOTAL distance needed to reach the target and provide it as dx and dy. We will refine if needed, but aim to reach the target in one step."
-        else:
-            iteration_hint = f"This is refinement step #{iteration}. We have moved the object but it needs fine-tuning."
-            movement_instruction = "Make precise, SMALL adjustments (1-5%) to perfectly align the object. Focus on connectivity and alignment."
+        input_context = [
+            {
+                "DestinationDescription": target_description,
+                "SourceId": source_id,
+                "History": history_data
+            }
+        ]
+        
+        prompt = DRAG_REFINE_PROMPT + f"\n\nInput Context:\n{json.dumps(input_context, indent=2)}"
 
-        prompt = DRAG_REFINE_PROMPT.format(
-            instruction=instruction or "Complete the drag puzzle.",
-            primary_goal=primary_goal,
-            source_desc=source_description,
-            target_desc=target_description,
-            target_x=current_target[0],
-            target_y=current_target[1],
-            history_text=history_text,
-            iteration_hint=iteration_hint,
-            movement_instruction=movement_instruction,
-        )
-
-        response, _ = self._chat_with_image(prompt, image_path)
+        # Use base model for drag refinement as requested
+        response, _ = self._chat_with_image(prompt, image_path, lora_name=None)
         result = self._parse_json(response)
+        
+        # If the result is a dict (e.g. from some fallback), wrap it in a list
+        if isinstance(result, dict):
+            result = [result]
 
-        # Validation
-        if PlannerDragRefineAction is not Any:
-            try:
-                PlannerDragRefineAction.model_validate(result)
-            except Exception as e:
-                self._log(f"Drag refinement validation failed: {e}")
-
-        # Ensure we have valid adjustment values and return compatible dict
-        return {
-            "goal": result.get("goal", primary_goal),
-            "action": "refine_drag",
-            "decision": result.get("decision", "accept"),
-            "dx": float(result.get("dx", 0)),
-            "dy": float(result.get("dy", 0)),
-        }
+        return result
 
 
     # ------------------------------------------------------------------
@@ -566,7 +721,7 @@ class ActionPlanner:
         Returns:
           the text to type
         """
-        response, _ = self._chat_with_image(TEXT_READ_PROMPT, image_path)
+        response, _ = self._chat_with_image(TEXT_READ_PROMPT, image_path, lora_name="general")
         data = self._parse_json(response)
         
         # Validation against PlannerTypeAction instead of PlannerPlan
@@ -581,7 +736,7 @@ class ActionPlanner:
     # ------------------------------------------------------------------
     # Grid Selection
     # ------------------------------------------------------------------
-    def get_grid_selection(self, image_path: str, rows: int, cols: int, instruction: str = "") -> List[int]:
+    def get_grid_selection(self, image_path: str, rows: int, cols: int) -> List[int]:
         """
         Ask which numbers to select in the grid.
         Returns a list of selected cell numbers.
@@ -589,8 +744,6 @@ class ActionPlanner:
         total = rows * cols
 
         self._log("ActionPlanner.get_grid_selection called")
-        if instruction:
-            self._log(f"  external instruction: '{instruction}'")
         self._log(f"  grid: {rows}x{cols}")
 
         grid_hint = ""
@@ -606,9 +759,14 @@ class ActionPlanner:
             grid_hint=grid_hint
         )
         
-        response, _ = self._chat_with_image(prompt, image_path)
+        response, _ = self._chat_with_image(prompt, image_path, lora_name="grid")
         data = self._parse_json(response)
         
+        # Handle case where model returns raw list [1, 2, 3] instead of object
+        if isinstance(data, list):
+            self._log(f"Model returned raw list: {data}. Wrapping in target_ids.")
+            data = {"target_ids": data, "action": "click"}
+
         # Validation against PlannerClickAction instead of PlannerPlan
         if PlannerClickAction is not Any:
             try:

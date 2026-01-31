@@ -44,9 +44,15 @@ def detect(
         try:
             # Resolve absolute path for the server
             abs_path = os.path.abspath(media_path)
+            headers = {}
+            api_key = os.getenv("VLLM_API_KEY")
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+                
             resp = requests.post(
                 f"{tool_server_url}/detect",
                 json={"image_path": abs_path, "text_prompt": object_class, "max_objects": max_objects},
+                headers=headers,
                 timeout=300
             )
             resp.raise_for_status()

@@ -1,4 +1,4 @@
-from typing import List, Literal, Optional, Union
+from typing import List, Literal, Optional, Union, Dict
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -28,15 +28,26 @@ class PlannerWaitAction(PlannerAction):
     duration_ms: int = Field(default=500, description="Duration to wait in milliseconds")
 
 
-class PlannerDragRefineAction(PlannerAction):
-    action: Literal["refine_drag"]
-    decision: Literal["accept", "adjust"] = Field(description="'accept' if aligned, 'adjust' if refinement needed")
-    dx: float = Field(default=0.0, description="Horizontal adjustment (-1.0 to 1.0)")
-    dy: float = Field(default=0.0, description="Vertical adjustment (-1.0 to 1.0)")
-
-
 class PlannerDoneAction(PlannerAction):
     action: Literal["done"]
+
+
+class DragGuess(BaseModel):
+    Action: Literal["simulate_drag"]
+    SourceID: int
+    DestinationDescription: str
+    EstimatedPosition: Dict[str, int] = Field(description="{'x': 1-1000, 'y': 1-1000}")
+
+
+class DragRefineResult(BaseModel):
+    SourceId: int
+    estimatedVerticalDistanceFromTarget: int = Field(description="negative = above, positive = below")
+    estimatedHorizontalDistanceFromTarget: int = Field(description="negative = left, positive = right")
+
+
+class PlannerDragRefineAction(PlannerAction):
+    # This is for Step 3: Verification and adjustment
+    output: List[DragRefineResult]
 
 
 class PlannerToolCall(BaseModel):
@@ -45,16 +56,19 @@ class PlannerToolCall(BaseModel):
 
 
 class PlannerPlan(BaseModel):
-    goal: str
+    goal: Optional[str] = None
     tool_calls: Optional[List[PlannerToolCall]] = None
-    # We allow the planner to return either a direct action or tool calls
-    action: Optional[Union[PlannerClickAction, PlannerDragAction, PlannerTypeAction, PlannerWaitAction, PlannerDoneAction, PlannerDragRefineAction]] = None
+    # Step 1: Detect all draggable items
+    objectDescription: Optional[str] = None
+    # Step 2: Initial guess (general LoRa) uses output
+    output: Optional[List[DragGuess]] = None
+    # We allow the planner to return either a direct action or tool calls or new output format
+    action: Optional[Union[PlannerClickAction, PlannerDragAction, PlannerTypeAction, PlannerWaitAction, PlannerDoneAction]] = None
 
     @model_validator(mode="after")
     def check_exclusive(self) -> "PlannerPlan":
-        if self.action and self.tool_calls:
-            raise ValueError("Provide EITHER 'action' OR 'tool_calls', not both.")
-        if not self.action and not self.tool_calls:
-            raise ValueError("Provide EITHER 'action' OR 'tool_calls'.")
+        # At least one must be provided
+        if not any([self.action, self.tool_calls, self.output, self.objectDescription]):
+            raise ValueError("Provide EITHER 'action', 'tool_calls', 'output', OR 'objectDescription'.")
         return self
 

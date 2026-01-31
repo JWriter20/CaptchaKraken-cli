@@ -93,6 +93,9 @@ class DebugManager:
         if not self.enabled:
             return None
             
+        if not self.base_dir.exists():
+            self._setup_dir()
+            
         target = self.base_dir / name
         try:
             shutil.copy2(image_path, target)
@@ -117,25 +120,25 @@ class CaptchaSolver:
     def __init__(
         self,
         model: Optional[str] = None,
-        provider: str = "vllm",
+        provider: str = "captchaKrakenApi",
         api_key: Optional[str] = None,
     ):
         self.debug = DebugManager(DEBUG)
         
         # Restrict providers to the supported set
-        if provider not in {"transformers", "vllm"}:
-            raise ValueError(f"Unsupported provider '{provider}'. Supported providers are: 'transformers', 'vllm'.")
+        if provider not in {"transformers", "vllm", "captchaKrakenApi"}:
+            raise ValueError(f"Unsupported provider '{provider}'. Supported providers are: 'transformers', 'vllm', 'captchaKrakenApi'.")
 
         # Set default model based on provider
         if model is None:
-            if provider == "vllm":
-                model = "Jake-Writer-Jobharvest/qwen3-vl-8b-merged-bf16"
+            if provider == "vllm" or provider == "captchaKrakenApi":
+                model = "Qwen/Qwen3-VL-8B-Instruct-FP8"
             elif provider == "transformers":
                 # ActionPlanner handles the recommended model config for transformers
                 pass
 
         # Validate required parameters
-        if provider not in {"transformers", "vllm"} and not api_key:
+        if provider not in {"transformers", "vllm", "captchaKrakenApi"} and not api_key:
             # This check is actually redundant now that we only have transformers and vllm, 
             # as neither strictly requires api_key (both are local or tool server).
             # But let's keep it clean.
@@ -145,6 +148,7 @@ class CaptchaSolver:
         planner_kwargs: dict = {
             "backend": provider,
             "model": model,
+            "api_key": api_key,
         }
 
         planner_kwargs["debug_callback"] = self.debug.log
@@ -230,6 +234,37 @@ class CaptchaSolver:
         grid_boxes = find_grid(cv_image_path)
         if grid_boxes:
             self.debug.log(f"Detected grid with {len(grid_boxes)} cells")
+            
+            # Anti-illusion: Blur top-right reference image area (top 20%, right 35%)
+            # This helps break deceptive textures in AI-generated reference images.
+            try:
+                from PIL import ImageFilter
+                with Image.open(cv_image_path) as img:
+                    w, h = img.size
+                    left = int(w * 0.65)
+                    top = 0
+                    right = w
+                    bottom = int(h * 0.20)
+                    
+                    if right > left and bottom > top:
+                        self.debug.log(f"Applying anti-illusion blur to reference area: ({left}, {top}, {right}, {bottom})")
+                        region = img.crop((left, top, right, bottom))
+                        # Use a radius of 5 to effectively strip high-frequency textures
+                        blurred_region = region.filter(ImageFilter.GaussianBlur(radius=5))
+                        img.paste(blurred_region, (left, top))
+                        
+                        # Save as new base for grid solving
+                        ext = os.path.splitext(cv_image_path)[1] or ".png"
+                        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tf:
+                            anti_illusion_path = tf.name
+                        img.save(anti_illusion_path)
+                        self._temp_files.append(anti_illusion_path)
+                        
+                        self.debug.save_image(anti_illusion_path, "00_anti_illusion_base.png")
+                        cv_image_path = anti_illusion_path
+            except Exception as e:
+                self.debug.log(f"Failed to apply anti-illusion blur: {e}")
+
             return self._solve_grid(cv_image_path, instruction, grid_boxes)
 
         # 2. Check for simple checkbox (lightweight)
@@ -271,7 +306,6 @@ class CaptchaSolver:
             rows = math.ceil(n / cols)
 
         self.debug.log(f"_solve_grid called with {n} cells ({rows}x{cols})")
-        self.debug.log(f"Instruction passed to planner: '{instruction}'")
 
         # 1. Detect state (Selected / Loading) via CV
         cv_selected = []
@@ -334,8 +368,7 @@ class CaptchaSolver:
             selected_numbers = self.planner.get_grid_selection(
                 overlay_path, 
                 rows=rows, 
-                cols=cols, 
-                instruction=instruction
+                cols=cols
             )
             
             # 2. Post-processing: Filter out cells that are already selected (using detect_selected_cells results)
@@ -480,7 +513,6 @@ class CaptchaSolver:
             
             result = self.planner.plan_with_tools(
                 media_path,
-                instruction, 
                 objects=self.current_objects,
                 history=history,
                 context_image_path=current_context
@@ -489,6 +521,70 @@ class CaptchaSolver:
 
             if "goal" in result:
                 self.debug.log(f"Goal: {result['goal']}")
+
+            # Handle Step 1: Detect all draggable items
+            if "objectDescription" in result:
+                obj_desc = result["objectDescription"]
+                self.debug.log(f"Step 1: detect('{obj_desc}')")
+                attention = self._get_attention()
+                detections = detect(attention, media_path, obj_desc, max_objects=12)
+                
+                if detections:
+                    new_ids = []
+                    for det in detections:
+                        det["id"] = self.next_object_id
+                        self.next_object_id += 1
+                        self.current_objects.append(det)
+                        new_ids.append(det["id"])
+                    
+                    msg = f"Step 1 detect('{obj_desc}') found {len(new_ids)} items."
+                    history.append(f"Tool call: {msg}")
+                    self.debug.log(msg)
+                    # We need to update the labeled image with new IDs
+                    overlays = []
+                    for obj in self.current_objects:
+                        overlays.append({
+                            "bbox": obj["bbox"],
+                            "number": obj["id"],
+                            "color": "#FF0000",
+                            "box_style": "dashed"
+                        })
+                    shutil.copy2(cv_path, labeled_path)
+                    add_overlays_to_image(labeled_path, overlays)
+                    continue
+                else:
+                    history.append(f"Tool call: Step 1 detect('{obj_desc}') found no items.")
+                    continue
+
+            # Handle new 'output' format for drag initial guesses (Step 2)
+            outputs = result.get("output", [])
+            if not outputs and result.get("Action") == "simulate_drag":
+                # Handle case where model returns single object instead of list in 'output'
+                outputs = [result]
+
+            if outputs:
+                for out in outputs:
+                    if out.get("Action") == "simulate_drag":
+                        try:
+                            source_id = int(out.get("SourceID", 0))
+                        except (ValueError, TypeError):
+                            source_id = 0
+                        dest_desc = out.get("DestinationDescription", instruction)
+                        est_pos = out.get("EstimatedPosition", {"x": 500, "y": 500})
+                        
+                        self.debug.log(f"Step 2 Initial Guess: simulate_drag(source_id={source_id}) to {dest_desc} at {est_pos}")
+                        
+                        # Execute drag simulation using the initial guess
+                        drag_result = simulate_drag(
+                            self,
+                            media_path,
+                            instruction,
+                            primary_goal=result.get("goal") or instruction or "Complete the drag puzzle",
+                            source_id=source_id,
+                            initial_guess=est_pos,
+                            target_description=dest_desc
+                        )
+                        return DragAction(**drag_result)
 
             # Collect actions from all tool calls
             collected_actions: List[ClickAction] = []

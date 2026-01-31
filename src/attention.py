@@ -537,10 +537,11 @@ class AttentionExtractor:
             return
         
         from transformers import pipeline
-        print(f"[AttentionExtractor] Loading SAM 3 mask-generation pipeline...", file=sys.stderr)
+        model_id = os.getenv("SAM3_MODEL_ID", "facebook/sam3")
+        print(f"[AttentionExtractor] Loading SAM 3 mask-generation pipeline ({model_id})...", file=sys.stderr)
         self._sam3_auto_generator = pipeline(
             "mask-generation", 
-            model="facebook/sam3", 
+            model=model_id, 
             device=self.device, 
             trust_remote_code=True
         )
@@ -869,7 +870,7 @@ class AttentionExtractor:
                             det["bbox"] = [det["x_min"], det["y_min"], det["x_max"], det["y_max"]]
                             processed.append(det)
                     processed.sort(key=lambda x: x["score"], reverse=True)
-                    final_frames.append(processed[:max_objects])
+                    final_frames.append(processed) # ignore max_objects for now
                 return final_frames
             else:
                 # Video-merged (single list)
@@ -973,6 +974,11 @@ class AttentionExtractor:
             import requests
             try:
                 abs_path = os.path.abspath(media_path)
+                headers = {}
+                api_key = os.getenv("VLLM_API_KEY")
+                if api_key:
+                    headers["Authorization"] = f"Bearer {api_key}"
+                
                 resp = requests.post(
                     f"{tool_server_url}/get_mask",
                     json={
@@ -982,6 +988,7 @@ class AttentionExtractor:
                         "points": points,
                         "max_objects": max_objects
                     },
+                    headers=headers,
                     timeout=300
                 )
                 resp.raise_for_status()

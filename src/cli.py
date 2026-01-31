@@ -172,10 +172,10 @@ Examples:
     )
     parser.add_argument(
         "api_provider",
-        choices=["transformers", "vllm"],
+        choices=["transformers", "vllm", "captchaKrakenApi"],
         default="vllm",
         nargs="?",
-        help="API provider to use one of: transformers, vllm (default: vllm)",
+        help="API provider to use one of: transformers, vllm, captchaKrakenApi (default: vllm)",
     )
     parser.add_argument("api_key", nargs="?", help="API key (not required for transformers/vllm)")
 

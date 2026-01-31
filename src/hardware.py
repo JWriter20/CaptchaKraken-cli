@@ -58,18 +58,11 @@ def get_recommended_model_config() -> Tuple[str, str, str]:
     # Allow overrides via environment variables
     force_model = os.getenv("CAPTCHA_FORCE_MODEL")
     if force_model:
-        if "bf16" in force_model.lower():
-            return (
-                "Jake-Writer-Jobharvest/qwen3-vl-8b-merged-bf16",
-                "Full BF16 (Forced)",
-                "Using forced BF16 model (vLLM recommended)."
-            )
-        if "BF16" in force_model.lower() or "full" in force_model.lower():
-            return (
-                "Jake-Writer-Jobharvest/qwen3-vl-8b-merged-BF16",
-                "Full BF16 (Forced)",
-                "Using forced BF16 model (Transformers recommended)."
-            )
+        return (
+            force_model,
+            "Forced Model",
+            f"Using forced model: {force_model}"
+        )
 
     vram = get_gpu_memory_gb()
     device = get_device()
@@ -78,17 +71,10 @@ def get_recommended_model_config() -> Tuple[str, str, str]:
     # Full version: SAM3 (3.5) + Qwen3-VL (17.5) = 21GB
     # Requirements: 22GB VRAM or 32GB Unified Memory
     if (not is_mac and vram >= 22.0) or (is_mac and vram >= 32.0):
-        # Prefer BF16 for vLLM performance if on CUDA
-        if device == "cuda":
-            return (
-                "Jake-Writer-Jobharvest/qwen3-vl-8b-merged-bf16",
-                "Full (Merged BF16)",
-                "Hardware supports high-performance BF16 models via vLLM."
-            )
         return (
-            "Jake-Writer-Jobharvest/qwen3-vl-8b-merged-BF16",
-            "Full (Merged BF16)",
-            "Hardware supports full precision models."
+            "Qwen/Qwen3-VL-8B-Instruct",
+            "Full (BF16)",
+            "Hardware supports full local execution. Please run the CaptchaKraken Docker container for optimal performance."
         )
 
     # Insufficient hardware for local execution of the full merged model
@@ -96,7 +82,7 @@ def get_recommended_model_config() -> Tuple[str, str, str]:
         "API",
         "None (Insufficient Hardware)",
         "Insufficient hardware detected for local execution (22GB+ VRAM required). "
-        "To force local execution, set CAPTCHA_FORCE_MODEL=bf16 (for vLLM) or BF16."
+        "Please run the CaptchaKraken Docker container on a capable machine or use our hosted API."
     )
 
 

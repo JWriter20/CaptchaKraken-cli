@@ -108,6 +108,7 @@ class ToolServerHandler(http.server.BaseHTTPRequestHandler):
                     image_paths = [data.get('image_path')]
                 
                 prompt = data.get('prompt')
+                lora_name = data.get('lora')
                 
                 if not image_paths or not prompt:
                     self._send_response({'error': 'Missing image_paths or prompt'}, 400)
@@ -118,11 +119,26 @@ class ToolServerHandler(http.server.BaseHTTPRequestHandler):
                 t0 = time.time()
                 try:
                     # Use the warm planner instance
-                    response_text, _ = planner._chat_with_image(prompt, image_paths)
+                    response_text, _ = planner._chat_with_image(prompt, image_paths, lora_name=lora_name)
                     t1 = time.time()
                     
                     print(f"[Server] Planning took {t1-t0:.2f}s", file=sys.stderr)
-                    self._send_response({"response": response_text})
+                    
+                    # Parse the response if it's a string
+                    if isinstance(response_text, str):
+                        try:
+                            # Use the planner's helper to extract JSON
+                            actions = planner._parse_json(response_text)
+                        except:
+                            actions = {"error": "Failed to parse model response", "raw": response_text}
+                    else:
+                        actions = response_text
+
+                    self._send_response({
+                        "actions": actions,
+                        "token_usage": planner.token_usage,
+                        "raw_response": response_text if isinstance(response_text, str) else None
+                    })
                 except Exception as e:
                     print(f"[Server] Planning error: {e}", file=sys.stderr)
                     traceback.print_exc()
@@ -146,7 +162,7 @@ def start_tool_server(port=8000):
     # 2. Initialize and Warm ActionPlanner
     if planner_model_id is None:
         if planner_backend == "vllm":
-            planner_model_id = "Jake-Writer-Jobharvest/qwen3-vl-8b-merged-bf16"
+            planner_model_id = "Qwen/Qwen3-VL-8B-Instruct"
         else:
             # Fallback to transformers if vLLM not specified or available
             planner_backend = "transformers"
