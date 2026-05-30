@@ -85,7 +85,7 @@ class ActionPlanner:
         if self.debug_callback:
             self.debug_callback(f"[Planner] {message}")
 
-    def _chat_with_image(self, prompt: str, image_path: str, max_tokens: int = 512) -> str:
+    def _chat_with_image(self, prompt: str, image_path: str, max_tokens: int = 512, temperature: float = 0.0) -> str:
         with open(image_path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode()
         mime, _ = guess_type(image_path)
@@ -109,7 +109,7 @@ class ActionPlanner:
         payload = {
             "model": self.model,
             "messages": messages,
-            "temperature": 0,
+            "temperature": temperature,
             "max_tokens": max_tokens,
             # Qwen3.5's reasoning otherwise eats the token budget. `/no_think`
             # in the prompt alone is unreliable; disabling at the chat-template
@@ -159,27 +159,14 @@ class ActionPlanner:
         except json.JSONDecodeError:
             return None
 
-    def get_grid_selection(self, image_path: str, rows: int, cols: int) -> List[int]:
-        """Return the list of 1-indexed cells the model wants to click."""
-        total = rows * cols
-        if rows == 4 and cols == 4:
-            grid_hint = "Hint: Single large image split into tiles. Select ALL parts."
-        else:
-            grid_hint = "Hint: Separate images. Select only clear matches."
-
-        prompt = SELECT_GRID_PROMPT.format(
-            rows=rows, cols=cols, total=total, grid_hint=grid_hint
-        )
-        raw = self._chat_with_image(prompt, image_path, max_tokens=128)
+    def _parse_grid_ids(self, raw: str, total: int) -> List[int]:
         data = self._parse_json(raw)
-
         if isinstance(data, list):
             ids = data
         elif isinstance(data, dict):
             ids = data.get("target_ids") or data.get("action", {}).get("target_ids") or []
         else:
             ids = []
-
         out: List[int] = []
         for v in ids:
             try:
@@ -188,7 +175,42 @@ class ActionPlanner:
                     out.append(iv)
             except (TypeError, ValueError):
                 continue
-        self._log(f"grid selection -> {out}")
+        return out
+
+    def get_grid_selection(self, image_path: str, rows: int, cols: int, n_samples: int = 3) -> List[int]:
+        """Return cells the model wants to click (1-indexed).
+
+        Uses majority-vote sampling: query the model N times at temp=0.3 and
+        keep cells chosen by >=ceil(N/2). Reduces false positives sharply on
+        the photographic 4x4 puzzles where the LoRA has ~85% per-tile accuracy.
+        N=1 (or n_samples<=1) keeps the original deterministic single-call path.
+        """
+        total = rows * cols
+        if rows == 4 and cols == 4:
+            grid_hint = "Hint: Single large image split into tiles. Select ALL parts."
+        else:
+            grid_hint = "Hint: Separate images. Select only clear matches."
+        prompt = SELECT_GRID_PROMPT.format(
+            rows=rows, cols=cols, total=total, grid_hint=grid_hint
+        )
+
+        if n_samples <= 1:
+            raw = self._chat_with_image(prompt, image_path, max_tokens=128)
+            out = self._parse_grid_ids(raw, total)
+            self._log(f"grid selection -> {out}")
+            return out
+
+        from collections import Counter
+        votes: Counter = Counter()
+        for i in range(n_samples):
+            raw = self._chat_with_image(prompt, image_path, max_tokens=128, temperature=0.3)
+            ids = self._parse_grid_ids(raw, total)
+            self._log(f"grid sample {i + 1}/{n_samples} -> {ids}")
+            for cell in set(ids):
+                votes[cell] += 1
+        threshold = (n_samples // 2) + 1  # strict majority
+        out = sorted(c for c, n in votes.items() if n >= threshold)
+        self._log(f"grid majority-vote (≥{threshold}/{n_samples}) -> {out} (votes={dict(votes)})")
         return out
 
     def get_universal_action(self, image_path: str) -> Dict[str, Any]:
