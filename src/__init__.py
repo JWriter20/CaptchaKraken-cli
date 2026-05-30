@@ -1,26 +1,26 @@
 """
-CaptchaKraken - AI-powered captcha solver using LLM planning + vision tools.
+CaptchaKraken v2 — vLLM-backed captcha solver.
+
+The v1 implementation (SAM3 grounding, multiple LLM providers, detect/segment
+tool calls, drag refinement) lives on the `v1-old-architecture` branch in both
+this repo and the parent PlaywrightCaptchaKrakenJS repo. Grab files from there
+if you need to bring back simulate_drag / segment / detect for action
+verification work later.
 
 Usage:
     from src import CaptchaSolver
-
-    # vLLM (high-performance local backend)
-    solver = CaptchaSolver(provider="vllm")
-
-    # Solve a captcha
-    actions = solver.solve("captcha.png", "Select all traffic lights")
+    solver = CaptchaSolver()  # talks to local vLLM, model='captcha' LoRA
+    actions = solver.solve("captcha.png")
 """
 
 from pathlib import Path
 
-# Best-effort load of .env from project root
-try:  # pragma: no cover - environment setup
+try:  # pragma: no cover
     from dotenv import load_dotenv
 
     project_root = Path(__file__).resolve().parent.parent
     load_dotenv(project_root / ".env")
 except Exception:
-    # If python-dotenv is not installed or .env is missing, just continue.
     pass
 
 from .action_types import (
@@ -30,29 +30,22 @@ from .action_types import (
     TypeAction,
     WaitAction,
 )
-from .attention import AttentionExtractor
 from .image_processor import ImageProcessor
-from .overlay import add_drag_overlay, add_overlays_to_image
+from .overlay import add_overlays_to_image
 from .planner import ActionPlanner
 from .solver import CaptchaSolver, solve_captcha
 
 __all__ = [
-    # Main solver
     "CaptchaSolver",
     "solve_captcha",
-    # Components
     "ActionPlanner",
-    "AttentionExtractor",
     "ImageProcessor",
-    # Action Types
     "CaptchaAction",
     "ClickAction",
     "DragAction",
     "TypeAction",
     "WaitAction",
-    # Utilities
     "add_overlays_to_image",
-    "add_drag_overlay",
 ]
 
-__version__ = "0.4.0"
+__version__ = "2.0.0"

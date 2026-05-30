@@ -38,7 +38,7 @@ ENV PYTHONPATH="${PYTHONPATH}:/app/CaptchaKraken-cli"
 ARG HF_TOKEN
 ENV HF_TOKEN=${HF_TOKEN}
 ENV SAM3_MODEL_ID="Jake-Writer-Jobharvest/sam3"
-ENV MODEL="Qwen/Qwen3-VL-8B-Instruct-FP8"
+ENV MODEL="Qwen/Qwen3.5-9B"
 
 # Download Models
 # Using standard HF cache ~/.cache/huggingface/hub
@@ -47,8 +47,8 @@ RUN python3 -c "import os; from huggingface_hub import snapshot_download; \
     print('Downloading SAM3...'); snapshot_download(os.getenv('SAM3_MODEL_ID'), token=token); \
     print('Downloading Base Model...'); snapshot_download(os.getenv('MODEL'), token=token); \
     print('Downloading LoRAs...'); \
-    snapshot_download('Jake-Writer-Jobharvest/qwen3-vl-8b-general-lora', token=token); \
-    snapshot_download('Jake-Writer-Jobharvest/qwen3-vl-8b-grid-lora', token=token);" || echo "Warning: Model download failed. Models will be downloaded at runtime."
+    snapshot_download('Jake-Writer-Jobharvest/qwen3.5-9b-general-lora', token=token); \
+    snapshot_download('Jake-Writer-Jobharvest/qwen3.5-9b-grid-lora', token=token);" || echo "Warning: Model download failed. Models will be downloaded at runtime."
 
 # 5. Environment Variables
 ENV CAPTCHA_PLANNER_BACKEND="vllm"

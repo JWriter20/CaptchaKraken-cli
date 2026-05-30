@@ -31,7 +31,7 @@ def get_solver():
     if _SOLVER_INSTANCE is None:
         _SOLVER_INSTANCE = CaptchaSolver(
             provider="vllm",
-            model="Qwen/Qwen3-VL-8B-Instruct"
+            model="Qwen/Qwen3.5-9B"
         )
     return _SOLVER_INSTANCE
 

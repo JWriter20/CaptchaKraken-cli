@@ -3,6 +3,7 @@ import json
 import math
 import sys
 import numpy as np
+import cv2
 from typing import Any, Dict
 
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
@@ -383,6 +384,33 @@ def draw_grid_overlay(draw, image_size, step=0.1):
         )
 
 
+def draw_edge_rulers(draw, image_size, step=0.1, tick_length=8):
+    """Draw subtle ruler tick marks along image edges at percentage intervals.
+    Provides spatial reference without covering captcha content."""
+    width, height = image_size
+    tick_color = (180, 180, 180, 160)  # Semi-transparent gray
+    label_color = (150, 150, 150, 200)
+    font = get_cross_platform_font(max(9, min(14, int(width * 0.02))))
+
+    for i in range(1, int(1 / step)):
+        pct = i * step
+        x = int(pct * width)
+        y = int(pct * height)
+
+        # Top and bottom edge ticks
+        draw.line([(x, 0), (x, tick_length)], fill=tick_color, width=1)
+        draw.line([(x, height - tick_length), (x, height)], fill=tick_color, width=1)
+        # Left and right edge ticks
+        draw.line([(0, y), (tick_length, y)], fill=tick_color, width=1)
+        draw.line([(width - tick_length, y), (width, y)], fill=tick_color, width=1)
+
+        # Small percentage labels at top and left edges only
+        label = f"{int(pct * 100)}"
+        if font:
+            draw.text((x + 2, 1), label, fill=label_color, font=font)
+            draw.text((1, y + 2), label, fill=label_color, font=font)
+
+
 def add_drag_overlay(
     image_path: str,
     source_bbox: list[float],
@@ -407,34 +435,23 @@ def add_drag_overlay(
         x1 = max(0, x1); y1 = max(0, y1)
         x2 = min(w, x2); y2 = min(h, y2)
         
-        # 1. Prepare Background
-        background = img.copy()
-        
-        # Inpaint the source hole
-        border = 5
-        bx1 = max(0, x1 - border)
-        by1 = max(0, y1 - border)
-        bx2 = min(w, x2 + border)
-        by2 = min(h, y2 + border)
-        region = img.crop((bx1, by1, bx2, by2))
-        region_np = np.array(region)
-        # Only take the first 3 channels (RGB) even if image is RGBA
-        avg_color = np.mean(region_np, axis=(0, 1)).astype(int)[:3]
-        fill_color = tuple(avg_color)
-        
-        draw_bg = ImageDraw.Draw(background)
+        # 1. Prepare Background - use cv2.inpaint for clean source removal
+        bg_rgb = np.array(img.convert("RGB"))
+        bg_bgr = cv2.cvtColor(bg_rgb, cv2.COLOR_RGB2BGR)
+
         if mask_points:
-            # Create mask for precise inpainting
-            mask = Image.new("L", (w, h), 0)
-            draw_mask = ImageDraw.Draw(mask)
-            pts = [(p[0] * w, p[1] * h) for p in mask_points]
-            draw_mask.polygon(pts, fill=255)
-            
-            # Fill only the masked area with the average background color
-            fill_img = Image.new("RGBA", (w, h), fill_color + (255,))
-            background.paste(fill_img, (0, 0), mask)
+            inpaint_mask = np.zeros(bg_bgr.shape[:2], dtype=np.uint8)
+            pts = np.array([(int(p[0] * w), int(p[1] * h)) for p in mask_points], dtype=np.int32)
+            cv2.fillPoly(inpaint_mask, [pts], 255)
         else:
-            draw_bg.rectangle([x1, y1, x2, y2], fill=fill_color + (255,))
+            inpaint_mask = np.zeros(bg_bgr.shape[:2], dtype=np.uint8)
+            inpaint_mask[y1:y2, x1:x2] = 255
+
+        kernel = np.ones((5, 5), np.uint8)
+        dilated_mask = cv2.dilate(inpaint_mask, kernel, iterations=2)
+        bg_inpainted = cv2.inpaint(bg_bgr, dilated_mask, 3, cv2.INPAINT_TELEA)
+        bg_inpainted_rgb = cv2.cvtColor(bg_inpainted, cv2.COLOR_BGR2RGB)
+        background = Image.fromarray(bg_inpainted_rgb).convert("RGBA")
         
         # 2. Dim background slightly
         dim_overlay = Image.new("RGBA", img.size, (0, 0, 0, 40)) 
@@ -472,7 +489,10 @@ def add_drag_overlay(
         draw = ImageDraw.Draw(background)
         if show_grid:
             draw_grid_overlay(draw, background.size, step=0.1)
-            
+
+        # Subtle edge ruler marks for spatial reference
+        draw_edge_rulers(draw, background.size)
+
         # THIN GREEN BOX around the item being dragged (no labels, no source box, no arrow)
         draw_enhanced_bounding_box(draw, [paste_x, paste_y, paste_x + cw, paste_y + ch], color="#00FF00", box_style="thin", image_size=background.size)
 

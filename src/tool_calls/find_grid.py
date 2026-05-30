@@ -307,27 +307,67 @@ def detect_selected_cells(image_path, grid_boxes, debug_manager=None):
     """
     Checks each grid box to see if it contains a 'selected' badge (blue checkmark)
     or a 'loading' spinner.
+
+    - reCAPTCHA puts a small blue badge in the **top-left** of the tile.
+    - hCaptcha puts a blue circle-with-check overlay in the **top-right** AND
+      darkens the entire tile.
+
     Returns (list of selected indices, list of loading indices).
     """
     img = cv2.imread(image_path)
     if img is None: return [], []
     sel, ld = [], []
-    badge_rgb = (27, 115, 232) # Standard reCAPTCHA blue
+    # OpenCV uses BGR not RGB, so these are swapped from the doc colors.
+    recap_blue = (27, 115, 232)   # reCAPTCHA blue badge (#1B73E8)
+    hcap_blue = (188, 117, 15)    # hCaptcha blue check  (#0F75BC) in BGR
     for i, box in enumerate(grid_boxes):
         cell = img[box[1]:box[3], box[0]:box[2]]
         if cell.size == 0: continue
-        
-        # Check top-left corner for the selection badge
-        tl = cell[0:int(cell.shape[0]*0.4), 0:int(cell.shape[1]*0.4)]
-        if tl.size > 0 and _has_badge(tl, badge_rgb): 
-            sel.append(i+1)
+
+        h_cell, w_cell = cell.shape[:2]
+        # Top-left (reCAPTCHA).
+        tl = cell[0:int(h_cell * 0.4), 0:int(w_cell * 0.4)]
+        if tl.size > 0 and _has_badge(tl, recap_blue):
+            sel.append(i + 1)
             continue
-            
-        # Check center for loading spinner
-        cntr = cell[int(cell.shape[0]*0.3):int(cell.shape[0]*0.7), int(cell.shape[1]*0.3):int(cell.shape[1]*0.7)]
-        if cntr.size > 0 and _is_loading(cntr, badge_rgb): 
-            ld.append(i+1)
+        # Top-right (hCaptcha). The badge is a small filled blue circle
+        # (~10-14 px); _has_badge's circularity check is too strict at that
+        # size, so we use a simple color-presence test: "is there a strongly
+        # blue-dominant cluster in the top-right corner?"
+        tr = cell[0:max(8, int(h_cell * 0.22)), int(w_cell * 0.78):]
+        if tr.size > 0 and _has_hcaptcha_check(tr):
+            sel.append(i + 1)
+            continue
+
+        # Center for loading spinner.
+        cntr = cell[int(h_cell * 0.3):int(h_cell * 0.7), int(w_cell * 0.3):int(w_cell * 0.7)]
+        if cntr.size > 0 and _is_loading(cntr, recap_blue):
+            ld.append(i + 1)
     return sel, ld
+
+def _has_hcaptcha_check(roi):
+    """Detect hCaptcha's selected-state blue circle in the top-right corner.
+
+    The badge is a small filled cyan-teal circle (~10-14 px) with a white
+    checkmark glyph inside. Naively counting blue-dominant pixels matches
+    sky tiles, so we require BOTH:
+      - >=8 cyan-teal pixels (B high, G mid-high, R low)
+      - >=2 near-white pixels (the checkmark) in the same patch
+    """
+    if roi is None or roi.size == 0:
+        return False
+    flat = roi.reshape(-1, 3).astype(np.int32)
+    # Teal/cyan: B>120, G>80, R<80, AND B-R gap > 60.
+    teal = (
+        (flat[:, 0] > 120)
+        & (flat[:, 1] > 80)
+        & (flat[:, 2] < 80)
+        & (flat[:, 0] - flat[:, 2] > 60)
+    )
+    # Bright white check mark inside the circle.
+    white = (flat[:, 0] > 220) & (flat[:, 1] > 220) & (flat[:, 2] > 220)
+    return int(teal.sum()) >= 8 and int(white.sum()) >= 2
+
 
 def _has_badge(roi, rgb):
     """

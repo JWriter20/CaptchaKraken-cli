@@ -41,7 +41,7 @@ Our general solver should handle the following situations, so it should have dat
 
 Inference setup:
 
-We want to load in the 8B parameter model into memory: unsloth/Qwen3-VL-8B-Instruct (this is the one we trained with, if the official qwen one is the same then that is fine as well)
+We want to load in the 9B parameter model into memory: Qwen/Qwen3.5-9B (this is the one we trained with)
 We also want all three loras loaded into memory, and to use vLLM for the inference itself. We should be able to easily and dynamically switch our usage of the loras, creating 
 an almost MoLoRa model that has three "experts" and we choose the correct lora depending on the task. All of this inference must be fast, so we should have this, and sam3 all loaded into 
 memory

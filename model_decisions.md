@@ -1,6 +1,6 @@
 # Model Decisions Analysis (vLLM Provider)
 
-This document explains the calls and decisions made by the `Jake-Writer-Jobharvest/qwen3-vl-8b-merged-bf16` model running via `vLLM` during the solver tests.
+This document explains the calls and decisions made by the `Jake-Writer-Jobharvest/qwen3.5-9b-merged-bf16` model running via `vLLM` during the solver tests.
 
 ## 1. Grid Selection (reCAPTCHA Style)
 
