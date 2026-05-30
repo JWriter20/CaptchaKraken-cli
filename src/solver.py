@@ -127,6 +127,7 @@ class CaptchaSolver:
         media_path: str,
         instruction: str = "",
         puzzle_source: str = "unknown",
+        retry_mode: Optional[str] = None,
     ) -> Union[CaptchaAction, List[CaptchaAction]]:
         media_path = str(Path(media_path).resolve())
         if not os.path.exists(media_path):
@@ -141,7 +142,7 @@ class CaptchaSolver:
             grid_boxes = find_grid(cv_image_path)
         if grid_boxes and self._is_real_grid(cv_image_path, grid_boxes):
             self.debug.log(f"Detected grid with {len(grid_boxes)} cells")
-            return self._solve_grid(cv_image_path, grid_boxes)
+            return self._solve_grid(cv_image_path, grid_boxes, retry_mode=retry_mode)
         elif grid_boxes:
             # find_grid latched onto e.g. an hCaptcha click-puzzle's
             # header/footer bands. Reject and fall through to universal action.
@@ -302,6 +303,7 @@ class CaptchaSolver:
         self,
         image_path: str,
         grid_boxes: List[Tuple[int, int, int, int]],
+        retry_mode: Optional[str] = None,
     ) -> Union[ClickAction, DoneAction, WaitAction]:
         n = len(grid_boxes)
         if n == 9:
@@ -348,7 +350,9 @@ class CaptchaSolver:
         self.debug.save_image(overlay_path, "01_grid_overlay.png")
 
         with timed("planner.grid"):
-            selected = self.planner.get_grid_selection(overlay_path, rows=rows, cols=cols)
+            selected = self.planner.get_grid_selection(
+                overlay_path, rows=rows, cols=cols, retry_mode=retry_mode,
+            )
 
         # Drop hallucinated / already-selected cells.
         final: List[int] = []

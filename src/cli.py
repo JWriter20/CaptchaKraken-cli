@@ -194,6 +194,15 @@ def main():
         help="Vendor hint from the Playwright wrapper. hCaptcha skips grid detection "
         "(find_grid false-positives on the header/footer bands of click puzzles).",
     )
+    parser.add_argument(
+        "--retry-mode",
+        default=None,
+        choices=["missed-tiles"],
+        help="Hint that the previous selection was rejected by the captcha vendor "
+        "with an under-selection error (e.g. reCAPTCHA's 'Please select all matching "
+        "images'). Switches the grid prompt to a more aggressive variant that "
+        "instructs the LoRA to look at the full grid for tiles it missed.",
+    )
 
     args = parser.parse_args()
 
@@ -204,7 +213,11 @@ def main():
     try:
         with timed("cli.total"):
             solver = CaptchaSolver(model=args.model, api_key=args.api_key)
-            result = solver.solve(args.image_path, puzzle_source=args.puzzle_source)
+            result = solver.solve(
+                args.image_path,
+                puzzle_source=args.puzzle_source,
+                retry_mode=args.retry_mode,
+            )
 
         if isinstance(result, list):
             action_data = [a.model_dump() for a in result]

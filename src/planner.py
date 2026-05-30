@@ -159,8 +159,21 @@ class ActionPlanner:
         except json.JSONDecodeError:
             return None
 
-    def get_grid_selection(self, image_path: str, rows: int, cols: int) -> List[int]:
-        """Return the list of 1-indexed cells the model wants to click."""
+    def get_grid_selection(
+        self,
+        image_path: str,
+        rows: int,
+        cols: int,
+        retry_mode: Optional[str] = None,
+    ) -> List[int]:
+        """Return the list of 1-indexed cells the model wants to click.
+
+        retry_mode == "missed-tiles": the previous submission was rejected
+        by the captcha vendor with an under-selection error. Append an
+        explicit recovery instruction that tells the model the FULL grid
+        contains at least one matching tile it didn't pick last time. This
+        nudges it off the "I already covered everything" attractor.
+        """
         total = rows * cols
         if rows == 4 and cols == 4:
             grid_hint = "Hint: Single large image split into tiles. Select ALL parts."
@@ -170,6 +183,15 @@ class ActionPlanner:
         prompt = SELECT_GRID_PROMPT.format(
             rows=rows, cols=cols, total=total, grid_hint=grid_hint
         )
+        if retry_mode == "missed-tiles":
+            prompt = (
+                prompt
+                + "\n\nIMPORTANT: A previous submission was rejected because not all "
+                  "matching tiles were selected. Re-examine EVERY cell in the grid "
+                  "carefully. There is at least one more matching tile you missed. "
+                  "Return the complete list of cell numbers that match the description, "
+                  "including any matches you may have overlooked."
+            )
         raw = self._chat_with_image(prompt, image_path, max_tokens=128)
         data = self._parse_json(raw)
 
