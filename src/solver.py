@@ -347,12 +347,8 @@ class CaptchaSolver:
         add_overlays_to_image(image_path, overlays, output_path=overlay_path, label_position="top-right")
         self.debug.save_image(overlay_path, "01_grid_overlay.png")
 
-        # Majority-vote sampling: env-tunable, default 3. Set to 1 to disable.
-        n_samples = int(os.environ.get("GRID_VOTE_SAMPLES", "3"))
         with timed("planner.grid"):
-            selected = self.planner.get_grid_selection(
-                overlay_path, rows=rows, cols=cols, n_samples=n_samples
-            )
+            selected = self.planner.get_grid_selection(overlay_path, rows=rows, cols=cols)
 
         # Drop hallucinated / already-selected cells.
         final: List[int] = []
