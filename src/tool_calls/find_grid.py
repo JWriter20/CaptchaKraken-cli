@@ -201,51 +201,80 @@ def _get_candidate_lines(img_lab, axis, slant, threshold):
     """
     h, w = img_lab.shape[:2]
     mid_x, mid_y = w / 2, h / 2
-    
+
     # Perceptual neutrality check: calculate chrominance (distance from neutral in LAB)
     A = img_lab[:, :, 1]
     B = img_lab[:, :, 2]
     chroma = np.sqrt(A**2 + B**2)
-    
-    # Grid lines are very bright (L > 50) and almost perfectly neutral (low chroma)
-    # Lowering chroma threshold to 4.0 to strictly exclude sky blue and other tints
+
+    # Grid lines are very bright (L > 50) and almost perfectly neutral (low chroma).
+    # hCaptcha + reCAPTCHA both use white/light-grey separators ≤4-8px thick.
     grey_mask = (img_lab[:, :, 0] > 80) & (chroma < 5.5)
     grey_mask_u8 = grey_mask.astype(np.uint8) * 255
 
+    # Photographic-content check: a real grid separator has tile imagery on
+    # BOTH sides. A chrome-band edge (hCaptcha teal header lower edge, white
+    # margin around a footer, etc.) has SOLID color on one side — meaning
+    # ~every row in the neighbor band is ALL grey (frac ≈ 1.0). Sky/asphalt
+    # tiles produce intermediate frac (0.3-0.9) but rarely a sustained 1.0.
+    grey_row_frac = grey_mask.mean(axis=1)
+    grey_col_frac = grey_mask.mean(axis=0)
+    PHOTO_PROBE = 20      # px to step away from the candidate line
+    PHOTO_BAND = 10       # rows/cols in the neighbor band
+    SOLID_FRAC = 0.95     # row is "solid" if ≥95% of its pixels are grey
+
+    def neighbor_is_photo(pos, frac):
+        """True if the neighbor band is photographic (NOT a solid chrome/margin).
+        Rejects only when most rows in the band are essentially fully grey."""
+        if not (0 <= pos < len(frac)):
+            return False
+        lo = max(0, pos - PHOTO_BAND // 2)
+        hi = min(len(frac), pos + PHOTO_BAND // 2 + 1)
+        band = frac[lo:hi]
+        # Solid chrome shows ≥80% of band rows fully grey; tile content rarely
+        # does even when the tile happens to be sky/asphalt.
+        return float(np.mean(band >= SOLID_FRAC)) < 0.6
+
     candidates = []
-    
+
     if axis == 1: # Horizontal-ish
         # Intelligent selective check: check center for potential lines
         center_x = w // 2
         cx_start, cx_end = max(0, center_x - 1), min(w, center_x + 2)
         # Note: we use the grey_mask directly here, but we will scan along slanted paths
         possible_y0s = np.where(np.any(grey_mask[:, cx_start:cx_end] > 0, axis=1))[0]
-        
+
         if len(possible_y0s) > 0:
             central_start, central_end = int(w * 0.15), int(w * 0.85)
             central_width = central_end - central_start
             x_range = np.arange(w)
-            
+
             for y0 in possible_y0s:
                 # Slanted scanning: calculate the Y coordinates along a slanted line starting at y0
                 # y_src = y0 + slant * (x - mid_x)
                 y_indices = np.round(y0 + slant * (x_range - mid_x)).astype(np.int32)
-                
+
                 # Check if the central 70% is within image bounds
                 central_y = y_indices[central_start:central_end]
                 if np.any(central_y < 0) or np.any(central_y >= h):
                     continue
-                
+
                 # Extract the central slanted segment from the mask
                 central_mask = grey_mask[central_y, x_range[central_start:central_end]]
-                
+
                 # The central segment must be mostly grey (allowing a 10% margin for noise/artifacts)
                 if np.sum(central_mask) < central_width * 0.9:
                     continue
-                
+
+                # Reject if either neighbor side is itself mostly grey (= chrome
+                # band edge or page margin, not an inter-tile separator).
+                if not (neighbor_is_photo(int(y0) - PHOTO_PROBE, grey_row_frac)
+                        and neighbor_is_photo(int(y0) + PHOTO_PROBE, grey_row_frac)):
+                    continue
+
                 # Color consistency check for the central 70%
                 segment_colors = img_lab[central_y, x_range[central_start:central_end]]
-                
+
                 # Consistency check: Std dev of colors should be low
                 std_dev = np.std(segment_colors, axis=0)
                 if np.all(std_dev < threshold):
@@ -256,32 +285,37 @@ def _get_candidate_lines(img_lab, axis, slant, threshold):
         center_y = h // 2
         cy_start, cy_end = max(0, center_y - 1), min(h, center_y + 2)
         possible_x0s = np.where(np.any(grey_mask[cy_start:cy_end, :], axis=0))[0]
-        
+
         if len(possible_x0s) > 0:
             central_start, central_end = int(h * 0.25), int(h * 0.75) # Central 50%
             central_height = central_end - central_start
             y_range = np.arange(h)
-            
+
             for x0 in possible_x0s:
                 # Slanted scanning for vertical lines
                 # x_src = x0 + slant * (y - mid_y)
                 x_indices = np.round(x0 + slant * (y_range - mid_y)).astype(np.int32)
-                
+
                 # Check if the central segment is within image bounds
                 central_x = x_indices[central_start:central_end]
                 if np.any(central_x < 0) or np.any(central_x >= w):
                     continue
-                
+
                 # Extract the central slanted segment from the mask
                 central_mask = grey_mask[y_range[central_start:central_end], central_x]
-                
+
                 if np.sum(central_mask) < central_height * 0.85:
                     continue
-                
+
+                # Reject if either side neighbor column is mostly grey (page margin).
+                if not (neighbor_is_photo(int(x0) - PHOTO_PROBE, grey_col_frac)
+                        and neighbor_is_photo(int(x0) + PHOTO_PROBE, grey_col_frac)):
+                    continue
+
                 # Color consistency check for the central segment
                 segment_colors = img_lab[y_range[central_start:central_end], central_x]
                 std_dev = np.std(segment_colors, axis=0)
-                
+
                 if np.all(std_dev < threshold):
                     avg_color = np.mean(segment_colors, axis=0)
                     candidates.append((float(x0), float(central_height), avg_color))
