@@ -6,77 +6,14 @@ from typing import List, Tuple, Optional
 from ..overlay import add_overlays_to_image
 from ..image_processor import ImageProcessor
 
-def _strip_chrome_bands(img):
-    """Detect chrome bands (saturated colored header/footer from hCaptcha
-    teal or reCAPTCHA blue) AND solid-color (white/black) margins above and
-    below the actual grid. Crops them off so find_grid only sees the tile
-    area.
-
-    A row is "chrome" if EITHER:
-      (a) ≥60% of pixels are saturated AND share a tight hue (colored band)
-      (b) ≥95% of pixels are nearly identical to the row's mean color AND
-          per-channel stddev < 8  (solid white/black margin)
-
-    Returns (cropped_img, (top_offset, left_offset)).
-    """
-    h, w = img.shape[:2]
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    sat_mask = (hsv[:, :, 1] > 100) & (hsv[:, :, 2] > 40)
-    sat_frac = sat_mask.mean(axis=1)
-    hue = hsv[:, :, 0].astype(np.float32)
-    hue_std = np.zeros(h, dtype=np.float32)
-    for y in range(h):
-        m = sat_mask[y]
-        if m.sum() > 10:
-            hue_std[y] = np.std(hue[y][m])
-        else:
-            hue_std[y] = 999.0
-    colored_band = (sat_frac > 0.6) & (hue_std < 10)
-    # Solid (low-variance) row: small per-pixel deviation from row mean.
-    row_std = img.reshape(h, w, 3).std(axis=1).mean(axis=1)  # avg channel std per row
-    solid_band = row_std < 8
-    is_band = colored_band | solid_band
-
-    def find_run(start, step, limit):
-        """Search for a band starting at `start`, stepping by `step`. Abort
-        if we cross `limit` without finding the band — this prevents the
-        bottom-side search from latching onto a top-side band."""
-        y = start
-        while 0 <= y < h and not is_band[y]:
-            if step > 0 and y >= limit: return start
-            if step < 0 and y <= limit: return h
-            y += step
-        if not (0 <= y < h):
-            return start if step > 0 else h
-        last_band = y
-        cur = y
-        while 0 <= cur < h:
-            if is_band[cur]:
-                last_band = cur
-            elif abs(cur - last_band) > 4:
-                break
-            cur += step
-        # Require ≥15px band to avoid trimming on a single noisy row.
-        if abs(last_band - y) < 15:
-            return start if step > 0 else h
-        return last_band + step  # crop just past the band
-
-    top = max(0, find_run(0, 1, h // 2))
-    bottom = min(h, find_run(h - 1, -1, h // 2))
-    if bottom <= top + 50:
-        return img, (0, 0)
-    return img[top:bottom, :, :], (top, 0)
-
-
 def find_grid(image_path: str, debug_manager=None, slant_to_try: Optional[float] = None) -> Optional[List[Tuple[int, int, int, int]]]:
     """
     Main entry point for grid detection.
     Detects a 3x3 or 4x4 grid by looking for grey/white separator lines.
     Supports slanted grids (common in some reCAPTCHA variants).
     """
-    img_full = cv2.imread(image_path)
-    if img_full is None: return None
-    img, (top_offset, left_offset) = _strip_chrome_bands(img_full)
+    img = cv2.imread(image_path)
+    if img is None: return None
     h, w = img.shape[:2]
     
     # Use LAB color space for more consistent color distance calculations
@@ -131,21 +68,6 @@ def find_grid(image_path: str, debug_manager=None, slant_to_try: Optional[float]
             candidates[k].sort(key=lambda x: x[1])
         return candidates
 
-    def _grid_validity(boxes):
-        """Fraction of boxes that look like real content (not tiny, not flat).
-        Higher is better; <0.75 = grid likely extends past actual tiles."""
-        if not boxes: return 0.0
-        ok = 0
-        for (x1, y1, x2, y2) in boxes:
-            bw, bh = x2 - x1, y2 - y1
-            if bw < 30 or bh < 30: continue
-            roi = img[y1:y2, x1:x2]
-            if roi.size == 0: continue
-            cell_std = float(np.mean(np.std(roi.reshape(-1, 3), axis=0)))
-            if cell_std >= 5.0:
-                ok += 1
-        return ok / len(boxes)
-
     def run_detection(slant, threshold=3.0, color_thr=6.0):
         """
         Attempts to detect a grid with a specific slant factor.
@@ -153,16 +75,16 @@ def find_grid(image_path: str, debug_manager=None, slant_to_try: Optional[float]
         # Get candidate horizontal and vertical lines
         h_lines, h_raw = _get_candidate_lines(img_lab, axis=1, slant=slant, threshold=threshold)
         v_lines, v_raw = _get_candidate_lines(img_lab, axis=0, slant=-slant, threshold=threshold)
-
+        
         if not h_lines or not v_lines: return None, float('inf')
 
         # Find sets of lines that could form a grid
         h_cand = find_all_candidates(h_lines, h)
         v_cand = find_all_candidates(v_lines, w)
-
+        
         best_run_grid = None
         min_run_score = float('inf')
-
+        
         # Try both 3x3 and 4x4 configurations
         for size in [3, 4]:
             n = size - 1 # number of internal lines needed
@@ -180,14 +102,10 @@ def find_grid(image_path: str, debug_manager=None, slant_to_try: Optional[float]
                                 # Also prefer 4x4 grids over 3x3 if both are found
                                 s_diff = abs(hd - vd) / max(hd, vd)
                                 size_bonus = (4 - size) * 100 # Penalty for size 3
-                                # Penalize candidates where cells extrapolate
-                                # past actual content (flat/tiny boundary cells).
-                                validity = _grid_validity(grid_boxes)
-                                validity_penalty = (1.0 - validity) * 1500
-                                score = hs_sc + vs_sc + s_diff * 1000 + abs(slant) * 500 + size_bonus + validity_penalty
+                                score = hs_sc + vs_sc + s_diff * 1000 + abs(slant) * 500 + size_bonus
                                 if score < min_run_score:
                                     min_run_score, best_run_grid = score, grid_boxes
-
+        
         # Debugging: Save image showing candidate lines
         if debug_manager and getattr(debug_manager, 'enabled', False):
             dbg_img = img.copy()
@@ -222,17 +140,7 @@ def find_grid(image_path: str, debug_manager=None, slant_to_try: Optional[float]
                 best_slant = slant
 
     if not best_grid: return None
-
-    # Final reject: if even the best grid has <50% valid cells, give up.
-    if _grid_validity(best_grid) < 0.5:
-        return None
-
-    # Translate boxes from chrome-stripped space back to original image space.
-    if top_offset or left_offset:
-        best_grid = [(x1 + left_offset, y1 + top_offset,
-                      x2 + left_offset, y2 + top_offset)
-                     for (x1, y1, x2, y2) in best_grid]
-
+    
     # Final debug output: Save image with detected grid boxes
     if debug_manager and getattr(debug_manager, 'enabled', False):
         image_basename = os.path.basename(image_path)
@@ -240,7 +148,7 @@ def find_grid(image_path: str, debug_manager=None, slant_to_try: Optional[float]
         slant_str = f"{best_slant:.3f}".replace('.', '_')
         debug_path = os.path.join(str(getattr(debug_manager, 'base_dir', ".")), f"grid_final_slant_{slant_str}_{image_basename}")
         get_numbered_grid_overlay(image_path, best_grid, output_path=debug_path)
-
+        
     return best_grid
 
 def _generate_slanted_grid(size, hs, vs, hd, vd, h, w, slant):
