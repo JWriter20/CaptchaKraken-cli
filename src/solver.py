@@ -387,6 +387,12 @@ class CaptchaSolver:
         action = data.get("action") if isinstance(data, dict) else None
         if isinstance(action, dict) and action.get("action") == "click":
             points = action.get("points") or []
+            # The LoRA occasionally emits a single flat [x, y] when it only
+            # wants one click, rather than [[x, y]]. Normalize so downstream
+            # iteration sees a list of [x, y] pairs either way.
+            if (len(points) == 2
+                    and all(isinstance(v, (int, float)) for v in points)):
+                points = [points]
             bboxes: List[List[float]] = []
             # Use a small fixed pixel pad so the Playwright lib has a non-zero
             # area to click into (it picks a random point inside the box).
