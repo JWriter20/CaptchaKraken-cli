@@ -207,9 +207,12 @@ def _get_candidate_lines(img_lab, axis, slant, threshold):
     B = img_lab[:, :, 2]
     chroma = np.sqrt(A**2 + B**2)
 
-    # Grid lines are very bright (L > 50) and almost perfectly neutral (low chroma).
-    # hCaptcha + reCAPTCHA both use white/light-grey separators ≤4-8px thick.
-    grey_mask = (img_lab[:, :, 0] > 80) & (chroma < 5.5)
+    # Both hCaptcha and reCAPTCHA use pure white (255,255,255) for grid
+    # separators (verified empirically across fixtures: mean BGR=255, std=0).
+    # Restricting to near-white (LAB L > 92 ≈ RGB ≥ 230) cuts out
+    # light-grey false positives like sky tile edges without missing real
+    # separators. Chroma cap stays tight (< 3) to exclude any color tint.
+    grey_mask = (img_lab[:, :, 0] > 92) & (chroma < 3.0)
     grey_mask_u8 = grey_mask.astype(np.uint8) * 255
 
     # Photographic-content check: a real grid separator has tile imagery on
