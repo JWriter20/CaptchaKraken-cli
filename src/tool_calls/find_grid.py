@@ -68,13 +68,13 @@ def find_grid(image_path: str, debug_manager=None, slant_to_try: Optional[float]
             candidates[k].sort(key=lambda x: x[1])
         return candidates
 
-    def run_detection(slant, threshold=3.0, color_thr=6.0):
+    def run_detection(slant, threshold=3.0, color_thr=6.0, l_min=92.0, density=0.85):
         """
         Attempts to detect a grid with a specific slant factor.
         """
         # Get candidate horizontal and vertical lines
-        h_lines, h_raw = _get_candidate_lines(img_lab, axis=1, slant=slant, threshold=threshold)
-        v_lines, v_raw = _get_candidate_lines(img_lab, axis=0, slant=-slant, threshold=threshold)
+        h_lines, h_raw = _get_candidate_lines(img_lab, axis=1, slant=slant, threshold=threshold, l_min=l_min, density=density)
+        v_lines, v_raw = _get_candidate_lines(img_lab, axis=0, slant=-slant, threshold=threshold, l_min=l_min, density=density)
         
         if not h_lines or not v_lines: return None, float('inf')
 
@@ -139,6 +139,23 @@ def find_grid(image_path: str, debug_manager=None, slant_to_try: Optional[float]
                 min_score, best_grid = score, grid
                 best_slant = slant
 
+    # Light-grey-gutter tier. The strict near-white mask above (L>92, 85%
+    # continuous) handles reCAPTCHA and pure-white hCaptcha grids. Some hCaptcha
+    # "card" layouts use light-grey gutters (L≈86) broken by rounded tile
+    # corners, so the strict pass sees no lines. This second tier lowers the L
+    # floor (l_min=82) and the continuity requirement (density=0.55) to recover
+    # them. It runs ONLY when the strict pass produced nothing, so the reCAPTCHA
+    # path is byte-for-byte unchanged. Chrome false positives the looser mask
+    # admits are still filtered by neighbor_is_photo and out-scored by the
+    # centered/evenly-spaced preference in find_all_candidates.
+    if not best_grid:
+        for slant in [slant_val, 0.015, -0.015]:
+            grid, score = run_detection(slant, threshold=3.0, color_thr=10.0,
+                                         l_min=82.0, density=0.55)
+            if grid and score < min_score:
+                min_score, best_grid = score, grid
+                best_slant = slant
+
     if not best_grid: return None
     
     # Final debug output: Save image with detected grid boxes
@@ -192,12 +209,22 @@ def _generate_slanted_grid(size, hs, vs, hd, vd, h, w, slant):
     # Only return if we found all expected boxes
     return grid_boxes if len(grid_boxes) == size*size else None
 
-def _get_candidate_lines(img_lab, axis, slant, threshold):
+def _get_candidate_lines(img_lab, axis, slant, threshold, l_min=92.0, density=0.85):
     """
     Scans the image for lines that match the expected grid separator color (grey/white).
     Optimized using NumPy for performance.
     axis=1: Horizontal lines
     axis=0: Vertical lines
+
+    ``l_min`` is the LAB-L floor for the grey/white separator mask and
+    ``density`` the fraction of the central scan that must be grey. The defaults
+    (92, 0.85) match reCAPTCHA + the pure-white hCaptcha grids. A looser tier
+    (l_min≈82, density≈0.55) is used as a SECOND pass for the hCaptcha "card"
+    layout whose gutters are light grey (RGB≈213, L≈86) AND broken by rounded
+    tile corners — so they neither reach L>92 nor stay 85% continuous. The
+    chrome false positives the looser mask admits (page margins, header/footer
+    bands) are still rejected downstream by ``neighbor_is_photo`` and out-scored
+    by ``find_all_candidates`` (which prefers the centered, evenly-spaced pair).
     """
     h, w = img_lab.shape[:2]
     mid_x, mid_y = w / 2, h / 2
@@ -212,7 +239,8 @@ def _get_candidate_lines(img_lab, axis, slant, threshold):
     # Restricting to near-white (LAB L > 92 ≈ RGB ≥ 230) cuts out
     # light-grey false positives like sky tile edges without missing real
     # separators. Chroma cap stays tight (< 3) to exclude any color tint.
-    grey_mask = (img_lab[:, :, 0] > 92) & (chroma < 3.0)
+    # The looser tier drops l_min to recover light-grey hCaptcha card gutters.
+    grey_mask = (img_lab[:, :, 0] > l_min) & (chroma < 3.0)
     grey_mask_u8 = grey_mask.astype(np.uint8) * 255
 
     # Photographic-content check: a real grid separator has tile imagery on
@@ -266,7 +294,7 @@ def _get_candidate_lines(img_lab, axis, slant, threshold):
                 central_mask = grey_mask[central_y, x_range[central_start:central_end]]
 
                 # The central segment must be mostly grey (allowing a 10% margin for noise/artifacts)
-                if np.sum(central_mask) < central_width * 0.9:
+                if np.sum(central_mask) < central_width * density:
                     continue
 
                 # Reject if either neighbor side is itself mostly grey (= chrome
@@ -307,7 +335,7 @@ def _get_candidate_lines(img_lab, axis, slant, threshold):
                 # Extract the central slanted segment from the mask
                 central_mask = grey_mask[y_range[central_start:central_end], central_x]
 
-                if np.sum(central_mask) < central_height * 0.85:
+                if np.sum(central_mask) < central_height * density:
                     continue
 
                 # Reject if either side neighbor column is mostly grey (page margin).

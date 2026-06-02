@@ -33,11 +33,12 @@ from .action_types import (
     WaitAction,
 )
 from .image_processor import ImageProcessor
-from .overlay import add_overlays_to_image
 from .planner import ActionPlanner
 from .timing import timed
 from .tool_calls.find_checkbox import find_checkbox
-from .tool_calls.find_grid import detect_selected_cells, find_grid
+from .tool_calls.find_grid import (
+    detect_selected_cells, find_grid, get_numbered_grid_overlay,
+)
 
 DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
 
@@ -326,27 +327,19 @@ class CaptchaSolver:
         except Exception as e:
             self.debug.log(f"detect_selected_cells failed: {e}")
 
-        overlays: List[Dict[str, Any]] = []
-        valid_indices: List[int] = []
-        for i, (x1, y1, x2, y2) in enumerate(grid_boxes):
-            idx = i + 1
-            if idx in cv_selected or idx in cv_loading:
-                continue
-            overlays.append(
-                {"bbox": [x1, y1, x2 - x1, y2 - y1], "number": idx, "color": "#00FF00", "box_style": "solid"}
-            )
-            valid_indices.append(idx)
-
-        if not overlays:
-            if cv_loading:
-                return WaitAction(action="wait", duration_ms=1000)
-            return DoneAction(action="done")
-
+        # SINGLE canonical overlay: get_numbered_grid_overlay (RED labels,
+        # top-right, ALL cells 1..N) — byte-for-byte the same overlay used to
+        # generate the training data (scripts/build_grid_overlays.py) and the
+        # offline grader. The model was trained ONLY on this style; any other
+        # overlay (e.g. green, or skipping cells) is out-of-distribution and
+        # tanks the live solve rate. We number EVERY cell so the model sees the
+        # exact grid it trained on; already-selected/loading cells are filtered
+        # AFTER the model responds (below), never by renumbering the grid.
         ext = os.path.splitext(image_path)[1] or ".png"
         with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tf:
             overlay_path = tf.name
         self._temp_files.append(overlay_path)
-        add_overlays_to_image(image_path, overlays, output_path=overlay_path, label_position="top-right")
+        get_numbered_grid_overlay(image_path, grid_boxes, output_path=overlay_path)
         self.debug.save_image(overlay_path, "01_grid_overlay.png")
 
         with timed("planner.grid"):
@@ -354,17 +347,24 @@ class CaptchaSolver:
                 overlay_path, rows=rows, cols=cols, retry_mode=retry_mode,
             )
 
-        # Drop hallucinated / already-selected cells.
+        # Map the model's tile IDs to clicks. Skip cells the CV layer already
+        # flagged as selected (avoid re-toggling) or still loading.
         final: List[int] = []
         for n in selected:
             try:
                 v = int(n)
             except (TypeError, ValueError):
                 continue
-            if v in valid_indices:
-                final.append(v)
+            if v < 1 or v > len(grid_boxes):
+                continue  # hallucinated index
+            if v in cv_selected or v in cv_loading:
+                continue  # already selected / not ready — don't re-click
+            final.append(v)
 
         if not final:
+            # Nothing new to click: wait if tiles are still loading, else done.
+            if cv_loading:
+                return WaitAction(action="wait", duration_ms=1000)
             return DoneAction(action="done")
 
         img_w, img_h = self._image_size  # type: ignore[misc]
