@@ -218,6 +218,32 @@ def _handle_cell_commands() -> bool:
         sys.exit(1)
 
 
+def _compute_grid_cell_states(img_a, img_b, grid_boxes):
+    """Pure core for grid-cell-states / -fixed and the persistent worker. Given
+    two frame paths and the grid boxes to use, returns the
+    {empty, changing, loaded, selected} dict (1-indexed). Single source of truth
+    so every entry point (one-shot CLI, -fixed, serve) produces identical
+    output."""
+    from .tool_calls.find_grid import (
+        is_empty_cell,
+        is_cell_opacity_changing,
+        detect_selected_cells,
+    )
+
+    empty, changing, loaded = [], [], []
+    for c in range(1, len(grid_boxes) + 1):
+        e = is_empty_cell(img_b, grid_boxes, c)
+        ch = is_cell_opacity_changing(img_a, img_b, grid_boxes, c)
+        if e:
+            empty.append(c)
+        if ch:
+            changing.append(c)
+        if not e and not ch:
+            loaded.append(c)
+    selected, _ = detect_selected_cells(img_b, grid_boxes)
+    return {"empty": empty, "changing": changing, "loaded": loaded, "selected": selected}
+
+
 def _handle_grid_cell_states() -> bool:
     """Batched per-poll grid state across TWO consecutive frames. One subprocess
     per poll (find_grid once, then loop all cells) — never one spawn per cell.
@@ -245,12 +271,7 @@ def _handle_grid_cell_states() -> bool:
             sys.exit(1)
 
     try:
-        from .tool_calls.find_grid import (
-            find_grid,
-            is_empty_cell,
-            is_cell_opacity_changing,
-            detect_selected_cells,
-        )
+        from .tool_calls.find_grid import find_grid
 
         # Detect the grid on the latest frame; bboxes are reused for both frames.
         grid_boxes = find_grid(img_b)
@@ -259,24 +280,7 @@ def _handle_grid_cell_states() -> bool:
             print(json.dumps({"grid": None}))
             return True
 
-        empty, changing, loaded = [], [], []
-        for c in range(1, len(grid_boxes) + 1):
-            e = is_empty_cell(img_b, grid_boxes, c)
-            ch = is_cell_opacity_changing(img_a, img_b, grid_boxes, c)
-            if e:
-                empty.append(c)
-            if ch:
-                changing.append(c)
-            if not e and not ch:
-                loaded.append(c)
-        selected, _ = detect_selected_cells(img_b, grid_boxes)
-
-        print(json.dumps({
-            "empty": empty,
-            "changing": changing,
-            "loaded": loaded,
-            "selected": selected,
-        }))
+        print(json.dumps(_compute_grid_cell_states(img_a, img_b, grid_boxes)))
         return True
     except Exception as e:
         import traceback
@@ -326,30 +330,7 @@ def _handle_grid_cell_states_fixed() -> bool:
         sys.exit(1)
 
     try:
-        from .tool_calls.find_grid import (
-            is_empty_cell,
-            is_cell_opacity_changing,
-            detect_selected_cells,
-        )
-
-        empty, changing, loaded = [], [], []
-        for c in range(1, len(grid_boxes) + 1):
-            e = is_empty_cell(img_b, grid_boxes, c)
-            ch = is_cell_opacity_changing(img_a, img_b, grid_boxes, c)
-            if e:
-                empty.append(c)
-            if ch:
-                changing.append(c)
-            if not e and not ch:
-                loaded.append(c)
-        selected, _ = detect_selected_cells(img_b, grid_boxes)
-
-        print(json.dumps({
-            "empty": empty,
-            "changing": changing,
-            "loaded": loaded,
-            "selected": selected,
-        }))
+        print(json.dumps(_compute_grid_cell_states(img_a, img_b, grid_boxes)))
         return True
     except Exception as e:
         import traceback
@@ -357,6 +338,70 @@ def _handle_grid_cell_states_fixed() -> bool:
         traceback.print_exc()
         print(json.dumps({"error": str(e)}), file=sys.stderr)
         sys.exit(1)
+
+
+def _handle_serve() -> bool:
+    """Persistent worker mode — the big latency win for the reCAPTCHA poll loop.
+
+      python -m src.cli serve
+
+    Instead of spawning a fresh `python -m src.cli` (≈0.4s of interpreter +
+    cv2/numpy import) for every poll, the JS lib starts ONE long-lived process
+    and streams requests over stdin, one JSON object per line, each answered with
+    one JSON line on stdout. cv2/numpy are imported once at startup.
+
+    Request line:  {"id": <n>, "cmd": "<name>", ...args}
+    Response line: {"id": <n>, "ok": true, "result": <value>}  on success
+                   {"id": <n>, "ok": false, "error": "<msg>"}  on failure
+
+    Supported cmds (results are byte-identical to the one-shot subcommands):
+      find-grid               {image}                       -> grid_boxes | null
+      grid-cell-states        {a, b}                        -> states | {grid: null}
+      grid-cell-states-fixed  {a, b, grid_boxes}            -> states
+
+    Unknown cmd / malformed line -> an {ok:false} response (the process keeps
+    running). EOF on stdin ends the loop cleanly. All heavy detection delegates
+    to the exact same functions the one-shot handlers use."""
+    if len(sys.argv) <= 1 or sys.argv[1] != "serve":
+        return False
+
+    # Import once, up front — this is the whole point of the worker.
+    from .tool_calls.find_grid import find_grid
+
+    def handle(req):
+        cmd = req.get("cmd")
+        if cmd == "find-grid":
+            return find_grid(req["image"])
+        if cmd == "grid-cell-states":
+            grid_boxes = find_grid(req["b"])
+            if not grid_boxes:
+                return {"grid": None}
+            return _compute_grid_cell_states(req["a"], req["b"], grid_boxes)
+        if cmd == "grid-cell-states-fixed":
+            grid_boxes = [tuple(int(v) for v in box) for box in req["grid_boxes"]]
+            if not grid_boxes:
+                raise ValueError("empty grid_boxes")
+            return _compute_grid_cell_states(req["a"], req["b"], grid_boxes)
+        raise ValueError(f"unknown cmd: {cmd!r}")
+
+    # Signal readiness so the JS side knows imports are done before it polls.
+    sys.stdout.write(json.dumps({"ready": True}) + "\n")
+    sys.stdout.flush()
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        rid = None
+        try:
+            req = json.loads(line)
+            rid = req.get("id")
+            result = handle(req)
+            sys.stdout.write(json.dumps({"id": rid, "ok": True, "result": result}) + "\n")
+        except Exception as e:  # noqa: BLE001 — worker must never die on one bad req
+            sys.stdout.write(json.dumps({"id": rid, "ok": False, "error": str(e)}) + "\n")
+        sys.stdout.flush()
+    return True
 
 
 def _handle_tool_commands() -> bool:
@@ -415,6 +460,8 @@ def _handle_tool_commands() -> bool:
 
 def main():
     if _handle_movement_commands():
+        return
+    if _handle_serve():
         return
     if _handle_grid_cell_states():
         return
