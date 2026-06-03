@@ -368,6 +368,10 @@ def _get_candidate_lines(img_lab, axis, slant, threshold, l_min=92.0, density=0.
     final.append((sum(c[0] for c in curr)/len(curr), best[1], best[2]))
     return final, candidates
 
+
+# def _get_candidate_lines_efficient(img_lab, axis):
+#     for i in rang
+
 def detect_selected_cells(image_path, grid_boxes, debug_manager=None):
     """
     Checks each grid box to see if it contains a 'selected' badge (blue checkmark)
@@ -409,6 +413,81 @@ def detect_selected_cells(image_path, grid_boxes, debug_manager=None):
         if cntr.size > 0 and _is_loading(cntr, recap_blue):
             ld.append(i + 1)
     return sel, ld
+
+# --- per-cell state helpers ---
+# These take a 1-indexed `cell_number` (matching detect_selected_cells and the
+# grid_boxes[v - 1] click mapping in solver.py) and read pixel values from the
+# cropped cell. All guard against a missing image, empty crop, or out-of-range
+# index and return a safe default rather than raising.
+
+def _crop_cell(image_path, grid_boxes, cell_number):
+    """Load image and return the BGR crop for a 1-indexed cell, or None."""
+    img = cv2.imread(image_path)
+    if img is None:
+        return None
+    if cell_number < 1 or cell_number > len(grid_boxes):
+        return None
+    x1, y1, x2, y2 = grid_boxes[cell_number - 1]
+    cell = img[y1:y2, x1:x2]
+    return cell if cell.size else None
+
+def is_empty_cell(image_path, grid_boxes, cell_number,
+                  white_frac=0.97, l_thresh=92.0, chroma_thresh=6.0):
+    """True if the cell is effectively blank: an overwhelming majority of
+    pixels are near-white AND near-neutral (low chroma). Uses LAB to match the
+    grid-line whiteness test used elsewhere in this module, so a faintly tinted
+    "white" still counts while a saturated bright tile (e.g. sky) does not.
+    1-indexed cell."""
+    cell = _crop_cell(image_path, grid_boxes, cell_number)
+    if cell is None:
+        return False
+    lab = cv2.cvtColor(cell, cv2.COLOR_BGR2LAB).astype(np.float32)
+    L = lab[:, :, 0] * (100.0 / 255.0)          # OpenCV packs L into 0..255
+    a = lab[:, :, 1] - 128.0
+    b = lab[:, :, 2] - 128.0
+    chroma = np.sqrt(a * a + b * b)
+    white = (L > l_thresh) & (chroma < chroma_thresh)
+    return float(white.mean()) >= white_frac
+
+def is_cell_opacity_changing(image_path_a, image_path_b, grid_boxes,
+                             cell_number, change_thresh=0.02):
+    """True if the cell visibly changed between two frames (still fading/loading).
+    Mirrors the absdiff -> gray -> threshold -> ratio approach used by
+    check-movement. 1-indexed cell. Returns False if either crop is
+    unavailable or the crops differ in shape."""
+    a = _crop_cell(image_path_a, grid_boxes, cell_number)
+    b = _crop_cell(image_path_b, grid_boxes, cell_number)
+    if a is None or b is None or a.shape != b.shape:
+        return False
+    diff = cv2.absdiff(a, b)
+    gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+    _, thr = cv2.threshold(gray, 30, 255, cv2.THRESH_BINARY)
+    ratio = cv2.countNonZero(thr) / (thr.shape[0] * thr.shape[1])
+    return ratio > change_thresh
+
+def wait_for_cell_loaded(frame_paths, grid_boxes, cell_number):
+    """Given >=1 chronological frame screenshots, return True once the cell is
+    loaded: NOT empty in the latest frame AND (if >=2 frames) NOT changing
+    between the last two. Composes is_empty_cell + is_cell_opacity_changing.
+
+    The CLI does not own the browser loop, so this can't do a time-based wait;
+    the JS caller captures frames over time and passes the most recent ones.
+    The grid_boxes must come from a single reference frame. 1-indexed cell."""
+    if not frame_paths:
+        return False
+    last = frame_paths[-1]
+    if is_empty_cell(last, grid_boxes, cell_number):
+        return False
+    if len(frame_paths) >= 2:
+        if is_cell_opacity_changing(frame_paths[-2], last, grid_boxes, cell_number):
+            return False
+    return True
+
+def is_cell_selected(image_path, grid_boxes, cell_number, debug_manager=None):
+    """True if the given 1-indexed cell is selected. Thin wrapper over
+    detect_selected_cells (the canonical badge detector) for API symmetry."""
+    selected, _ = detect_selected_cells(image_path, grid_boxes, debug_manager)
+    return cell_number in selected
 
 def _has_hcaptcha_check(roi):
     """Detect hCaptcha's selected-state blue circle in the top-right corner.

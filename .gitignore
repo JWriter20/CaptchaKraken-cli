@@ -59,3 +59,4 @@ debug_output
 debug/
 sam3_auto_test/
 detect_all_prompts_only/
+latestDebugRun_grid/

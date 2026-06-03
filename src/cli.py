@@ -15,6 +15,19 @@ Modes:
   python -m src.cli get-numbered-grid image.png
   python -m src.cli find-checkbox   image.png
         OpenCV tool calls.
+
+  python -m src.cli grid-cell-states imgA.png imgB.png
+        Batched per-poll grid-cell state across two consecutive frames:
+        {"empty": [...], "changing": [...], "loaded": [...], "selected": [...]}
+        (1-indexed), or {"grid": null} if no grid is painted yet. This is the
+        hot path the Playwright lib polls while waiting for reCAPTCHA tiles to
+        settle — one subprocess per poll, not one per cell.
+
+  python -m src.cli is-empty-cell    image.png cell_number
+  python -m src.cli is-cell-selected image.png cell_number
+  python -m src.cli is-cell-changing imgA.png imgB.png cell_number
+  python -m src.cli wait-for-cell-loaded cell_number img1.png img2.png [...]
+        Single-cell state helpers (1-indexed cell_number), mainly for debug.
 """
 
 import argparse
@@ -22,7 +35,7 @@ import json
 import os
 import sys
 
-from .solver import CaptchaSolver
+from .solver import CaptchaSolver, UnsupportedCaptchaError
 from .timing import timed
 
 
@@ -103,7 +116,247 @@ def _handle_movement_commands() -> bool:
         )
         return True
 
+    if cmd == "is-cell-changing":
+        # python -m src.cli is-cell-changing imgA.png imgB.png cell_number
+        if len(sys.argv) < 5:
+            print(
+                json.dumps({"error": "Usage: python -m src.cli is-cell-changing imgA.png imgB.png cell_number"}),
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        from .tool_calls.find_grid import find_grid, is_cell_opacity_changing
+
+        img_a, img_b = sys.argv[2], sys.argv[3]
+        try:
+            cell_number = int(sys.argv[4])
+        except ValueError:
+            print(json.dumps({"error": "cell_number must be an integer (1-indexed)"}), file=sys.stderr)
+            sys.exit(1)
+
+        grid_boxes = find_grid(img_b)
+        if not grid_boxes:
+            print(json.dumps({"error": "No grid detected"}), file=sys.stderr)
+            sys.exit(1)
+        print(json.dumps({"is_changing": is_cell_opacity_changing(img_a, img_b, grid_boxes, cell_number)}))
+        return True
+
+    if cmd == "wait-for-cell-loaded":
+        # python -m src.cli wait-for-cell-loaded cell_number img1.png img2.png [img3 ...]
+        if len(sys.argv) < 4:
+            print(
+                json.dumps({"error": "Usage: python -m src.cli wait-for-cell-loaded cell_number img1.png img2.png [...]"}),
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        from .tool_calls.find_grid import find_grid, wait_for_cell_loaded
+
+        try:
+            cell_number = int(sys.argv[2])
+        except ValueError:
+            print(json.dumps({"error": "cell_number must be an integer (1-indexed)"}), file=sys.stderr)
+            sys.exit(1)
+        frame_paths = sys.argv[3:]
+
+        grid_boxes = find_grid(frame_paths[-1])
+        if not grid_boxes:
+            print(json.dumps({"error": "No grid detected"}), file=sys.stderr)
+            sys.exit(1)
+        print(json.dumps({"is_loaded": wait_for_cell_loaded(frame_paths, grid_boxes, cell_number)}))
+        return True
+
     return False
+
+
+def _handle_cell_commands() -> bool:
+    """Per-cell state helpers that take a single image plus a 1-indexed cell
+    number: is-empty-cell, is-cell-selected. (is-cell-changing and
+    wait-for-cell-loaded take multiple images and live in
+    _handle_movement_commands.)"""
+    if len(sys.argv) <= 1:
+        return False
+    cmd = sys.argv[1]
+    if cmd not in {"is-empty-cell", "is-cell-selected"}:
+        return False
+
+    if len(sys.argv) < 4:
+        print(
+            json.dumps({"error": f"Usage: python -m src.cli {cmd} image.png cell_number"}),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    image_path = sys.argv[2]
+    if not os.path.exists(image_path):
+        print(json.dumps({"error": f"Image not found: {image_path}"}), file=sys.stderr)
+        sys.exit(1)
+    try:
+        cell_number = int(sys.argv[3])
+    except ValueError:
+        print(json.dumps({"error": "cell_number must be an integer (1-indexed)"}), file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        from .tool_calls.find_grid import find_grid, is_empty_cell, is_cell_selected
+
+        grid_boxes = find_grid(image_path)
+        if not grid_boxes:
+            print(json.dumps({"error": "No grid detected"}), file=sys.stderr)
+            sys.exit(1)
+        if cmd == "is-empty-cell":
+            result = {"is_empty": is_empty_cell(image_path, grid_boxes, cell_number)}
+        else:
+            result = {"is_selected": is_cell_selected(image_path, grid_boxes, cell_number)}
+        print(json.dumps(result))
+        return True
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        print(json.dumps({"error": str(e)}), file=sys.stderr)
+        sys.exit(1)
+
+
+def _handle_grid_cell_states() -> bool:
+    """Batched per-poll grid state across TWO consecutive frames. One subprocess
+    per poll (find_grid once, then loop all cells) — never one spawn per cell.
+
+      python -m src.cli grid-cell-states imgA.png imgB.png
+
+    Returns {"empty": [...], "changing": [...], "loaded": [...],
+    "selected": [...]} (1-indexed). If no grid is detected it returns
+    {"grid": null} with exit 0 so the JS poller treats it as "keep polling"
+    rather than a hard error."""
+    if len(sys.argv) <= 1 or sys.argv[1] != "grid-cell-states":
+        return False
+
+    if len(sys.argv) < 4:
+        print(
+            json.dumps({"error": "Usage: python -m src.cli grid-cell-states imgA.png imgB.png"}),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    img_a, img_b = sys.argv[2], sys.argv[3]
+    for p in (img_a, img_b):
+        if not os.path.exists(p):
+            print(json.dumps({"error": f"Image not found: {p}"}), file=sys.stderr)
+            sys.exit(1)
+
+    try:
+        from .tool_calls.find_grid import (
+            find_grid,
+            is_empty_cell,
+            is_cell_opacity_changing,
+            detect_selected_cells,
+        )
+
+        # Detect the grid on the latest frame; bboxes are reused for both frames.
+        grid_boxes = find_grid(img_b)
+        if not grid_boxes:
+            # Not "an error" — the grid simply hasn't painted yet. Let JS poll on.
+            print(json.dumps({"grid": None}))
+            return True
+
+        empty, changing, loaded = [], [], []
+        for c in range(1, len(grid_boxes) + 1):
+            e = is_empty_cell(img_b, grid_boxes, c)
+            ch = is_cell_opacity_changing(img_a, img_b, grid_boxes, c)
+            if e:
+                empty.append(c)
+            if ch:
+                changing.append(c)
+            if not e and not ch:
+                loaded.append(c)
+        selected, _ = detect_selected_cells(img_b, grid_boxes)
+
+        print(json.dumps({
+            "empty": empty,
+            "changing": changing,
+            "loaded": loaded,
+            "selected": selected,
+        }))
+        return True
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        print(json.dumps({"error": str(e)}), file=sys.stderr)
+        sys.exit(1)
+
+
+def _handle_grid_cell_states_fixed() -> bool:
+    """Like grid-cell-states, but the GRID BOXES ARE SUPPLIED EXPLICITLY instead
+    of re-detected per frame:
+
+      python -m src.cli grid-cell-states-fixed imgA.png imgB.png '<json grid_boxes>'
+
+    The dynamic reCAPTCHA refresh blanks tiles to near-white, which makes
+    find_grid fail on that frame (no separator lines) and grid-cell-states then
+    returns {"grid": null}. The JS driver caches the grid from the first solid
+    frame and passes it here so per-cell empty/changing/selected stays correct
+    even while tiles are blank/fading. grid_boxes is a JSON array of
+    [x1,y1,x2,y2] pixel tuples in screenshot space (the same shape find-grid
+    emits). Returns {"empty","changing","loaded","selected"} (1-indexed)."""
+    if len(sys.argv) <= 1 or sys.argv[1] != "grid-cell-states-fixed":
+        return False
+
+    if len(sys.argv) < 5:
+        print(
+            json.dumps({"error": "Usage: python -m src.cli grid-cell-states-fixed imgA.png imgB.png '<json grid_boxes>'"}),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    img_a, img_b, boxes_json = sys.argv[2], sys.argv[3], sys.argv[4]
+    for p in (img_a, img_b):
+        if not os.path.exists(p):
+            print(json.dumps({"error": f"Image not found: {p}"}), file=sys.stderr)
+            sys.exit(1)
+
+    try:
+        raw = json.loads(boxes_json)
+        grid_boxes = [tuple(int(v) for v in box) for box in raw]
+        if not grid_boxes:
+            print(json.dumps({"error": "empty grid_boxes"}), file=sys.stderr)
+            sys.exit(1)
+    except Exception as e:
+        print(json.dumps({"error": f"bad grid_boxes JSON: {e}"}), file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        from .tool_calls.find_grid import (
+            is_empty_cell,
+            is_cell_opacity_changing,
+            detect_selected_cells,
+        )
+
+        empty, changing, loaded = [], [], []
+        for c in range(1, len(grid_boxes) + 1):
+            e = is_empty_cell(img_b, grid_boxes, c)
+            ch = is_cell_opacity_changing(img_a, img_b, grid_boxes, c)
+            if e:
+                empty.append(c)
+            if ch:
+                changing.append(c)
+            if not e and not ch:
+                loaded.append(c)
+        selected, _ = detect_selected_cells(img_b, grid_boxes)
+
+        print(json.dumps({
+            "empty": empty,
+            "changing": changing,
+            "loaded": loaded,
+            "selected": selected,
+        }))
+        return True
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        print(json.dumps({"error": str(e)}), file=sys.stderr)
+        sys.exit(1)
 
 
 def _handle_tool_commands() -> bool:
@@ -162,6 +415,12 @@ def _handle_tool_commands() -> bool:
 
 def main():
     if _handle_movement_commands():
+        return
+    if _handle_grid_cell_states():
+        return
+    if _handle_grid_cell_states_fixed():
+        return
+    if _handle_cell_commands():
         return
     if _handle_tool_commands():
         return
@@ -227,6 +486,11 @@ def main():
             action_data = result
 
         print(json.dumps({"actions": action_data, "token_usage": solver.planner.token_usage}))
+    except UnsupportedCaptchaError as e:
+        # Expected outcome, not a crash: this LoRA only handles grids and
+        # checkboxes. Emit a clean error with no traceback.
+        print(json.dumps({"error": str(e), "unsupported": True}), file=sys.stderr)
+        sys.exit(2)
     except Exception as e:
         import traceback
 

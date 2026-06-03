@@ -34,26 +34,6 @@ If no tiles match the description (e.g., they have all been cleared or none were
 Return JSON Array: [list of cell numbers (1-{total})]"""
 
 
-# Mirrors _UNIVERSAL_ACTION_PROMPT in src/testing/grade.py — used for non-grid
-# puzzles where the LoRA chooses between click points and drag actions itself.
-UNIVERSAL_ACTION_PROMPT = (
-    "Your task is to solve the captcha. Read the instruction at the top of the image carefully.\n\n"
-    "Look at the puzzle and decide what action solves it. All coordinates you return must be on a normalized 0–1000 image scale (top-left = (0, 0), bottom-right = (1000, 1000)).\n\n"
-    "Choose ONE response:\n\n"
-    "FOR CLICK PUZZLES:\n"
-    "  Identify every position you need to click and emit them as a list of points:\n"
-    "  → \"action\": { \"action\": \"click\", \"points\": [[x1, y1], [x2, y2], ...] }\n\n"
-    "FOR DRAG PUZZLES:\n"
-    "  Drag ONE item at a time. The source position is the centroid of the piece you are picking up; the destination position is where it should end up. If multiple drags are needed, drag the topmost item first.\n"
-    "  → \"output\": [{ \"Action\": \"simulate_drag\", \"SourceDescription\": \"...\", \"SourcePosition\": { \"x\": 1-1000, \"y\": 1-1000 }, \"DestinationDescription\": \"...\", \"EstimatedPosition\": { \"x\": 1-1000, \"y\": 1-1000 } }]\n\n"
-    "Respond ONLY with JSON:\n"
-    "{\n"
-    "  \"action\": { ... }\n"
-    "  // OR \"output\": [ ... ]\n"
-    "}"
-)
-
-
 class ActionPlanner:
     """Thin client for the vLLM `captcha` LoRA."""
 
@@ -71,7 +51,7 @@ class ActionPlanner:
         # The LoRA name registered with vLLM (see /etc/systemd/system/vllm.service).
         # Override via CAPTCHA_LORA_NAME for future MoLoRA experts.
         self.model = model or os.getenv("CAPTCHA_LORA_NAME", "captcha")
-        self.base_url = base_url or os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")
+        self.base_url = base_url or os.getenv("VLLM_BASE_URL", "http://13.57.41.42:8000/v1")
         self.api_key = (
             api_key
             or os.getenv("CAPTCHA_KRAKEN_API_KEY")
@@ -127,8 +107,31 @@ class ActionPlanner:
 
         with timed("planner.chat"):
             resp = requests.post(url, headers=headers, json=payload, timeout=120)
-        resp.raise_for_status()
-        data = resp.json()
+
+        # Surface auth / server errors with the actual body instead of letting
+        # resp.json() blow up with a cryptic "Expecting value: line 1 column 1"
+        # on a non-JSON response (e.g. a 401 {"error":"Unauthorized"} or an
+        # HTML error page). 401/403 almost always means the bearer token
+        # (CAPTCHA_KRAKEN_API_KEY) didn't reach this process.
+        if not resp.ok:
+            body = (resp.text or "")[:300]
+            hint = ""
+            if resp.status_code in (401, 403):
+                hint = (
+                    " — check CAPTCHA_KRAKEN_API_KEY is set and forwarded to the CLI"
+                )
+            raise RuntimeError(
+                f"vLLM {resp.status_code} {resp.reason} at {url}{hint}. Body: {body}"
+            )
+
+        try:
+            data = resp.json()
+        except ValueError:
+            body = (resp.text or "")[:300]
+            raise RuntimeError(
+                f"vLLM returned a non-JSON body from {url} (is the server up and "
+                f"is VLLM_BASE_URL correct?). Body: {body}"
+            )
 
         if data.get("usage"):
             self.token_usage.append(data["usage"])
@@ -212,9 +215,3 @@ class ActionPlanner:
                 continue
         self._log(f"grid selection -> {out}")
         return out
-
-    def get_universal_action(self, image_path: str) -> Dict[str, Any]:
-        """For non-grid puzzles. Returns the parsed JSON (caller maps it)."""
-        raw = self._chat_with_image(UNIVERSAL_ACTION_PROMPT, image_path, max_tokens=512)
-        data = self._parse_json(raw)
-        return data if isinstance(data, dict) else {}

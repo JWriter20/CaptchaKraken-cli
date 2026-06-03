@@ -7,8 +7,8 @@ Flow:
      per-tile bounding boxes.
   2. find_checkbox on small images → if a lone checkbox is detected, return a
      ClickAction targeting it directly.
-  3. Otherwise → send the raw screenshot to the LoRA with the universal action
-     prompt and translate the JSON response into ClickAction / DragAction.
+  3. Otherwise → raise UnsupportedCaptchaError. Only grids and checkboxes are
+     supported; click/drag puzzles are out of scope for this LoRA.
 
 v1 had a SAM3-backed tool-using planner with detect/segment/drag-refine; it
 lives on the `v1-old-architecture` branch.
@@ -21,7 +21,7 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 
 from PIL import Image
 
@@ -29,7 +29,6 @@ from .action_types import (
     CaptchaAction,
     ClickAction,
     DoneAction,
-    DragAction,
     WaitAction,
 )
 from .image_processor import ImageProcessor
@@ -41,6 +40,10 @@ from .tool_calls.find_grid import (
 )
 
 DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
+
+
+class UnsupportedCaptchaError(Exception):
+    """Raised when the captcha is neither a supported grid nor a checkbox."""
 
 
 class DebugManager:
@@ -146,10 +149,10 @@ class CaptchaSolver:
             return self._solve_grid(cv_image_path, grid_boxes, retry_mode=retry_mode)
         elif grid_boxes:
             # find_grid latched onto e.g. an hCaptcha click-puzzle's
-            # header/footer bands. Reject and fall through to universal action.
+            # header/footer bands. Reject — only true grids are supported.
             self.debug.log(
                 f"find_grid returned {len(grid_boxes)} cells but failed the "
-                "real-grid sanity check; falling through to universal action."
+                "real-grid sanity check."
             )
 
         if img_h < 400:
@@ -165,8 +168,9 @@ class CaptchaSolver:
                     ],
                 )
 
-        self.debug.log("Handing raw screenshot to LoRA (universal prompt).")
-        return self._solve_general(cv_image_path)
+        # Only grids and checkboxes are supported. Everything else (click
+        # puzzles, drag puzzles, etc.) is out of scope for this LoRA.
+        raise UnsupportedCaptchaError("Cannot solve this kind of captcha")
 
     # Back-compat alias.
     def solveVideo(self, *args, **kwargs):
@@ -373,83 +377,6 @@ class CaptchaSolver:
             x1, y1, x2, y2 = grid_boxes[v - 1]
             bboxes.append([x1 / img_w, y1 / img_h, x2 / img_w, y2 / img_h])
         return ClickAction(action="click", target_bounding_boxes=bboxes)
-
-    def _solve_general(
-        self,
-        image_path: str,
-    ) -> Union[ClickAction, DragAction, DoneAction]:
-        """Hand the raw screenshot to the LoRA and translate the response."""
-        with timed("planner.universal"):
-            data = self.planner.get_universal_action(image_path)
-        if not data:
-            self.debug.log("Universal action returned no JSON; returning done.")
-            return DoneAction(action="done")
-
-        img_w, img_h = self._image_size  # type: ignore[misc]
-
-        # ClickAction with normalized 0-1000 points -> per-point bboxes.
-        action = data.get("action") if isinstance(data, dict) else None
-        if isinstance(action, dict) and action.get("action") == "click":
-            points = action.get("points") or []
-            # The LoRA occasionally emits a single flat [x, y] when it only
-            # wants one click, rather than [[x, y]]. Normalize so downstream
-            # iteration sees a list of [x, y] pairs either way.
-            if (len(points) == 2
-                    and all(isinstance(v, (int, float)) for v in points)):
-                points = [points]
-            bboxes: List[List[float]] = []
-            # Use a small fixed pixel pad so the Playwright lib has a non-zero
-            # area to click into (it picks a random point inside the box).
-            pad = 12
-            for p in points:
-                try:
-                    x = float(p[0]) / 1000.0
-                    y = float(p[1]) / 1000.0
-                except (TypeError, ValueError, IndexError):
-                    continue
-                px = pad / img_w
-                py = pad / img_h
-                bboxes.append(
-                    [max(0.0, x - px), max(0.0, y - py), min(1.0, x + px), min(1.0, y + py)]
-                )
-            if bboxes:
-                return ClickAction(action="click", target_bounding_boxes=bboxes)
-
-        # Drag puzzle, two emitted formats observed:
-        # (a) {"output": [{"Action": "simulate_drag", "SourcePosition": ..., "EstimatedPosition": ...}]}
-        # (b) {"action": {"action": "simulate_drag", "SourcePosition": ..., "EstimatedPosition": ...}}
-        drag_payload: Optional[Dict[str, Any]] = None
-        output = data.get("output") if isinstance(data, dict) else None
-        if isinstance(output, list) and output:
-            drag_payload = output[0]
-        elif isinstance(action, dict) and action.get("action") == "simulate_drag":
-            drag_payload = action
-
-        if drag_payload:
-            try:
-                sx = float(drag_payload["SourcePosition"]["x"]) / 1000.0
-                sy = float(drag_payload["SourcePosition"]["y"]) / 1000.0
-                tx = float(drag_payload["EstimatedPosition"]["x"]) / 1000.0
-                ty = float(drag_payload["EstimatedPosition"]["y"]) / 1000.0
-            except (KeyError, TypeError, ValueError):
-                self.debug.log(f"Malformed drag payload: {drag_payload}")
-                return DoneAction(action="done")
-            pad_x = 12 / img_w
-            pad_y = 12 / img_h
-            return DragAction(
-                action="drag",
-                source_bounding_box=[
-                    max(0.0, sx - pad_x), max(0.0, sy - pad_y),
-                    min(1.0, sx + pad_x), min(1.0, sy + pad_y),
-                ],
-                target_bounding_box=[
-                    max(0.0, tx - pad_x), max(0.0, ty - pad_y),
-                    min(1.0, tx + pad_x), min(1.0, ty + pad_y),
-                ],
-            )
-
-        self.debug.log(f"Unrecognized universal-action payload: {data}")
-        return DoneAction(action="done")
 
 
 def solve_captcha(media_path: str, instruction: str = "", **kwargs) -> Any:
