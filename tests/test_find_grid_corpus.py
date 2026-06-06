@@ -42,6 +42,10 @@ DATA_DIR = os.environ.get("FIND_GRID_DATA", _DEFAULT_DATA)
 
 # Expected dimensions per grid puzzle type, mirroring _GRID_DIMS_FROM_PT in
 # src/testing/grade.py. (rows, cols) -> expected number of find_grid boxes.
+# All three are uniform-gutter grids handled by the consistent-colour line tracer.
+# (The hCaptcha "card grid" widgets — grocery_list / drag_missing_slot — relied on
+# a separate template detector that has been removed; find_grid is now the line
+# tracer only, so those types are out of scope for this benchmark.)
 GRID_TYPES = {
     "recaptcha_grid_3x3": (3, 3),
     "recaptcha_grid_4x4": (4, 4),
@@ -58,11 +62,20 @@ def _sample_limit() -> int:
 
 
 def _images_for_type(grid_type: str) -> list:
-    """All PNGs under cleanSamples/test/raw/<grid_type>/ (recursive — the
+    """RAW PNGs under cleanSamples/test/raw/<grid_type>/ (recursive — the
     hcaptcha_grid_3x3_property type nests reference_image/ + standard_text_prompt/).
-    Sorted for determinism, then capped by FIND_GRID_SAMPLE."""
+    Sorted for determinism, then capped by FIND_GRID_SAMPLE.
+
+    Excludes numbered_overlay/ images: those already have the grid lines + cell
+    numbers PAINTED ON (they are find_grid's OUTPUT, rendered for the model to
+    read). find_grid runs only on raw, un-annotated frames in production; feeding
+    it an overlay means detecting a grid in an image whose real gutters have been
+    drawn over, which it correctly rejects. Testing those would measure the wrong
+    input. (grade.py prefers overlays when handing images to the MODEL — a separate
+    concern from grid detection.)"""
     type_dir = os.path.join(DATA_DIR, grid_type)
     paths = sorted(glob.glob(os.path.join(type_dir, "**", "*.png"), recursive=True))
+    paths = [p for p in paths if "numbered_overlay" not in p.split(os.sep)]
     limit = _sample_limit()
     if limit:
         paths = paths[:limit]

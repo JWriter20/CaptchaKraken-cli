@@ -35,6 +35,9 @@ htmlcov/
 *.swp
 *.swo
 
+# Claude Code session scaffolding (local symlinks + worktrees)
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db
