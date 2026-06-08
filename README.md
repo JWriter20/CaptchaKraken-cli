@@ -1,88 +1,85 @@
-## CaptchaKraken CLI
+# CaptchaKraken CLI
 
-AI-powered, fully local captcha-solving CLI that uses attention-based vision models to extract precise bounding boxes for common web captchas.
+The detection + planning core behind
+[CaptchaKraken](https://github.com/JWriter20/PlaywrightCaptchaKrakenJS). Given a
+screenshot of a captcha challenge, it locates the image grid, asks a fine-tuned
+**Qwen3.5-9B** vision LoRA which tiles to click, and emits the click plan the
+browser solver replays.
 
-## Description
+> For the full solving-results showcase, demo videos, install flow, and
+> self-hosting guide, see the parent repo
+> **[PlaywrightCaptchaKrakenJS](https://github.com/JWriter20/PlaywrightCaptchaKrakenJS)**.
+> This README is the technical reference for the CLI itself.
 
-`CaptchaKraken` takes a screenshot of a captcha challenge, classifies the captcha type, highlights and numbers all interactable regions, and then plans the sequence of clicks needed to solve it.  
-It is designed to be:
+## How it works (v2)
 
-- **CLI-first**: run end‑to‑end solves from the command line.
-- **Model-agnostic**: pluggable attention models for coordinate extraction.
-- **Debuggable**: optional overlays and debug images to inspect detection and planning.
+1. **`find_grid`** ([`src/tool_calls/find_grid.py`](src/tool_calls/find_grid.py)) —
+   pure OpenCV, no model. Locates the 3×3 / 4×4 lattice by tracing
+   consistent-colour separator lines, returning per-tile bounding boxes. This is
+   the foundation of every solve and the thing CI guards most tightly.
+2. **Grid planner** ([`src/planner.py`](src/planner.py)) — sends the numbered
+   grid + prompt to the **Qwen3.5-9B grid LoRA** on a local **vLLM** server and
+   parses the selected tile ids / boxes.
+3. **Output** — the sequence of click actions, ready to replay in a browser
+   automation stack (the Playwright wrapper drives this).
 
-High-level flow:
-1. **Classify** the captcha (checkbox vs image grid vs text prompt, etc.).
-2. **Detect and number** all interactable elements in the captcha (checkboxes, tiles, buttons).
-3. **Plan actions** using the detect and segmentation tools to generate action bounding boxes.
-4. **Output** the sequence of actions (clicks) that can be replayed in a browser automation stack.
+> **v1 note:** the old SAM3 + Docker-container detection flow is gone. v2 talks
+> to a vLLM server only. (`Dockerfile` / `build_container.sh` remain for users
+> who want to package their own server image, but the CLI no longer requires
+> them.)
 
-## Getting Started
+## Prerequisites
 
-### Prerequisites
+- A running **vLLM** server with the base model + grid LoRA loaded. The parent
+  repo's [`install.sh`](https://github.com/JWriter20/PlaywrightCaptchaKrakenJS/blob/main/install.sh)
+  sets this up and prints the exact `vllm serve …` command.
+- **Python 3.10+**.
 
-- **Docker**: Required to run the local inference server (SAM 3 + vLLM).
-- **GPU**: NVIDIA GPU with 22GB+ VRAM (e.g., RTX 3090/4090/5090) is highly recommended for local execution.
+## Configuration
 
-### Docker Setup
+The CLI reads its endpoint and bearer from the environment (written by the parent
+repo's `install.sh` into `captchakraken.env`):
 
-The `CaptchaKraken-cli` requires a running inference container to handle vision tasks (detection) and planning tasks (LLM).
+| Variable | Meaning |
+|---|---|
+| `VLLM_BASE_URL` | Inference endpoint of your vLLM server (e.g. `http://localhost:8000/v1`). |
+| `CAPTCHA_KRAKEN_API_KEY` | Bearer token for the server (`VLLM_API_KEY` is also accepted). |
 
-1. **Build the container**:
-   ```bash
-   cd PlaywrightCaptchaKrakenJS/CaptchaKraken-cli
-   bash build_container.sh
-   ```
-
-2. **Run the container**:
-   Start the server with an API key for security.
-   ```bash
-   docker run -d \
-     --name captchakraken-vllm \
-     --gpus all \
-     --ipc=host \
-     -p 8000:8000 \
-     -v ~/.cache/huggingface:/root/.cache/huggingface \
-     -e VLLM_API_KEY="your_secret_api_key" \
-     captchakraken-vllm-5090
-   ```
-
-### Using the CLI
-
-Once the container is running, configure the CLI to point to it:
+## Usage
 
 ```bash
-export CAPTCHA_TOOL_SERVER="http://localhost:8000"
-export VLLM_API_KEY="your_secret_api_key"
+source ../captchakraken.env      # VLLM_BASE_URL + CAPTCHA_KRAKEN_API_KEY
 
-# Run a solve on a local image
-python cli.py --image captchaimages/hcaptchaPuzzle.png --solve
+# Solve a local image: classify → find_grid → plan. Prints the click actions
+# (and an {"unsupported": true} error for non-grid puzzle types) as JSON.
+python -m src.cli path/to/captcha.png
+
+# Vendor hint (hCaptcha skips grid detection — find_grid false-positives on the
+# header/footer bands of non-grid click puzzles):
+python -m src.cli path/to/captcha.png --puzzle-source hcaptcha
+
+# Retry hint after the vendor rejected an under-selection (e.g. reCAPTCHA's
+# "Please select all matching images"):
+python -m src.cli path/to/captcha.png --retry-mode missed-tiles
 ```
 
-## Examples
+Optional positionals (kept for v1 argv compatibility): `<model>` overrides the
+LoRA name registered with vLLM (default `captcha`); the bearer token can be
+passed as the third positional instead of via the environment.
 
-### 1. Simple Detection
-Find specific objects in an image using SAM 3 through the server:
+## Tests & CI
+
+Grid detection is the CI guard — fast, deterministic, no GPU or network:
+
 ```bash
-python cli.py --image captchaimages/hcaptchaPuzzle.png --detect "colored segment"
+# Hermetic unit tests (run in CI on every PR)
+python -m pytest tests/test_grid_detection_ci.py -q
+
+# Full-corpus benchmark (report-only — prints per-type detection rates)
+python -m pytest tests/test_find_grid_corpus.py -s
 ```
 
-### 2. End-to-End Solve
-The CLI will automatically classify the captcha, call the planner, and output the necessary click coordinates:
-```bash
-python cli.py --image captchaimages/coreRecaptcha/recaptchaImages.png --solve
-```
+## License
 
-### 3. Debug Mode
-Visualize what the model sees:
-```bash
-python cli.py --image captchaimages/slantedGrid.png --solve --debug
-```
-
-## Captcha support status
-
-- [x] **Checkbox captchas** – end‑to‑end solving working.
-- [x] **Image selection / image grid captchas** – end‑to‑end solving working.
-- [ ] **Text captchas** – basic plumbing present, solving still in progress.
-
-Additional captcha types and more robust classification/solving strategies are under active development.
+Source-available under the **CaptchaKraken Source-Available License** — see
+[LICENSE](LICENSE).
