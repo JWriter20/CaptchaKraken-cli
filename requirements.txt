@@ -12,3 +12,4 @@ requests>=2.31.0
 python-dotenv>=1.0.0
 
 pytest>=7.0.0
+imageio-ffmpeg>=0.4.9   # H.264 demo-video encoding (tests/record_demos.spec.ts)
