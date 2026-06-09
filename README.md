@@ -11,6 +11,13 @@ browser solver replays.
 > **[PlaywrightCaptchaKrakenJS](https://github.com/JWriter20/PlaywrightCaptchaKrakenJS)**.
 > This README is the technical reference for the CLI itself.
 
+> ⭐ **Enjoying CaptchaKraken? Star both repos** and **watch** them for updates
+> (smaller models, the hosted cloud API, new puzzle types):
+> [CaptchaKraken-cli](https://github.com/JWriter20/CaptchaKraken-cli) (this engine)
+> · [PlaywrightCaptchaKrakenJS](https://github.com/JWriter20/PlaywrightCaptchaKrakenJS)
+> (the browser solver). On GitHub, use **Watch → All Activity** for release
+> notifications.
+
 ## How it works (v2)
 
 1. **`find_grid`** ([`src/tool_calls/find_grid.py`](src/tool_calls/find_grid.py)) —
