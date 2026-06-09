@@ -16,6 +16,16 @@ Modes:
   python -m src.cli find-checkbox   image.png
         OpenCV tool calls.
 
+  python -m src.cli find-move       image.png
+        Detect every hCaptcha "Move" draggable pill -> {"indicators": [[x,y,w,h]]}.
+  python -m src.cli find-movable    image.png
+        Detect each Move pill AND the movable card/object below it
+        -> {"items": [{"indicator": [...], "content": [...]}]}.
+  python -m src.cli extract-movable image.png [index]
+        SAM 3-segment the movable object under the index-th Move pill (default 0)
+        and return its RGBA cutout -> {"rgba_png_b64", "mask_bbox", "score"}.
+        Needs sam3.service on :8001.
+
   python -m src.cli grid-cell-states imgA.png imgB.png
         Batched per-poll grid-cell state across two consecutive frames:
         {"empty": [...], "changing": [...], "loaded": [...], "selected": [...]}
@@ -458,8 +468,89 @@ def _handle_tool_commands() -> bool:
         sys.exit(1)
 
 
+def _handle_move_commands() -> bool:
+    """hCaptcha drag-puzzle "Move" pill tools (pure OpenCV for detect, SAM 3 for
+    extract):
+
+      python -m src.cli find-move       image.png
+      python -m src.cli find-movable    image.png
+      python -m src.cli extract-movable image.png [pill_index]
+    """
+    if len(sys.argv) <= 1:
+        return False
+    cmd = sys.argv[1]
+    if cmd not in {"find-move", "find-movable", "extract-movable"}:
+        return False
+
+    if len(sys.argv) < 3:
+        print(json.dumps({"error": f"Usage: python -m src.cli {cmd} image.png"}), file=sys.stderr)
+        sys.exit(1)
+
+    image_path = sys.argv[2]
+    if not os.path.exists(image_path):
+        print(json.dumps({"error": f"Image not found: {image_path}"}), file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        import cv2
+
+        from .tool_calls.move_indicator import (
+            extract_movable_object,
+            find_movable_content,
+            find_move_indicators,
+        )
+
+        im = cv2.imread(image_path)
+        if im is None:
+            print(json.dumps({"error": f"Could not read image: {image_path}"}), file=sys.stderr)
+            sys.exit(1)
+
+        indicators = find_move_indicators(im)
+
+        if cmd == "find-move":
+            result = {"indicators": indicators}
+        elif cmd == "find-movable":
+            items = []
+            for ind in indicators:
+                items.append({"indicator": ind, "content": find_movable_content(im, ind)})
+            result = {"items": items}
+        else:  # extract-movable
+            idx = 0
+            if len(sys.argv) > 3:
+                try:
+                    idx = int(sys.argv[3])
+                except ValueError:
+                    print(json.dumps({"error": "pill_index must be an integer"}), file=sys.stderr)
+                    sys.exit(1)
+            if not indicators:
+                print(json.dumps({"error": "No Move indicator detected"}), file=sys.stderr)
+                sys.exit(1)
+            if not (0 <= idx < len(indicators)):
+                print(
+                    json.dumps({"error": f"pill_index {idx} out of range (0..{len(indicators) - 1})"}),
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            content = find_movable_content(im, indicators[idx])
+            if content is None:
+                print(json.dumps({"error": "No movable content found under that pill"}), file=sys.stderr)
+                sys.exit(1)
+            result = extract_movable_object(im, content)
+
+        print(json.dumps(result))
+        return True
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        print(json.dumps({"error": str(e)}), file=sys.stderr)
+        sys.exit(1)
+
+
 def main():
     if _handle_movement_commands():
+        return
+    if _handle_move_commands():
         return
     if _handle_serve():
         return
