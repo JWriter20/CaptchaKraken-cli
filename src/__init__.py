@@ -32,8 +32,18 @@ from .action_types import (
 )
 from .image_processor import ImageProcessor
 from .overlay import add_overlays_to_image
-from .planner import ActionPlanner
-from .solver import CaptchaSolver, solve_captcha
+
+# The planner (requests) and solver (torch/vllm/transformers) pull in the heavy
+# serving stack. Keep them optional so leaf modules — e.g. tool_calls.find_grid,
+# which needs only cv2 + numpy + pillow — can be imported in a minimal env (CI's
+# hermetic grid-detection test) without the full GPU dependency set installed.
+try:  # pragma: no cover - exercised only when the serving stack is installed
+    from .planner import ActionPlanner
+    from .solver import CaptchaSolver, solve_captcha
+except ModuleNotFoundError:
+    ActionPlanner = None  # type: ignore[assignment,misc]
+    CaptchaSolver = None  # type: ignore[assignment,misc]
+    solve_captcha = None  # type: ignore[assignment]
 
 __all__ = [
     "CaptchaSolver",
