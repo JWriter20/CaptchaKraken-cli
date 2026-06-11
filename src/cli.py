@@ -21,10 +21,6 @@ Modes:
   python -m src.cli find-movable    image.png
         Detect each Move pill AND the movable card/object below it
         -> {"items": [{"indicator": [...], "content": [...]}]}.
-  python -m src.cli extract-movable image.png [index]
-        SAM 3-segment the movable object under the index-th Move pill (default 0)
-        and return its RGBA cutout -> {"rgba_png_b64", "mask_bbox", "score"}.
-        Needs sam3.service on :8001.
 
   python -m src.cli grid-cell-states imgA.png imgB.png
         Batched per-poll grid-cell state across two consecutive frames:
@@ -469,17 +465,15 @@ def _handle_tool_commands() -> bool:
 
 
 def _handle_move_commands() -> bool:
-    """hCaptcha drag-puzzle "Move" pill tools (pure OpenCV for detect, SAM 3 for
-    extract):
+    """hCaptcha drag-puzzle "Move" pill tools (pure OpenCV):
 
       python -m src.cli find-move       image.png
       python -m src.cli find-movable    image.png
-      python -m src.cli extract-movable image.png [pill_index]
     """
     if len(sys.argv) <= 1:
         return False
     cmd = sys.argv[1]
-    if cmd not in {"find-move", "find-movable", "extract-movable"}:
+    if cmd not in {"find-move", "find-movable"}:
         return False
 
     if len(sys.argv) < 3:
@@ -495,7 +489,6 @@ def _handle_move_commands() -> bool:
         import cv2
 
         from .tool_calls.move_indicator import (
-            extract_movable_object,
             find_movable_content,
             find_move_indicators,
         )
@@ -509,33 +502,11 @@ def _handle_move_commands() -> bool:
 
         if cmd == "find-move":
             result = {"indicators": indicators}
-        elif cmd == "find-movable":
+        else:  # find-movable
             items = []
             for ind in indicators:
                 items.append({"indicator": ind, "content": find_movable_content(im, ind)})
             result = {"items": items}
-        else:  # extract-movable
-            idx = 0
-            if len(sys.argv) > 3:
-                try:
-                    idx = int(sys.argv[3])
-                except ValueError:
-                    print(json.dumps({"error": "pill_index must be an integer"}), file=sys.stderr)
-                    sys.exit(1)
-            if not indicators:
-                print(json.dumps({"error": "No Move indicator detected"}), file=sys.stderr)
-                sys.exit(1)
-            if not (0 <= idx < len(indicators)):
-                print(
-                    json.dumps({"error": f"pill_index {idx} out of range (0..{len(indicators) - 1})"}),
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            content = find_movable_content(im, indicators[idx])
-            if content is None:
-                print(json.dumps({"error": "No movable content found under that pill"}), file=sys.stderr)
-                sys.exit(1)
-            result = extract_movable_object(im, content)
 
         print(json.dumps(result))
         return True

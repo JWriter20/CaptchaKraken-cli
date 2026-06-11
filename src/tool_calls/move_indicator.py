@@ -5,14 +5,10 @@ drag_missing_slot, missing_piece, tetris_fit, fish_swim_different,
 drag_numbered_line_pieces, ...) stack one or more draggable CARDS, each topped by
 a dark rounded "Move" pill: a four-arrow glyph (⊹) plus the white word "Move".
 
-This module gives the solver three steps:
+This module gives two pure-OpenCV steps (no GPU, no network):
 
   1. find_move_indicators(im)        -> [x, y, w, h] of every Move pill
   2. find_movable_content(im, pill)  -> the card / object box BELOW one pill
-  3. extract_movable_object(im, box) -> SAM 3 cutout (RGBA) of that object so we
-                                        can drag it freely
-
-Steps 1-2 are pure OpenCV (no GPU, no network). Step 3 calls the SAM 3 service.
 
 Detection strategy (step 1) — TEAL BODY FIRST. The pill BODY is a fixed UI
 element rendered as a flat dark desaturated TEAL: HSV hue ~108 (BGR ~(56,45,38),
@@ -43,7 +39,7 @@ and top chrome) and IoU/center dedup. Byte-deterministic per image.
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import cv2
 import numpy as np
@@ -185,41 +181,6 @@ def find_movable_content(
     if bw < 12 or bh < 12:
         return None
     return [int(bx), int(by), int(bw), int(bh)]
-
-
-def extract_movable_object(
-    im: np.ndarray,
-    content_bbox: List[int],
-    *,
-    prompt: Optional[str] = None,
-    sam3_url: Optional[str] = None,
-):
-    """Segment / cut out the movable object inside ``content_bbox`` using SAM 3.
-
-    Returns a dict::
-
-        {"rgba_png_b64": <str>, "mask_bbox": [x, y, w, h], "score": float}
-
-    where the cutout is RGBA (object pixels opaque, background transparent) in
-    *full-image* coordinates' crop, ready to be dragged freely. Raises
-    RuntimeError if the SAM 3 service is unreachable, ValueError if nothing is
-    segmented.
-
-    SAM 3 only takes a few words of text. We point it at the centre of the card
-    (a point prompt) by default so it returns the one object the card holds; pass
-    ``prompt`` to segment by class name instead.
-    """
-    from .. import sam3_client  # local, lazy: keeps OpenCV-only callers network-free
-
-    x, y, w, h = content_bbox
-    cx, cy = x + w / 2, y + h / 2
-    return sam3_client.segment_object(
-        im,
-        point=(float(cx), float(cy)),
-        bbox=(int(x), int(y), int(w), int(h)),
-        prompt=prompt,
-        sam3_url=sam3_url,
-    )
 
 
 # ── internals ────────────────────────────────────────────────────────────────
