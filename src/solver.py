@@ -10,7 +10,7 @@ Usage:
     from src import CaptchaSolver
 
     solver = CaptchaSolver(provider="vllm")
-    actions = solver.solve("captcha.png", "Select all traffic lights")
+    actions = solver.solve("captcha.png")
 """
 
 import math
@@ -51,8 +51,12 @@ DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
 
 class DebugManager:
     """Manages debug logging and artifacts."""
-    def __init__(self, debug_enabled: bool):
-        self.enabled = debug_enabled
+    def __init__(self, debug_enabled: Optional[bool] = None):
+        if debug_enabled is None:
+            self.enabled = os.getenv("CAPTCHA_DEBUG", "0") == "1"
+        else:
+            self.enabled = debug_enabled
+            
         # Use absolute path for safety and clarity
         self.base_dir = Path("latestDebugRun").resolve()
         self.log_file = self.base_dir / "log.txt"
@@ -81,6 +85,8 @@ class DebugManager:
         if self.enabled:
             print(f"[DEBUG] {message}", file=sys.stderr)
             try:
+                if not self.base_dir.exists():
+                    self.base_dir.mkdir(parents=True, exist_ok=True)
                 with open(self.log_file, "a") as f:
                     f.write(f"[{datetime.now().strftime('%H:%M:%S')}] {message}\n")
             except Exception:
@@ -123,7 +129,7 @@ class CaptchaSolver:
         provider: str = "captchaKrakenApi",
         api_key: Optional[str] = None,
     ):
-        self.debug = DebugManager(DEBUG)
+        self.debug = DebugManager() # Use env var by default
         
         # Restrict providers to the supported set
         if provider not in {"transformers", "vllm", "captchaKrakenApi"}:
@@ -202,7 +208,7 @@ class CaptchaSolver:
             raise FileNotFoundError(f"Media not found: {media_path}")
 
         # Check if input is video
-        is_video = any(media_path.lower().endswith(ext) for ext in [".mp4", ".gif", ".avi"])
+        is_video = any(media_path.lower().endswith(ext) for ext in [".mp4", ".gif", ".avi", ".webm"])
         
         # For CV processing, we need a static image. 
         # If it's a video, we extract the first frame.
@@ -231,7 +237,7 @@ class CaptchaSolver:
         self.debug.save_image(cv_image_path, "00_base_image.png")
 
         # 1. Check for grid structure
-        grid_boxes = find_grid(cv_image_path)
+        grid_boxes = find_grid(cv_image_path, self.debug)
         if grid_boxes:
             self.debug.log(f"Detected grid with {len(grid_boxes)} cells")
             
@@ -270,6 +276,7 @@ class CaptchaSolver:
         # 2. Check for simple checkbox (lightweight)
         img_w, img_h = self._image_size
         if img_h < 400:
+            self.debug.log(f"Image height {img_h} < 400, trying find_checkbox...")
             checkbox_box = find_checkbox(cv_image_path)
             if checkbox_box:
                 self.debug.log(f"Detected checkbox at {checkbox_box}")
@@ -278,6 +285,8 @@ class CaptchaSolver:
                     action="click",
                     target_bounding_boxes=[[x / img_w, y / img_h, (x + w) / img_w, (y + h) / img_h]],
                 )
+            else:
+                self.debug.log("find_checkbox returned None")
 
         # 3. General solving with tool use
         self.debug.log(f"Using general solving flow (is_video={is_video})")

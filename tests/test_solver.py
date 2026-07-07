@@ -3,6 +3,7 @@ import os
 import sys
 import time
 import shutil
+import json
 import multiprocessing
 from pathlib import Path
 
@@ -25,12 +26,31 @@ os.environ["CAPTCHA_DEBUG"] = "1"
 
 # Global solver to avoid wiping debug dir repeatedly
 _SOLVER_INSTANCE = None
+_TARGET_DATA = None
+
+def get_target_data():
+    global _TARGET_DATA
+    if _TARGET_DATA is None:
+        json_path = Path("captchaimages/targetAreaPercentages.json")
+        if json_path.exists():
+            with open(json_path, "r") as f:
+                raw_data = json.load(f)
+                # Flatten the list of dicts if it is a list
+                if isinstance(raw_data, list):
+                    _TARGET_DATA = {}
+                    for item in raw_data:
+                        _TARGET_DATA.update(item)
+                else:
+                    _TARGET_DATA = raw_data
+        else:
+            _TARGET_DATA = {}
+    return _TARGET_DATA
 
 def get_solver():
     global _SOLVER_INSTANCE
     if _SOLVER_INSTANCE is None:
         _SOLVER_INSTANCE = CaptchaSolver(
-            provider="vllm",
+            provider="captchaKrakenApi",
             model="Qwen/Qwen3-VL-8B-Instruct"
         )
     return _SOLVER_INSTANCE
@@ -65,6 +85,105 @@ def label_grid_manually(image_path: str, output_name: str):
     add_overlays_to_image(image_path, overlays, output_path=str(output_path), label_position="top-right")
     print(f"[Test] Manually labeled grid saved to {output_path}")
     return grid_boxes
+
+def verify_actions(image_path, actions):
+    """ Verifies actions against targetAreaPercentages.json """
+    target_data = get_target_data()
+    filename = os.path.basename(image_path)
+    
+    if filename not in target_data:
+        print(f"[Test] No ground truth data for {filename}, skipping verification.")
+        return True
+
+    ground_truth = target_data[filename]
+    # Handle both keys
+    targets = ground_truth.get("target_bounding_boxes") or ground_truth.get("target_area_percentages")
+    if not targets:
+        print(f"[Test] No targets found in ground truth for {filename}.")
+        return True
+
+    # targets is a list of dicts, let's flatten it to a list of bounding boxes
+    gt_boxes = {}
+    for t_dict in targets:
+        for name, bbox in t_dict.items():
+            gt_boxes[name] = bbox
+
+    print(f"[Test] Verifying against {len(gt_boxes)} ground truth targets for {filename}...")
+    
+    success = True
+    matched_gt_names = set()
+
+    for action in actions:
+        if isinstance(action, ClickAction):
+            for i, pred_bbox in enumerate(action.target_bounding_boxes):
+                # pred_bbox is [x1, y1, x2, y2] normalized
+                # Check if it overlaps with ANY gt_box
+                matched = False
+                for name, gt_bbox in gt_boxes.items():
+                    # gt_bbox is [x1, y1, x2, y2] normalized
+                    if (pred_bbox[0] < gt_bbox[2] and pred_bbox[2] > gt_bbox[0] and
+                        pred_bbox[1] < gt_bbox[3] and pred_bbox[3] > gt_bbox[1]):
+                        print(f"  [Match] Predicted click {i+1} hits target '{name}'")
+                        matched = True
+                        matched_gt_names.add(name)
+                        break
+                if not matched:
+                    print(f"  [Failure] Predicted click {i+1} {pred_bbox} did not hit any ground truth targets.")
+                    success = False
+        elif isinstance(action, DragAction):
+            # Verify source
+            source_matched = False
+            if action.source_bounding_box:
+                for name, gt_bbox in gt_boxes.items():
+                    if (action.source_bounding_box[0] < gt_bbox[2] and action.source_bounding_box[2] > gt_bbox[0] and
+                        action.source_bounding_box[1] < gt_bbox[3] and action.source_bounding_box[3] > gt_bbox[1]):
+                        print(f"  [Match] Drag source hits target '{name}'")
+                        source_matched = True
+                        matched_gt_names.add(name)
+                        break
+            if not source_matched:
+                print(f"  [Failure] Drag source {action.source_bounding_box} did not hit any ground truth targets.")
+                success = False
+
+            # Verify target
+            target_matched = False
+            if action.target_bounding_box:
+                for name, gt_bbox in gt_boxes.items():
+                    if (action.target_bounding_box[0] < gt_bbox[2] and action.target_bounding_box[2] > gt_bbox[0] and
+                        action.target_bounding_box[1] < gt_bbox[3] and action.target_bounding_box[3] > gt_bbox[1]):
+                        print(f"  [Match] Drag target hits target '{name}'")
+                        target_matched = True
+                        matched_gt_names.add(name)
+                        break
+            if not target_matched:
+                print(f"  [Failure] Drag target {action.target_bounding_box} did not hit any ground truth targets.")
+                success = False
+        elif isinstance(action, DoneAction):
+            # DoneAction is always valid if returned by solver
+            pass
+            
+    # Check for missed ground truth targets that are NOT prompts or containers
+    missed_gt = set(gt_boxes.keys()) - matched_gt_names
+    real_targets_missed = [n for n in missed_gt if not any(x in n.lower() for x in ["prompt", "container", "desination", "target"])]
+    
+    if real_targets_missed:
+        print(f"  [Warning] Missed these ground truth targets: {real_targets_missed}")
+        # For now, we don't fail the test if we miss a target, as long as everything we clicked WAS a target.
+        # This is because the solver might decide some things are not matches even if we labeled them.
+        # But for reCAPTCHA/hCAPTCHA grids, we might want to be stricter.
+    
+    return success
+
+def print_debug_report():
+    """ Prints the log from latestDebugRun/log.txt """
+    log_path = Path("latestDebugRun/log.txt")
+    if log_path.exists():
+        print("\n" + "="*50)
+        print("DETAILED MODEL REPORT")
+        print("="*50)
+        with open(log_path, "r") as f:
+            print(f.read())
+        print("="*50 + "\n")
 
 def save_final_result_overlay(image_path, actions, test_name):
     """ Saves an image with the actions overlaid for verification """
@@ -126,7 +245,6 @@ def run_solver_test(image_path, test_name, expected_action_type=ClickAction, min
     end_time = time.time()
     
     print(f"[Test] Inference took {end_time - start_time:.2f} seconds")
-    print(f"[Test] Actions returned: {actions}")
     
     # Normalize to list
     if not isinstance(actions, list):
@@ -135,13 +253,22 @@ def run_solver_test(image_path, test_name, expected_action_type=ClickAction, min
         else:
             actions = []
             
+    print(f"[Test] Actions returned: {actions}")
+
+    # Print debug report for each test
+    print_debug_report()
+
+    # Verify actions
+    verify_success = verify_actions(image_path, actions)
+    
     # Calculate total elements to compare with min_actions
     total_elements = 0
     for action in actions:
         if isinstance(action, ClickAction):
             total_elements += len(action.target_bounding_boxes)
-        else:
+        elif isinstance(action, DragAction):
             total_elements += 1
+        # DoneAction and WaitAction don't count as "actions" for min_actions
 
     assert total_elements >= min_actions, f"Expected at least {min_actions} elements, got {total_elements}"
     
@@ -154,6 +281,8 @@ def run_solver_test(image_path, test_name, expected_action_type=ClickAction, min
     
     # Save final overlay for user review
     save_final_result_overlay(image_path, actions, test_name)
+    
+    assert verify_success, "Verification against ground truth failed."
         
     return actions
 
@@ -201,8 +330,38 @@ def test_hcaptcha_video_webm():
     video_path = "captchaimages/hcaptcha_1766539373078.webm"
     run_solver_test(video_path, "hcaptcha_video")
 
+def test_cloudflare_checkbox():
+    """ Test cloudflare.png """
+    image_path = "captchaimages/cloudflare.png"
+    run_solver_test(image_path, "cloudflare_checkbox")
+
+def test_hcaptcha_basic():
+    """ Test hcaptchaBasic.png """
+    image_path = "captchaimages/hcaptchaBasic.png"
+    run_solver_test(image_path, "hcaptcha_basic")
+
+def test_recaptcha_basic():
+    """ Test recaptchaBasic.png """
+    image_path = "captchaimages/recaptchaBasic.png"
+    run_solver_test(image_path, "recaptcha_basic")
+
+def test_hcaptcha_images_1():
+    """ Test hcaptchaImages1.png """
+    image_path = "captchaimages/hcaptchaImages1.png"
+    run_solver_test(image_path, "hcaptcha_images_1")
+
+def test_recaptcha_images_3():
+    """ Test recaptchaImages3.png """
+    image_path = "captchaimages/coreRecaptcha/recaptchaImages3.png"
+    run_solver_test(image_path, "recaptcha_images_3")
+
+def test_hcaptcha_drag_2():
+    """ Test hcaptchaDragImage2.png """
+    image_path = "captchaimages/hcaptchaDragImage2.png"
+    run_solver_test(image_path, "hcaptcha_drag_2", expected_action_type=DragAction)
+
 if __name__ == "__main__":
     # Ensure setup is called if running directly
-    test_hcaptcha_drag_images_3()
-    # setup_module(None)
-    # pytest.main([__file__, "-s"])
+    # test_hcaptcha_drag_images_3()
+    setup_module(None)
+    pytest.main([__file__, "-s"])

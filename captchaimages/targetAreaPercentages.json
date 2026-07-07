@@ -203,6 +203,78 @@
           ]
         }
       ]
+    },
+    "hcaptcha_1766539373078.webm": {
+      "target_area_percentages": [
+        {
+          "target": [
+            0.5647,
+            0.2961,
+            0.7837,
+            0.4841
+          ]
+        }
+      ]
+    },
+    "slantedGrid.png": {
+      "target_area_percentages": [
+        {
+          "elephant1": [
+            0.1643,
+            0.2454,
+            0.3976,
+            0.4504
+          ],
+          "elephant2": [
+            0.387,
+            0.4359,
+            0.6097,
+            0.6336
+          ],
+          "elephant3": [
+            0.6043,
+            0.4431,
+            0.8297,
+            0.6288
+          ]
+        }
+      ]
+    },
+    "hcaptchaPuzzle2.png": {
+      "target_area_percentages": [
+        {
+          "topGreenWiremeshCube": [
+            0.6422,
+            0.3202,
+            0.7895,
+            0.4624
+          ],
+          "bottomGreenWiremeshCube": [
+            0.6185,
+            0.6721,
+            0.7632,
+            0.8192
+          ]
+        }
+      ]
+    },
+    "hcaptchaChooseSimilarShapes.png": {
+      "target_area_percentages": [
+        {
+          "leftWiremeshCube": [
+            0.2504,
+            0.472,
+            0.3954,
+            0.5998
+          ],
+          "rightWiremeshCube": [
+            0.6221,
+            0.4986,
+            0.7855,
+            0.6288
+          ]
+        }
+      ]
     }
   }
 ]

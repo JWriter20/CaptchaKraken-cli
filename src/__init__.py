@@ -8,7 +8,7 @@ Usage:
     solver = CaptchaSolver(provider="vllm")
 
     # Solve a captcha
-    actions = solver.solve("captcha.png", "Select all traffic lights")
+    actions = solver.solve("captcha.png")
 """
 
 from pathlib import Path

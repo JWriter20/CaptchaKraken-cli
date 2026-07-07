@@ -29,7 +29,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <style>
     body { margin: 0; padding: 0; font-family: sans-serif; background: #111; color: #eee; }
     .container { position: relative; display: inline-block; margin: 16px; }
-    img { display: block; max-width: 90vw; max-height: 80vh; border: 1px solid #555; user-select: none; -webkit-user-drag: none; }
+    .target-media { display: block; max-width: 90vw; max-height: 80vh; border: 1px solid #555; user-select: none; -webkit-user-drag: none; }
     #overlay { position: absolute; inset: 0; pointer-events: all; cursor: crosshair; touch-action: none; }
     #box { position: absolute; border: 2px solid #0f0; background: rgba(0,255,0,0.1); display: none; box-sizing: border-box; }
     .panel { margin: 16px; padding: 16px; background: #222; border-radius: 8px; }
@@ -67,7 +67,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
   
   <div class="container" id="container">
-    <img id="img" src="__IMG_NAME__" alt="target" draggable="false" />
+    __MEDIA_TAG__
     <div id="overlay">
       <div id="box"></div>
     </div>
@@ -76,7 +76,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <script>
     const box = document.getElementById('box');
     const overlay = document.getElementById('overlay');
-    const img = document.getElementById('img');
+    const media = document.getElementById('media');
     const inputs = {
       x1: document.getElementById('x1'),
       y1: document.getElementById('y1'),
@@ -93,7 +93,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     let startPos = null;
 
     // Prevent default drag behaviors
-    img.addEventListener('dragstart', (e) => e.preventDefault());
+    media.addEventListener('dragstart', (e) => e.preventDefault());
 
     function getRect() {
       return overlay.getBoundingClientRect();
@@ -216,19 +216,25 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     new ResizeObserver(() => {
         // Debounce or just run?
         requestAnimationFrame(updateBoxFromInputs);
-    }).observe(img);
+    }).observe(media);
   </script>
 </body>
 </html>
 """
 
 
-def build_site(image_path: Path) -> str:
+def build_site(image_path: Path, is_video: bool = False) -> str:
     tmpdir = tempfile.mkdtemp(prefix="box_selector_")
-    target_image = Path(tmpdir) / "image.png"
-    shutil.copy(image_path, target_image)
+    suffix = image_path.suffix or ".png"
+    target_media = Path(tmpdir) / f"media{suffix}"
+    shutil.copy(image_path, target_media)
 
-    html = HTML_TEMPLATE.replace("__IMG_NAME__", target_image.name)
+    if is_video:
+        media_tag = f'<video id="media" class="target-media" src="{target_media.name}" autoplay loop muted></video>'
+    else:
+        media_tag = f'<img id="media" class="target-media" src="{target_media.name}" alt="target" draggable="false" />'
+
+    html = HTML_TEMPLATE.replace("__MEDIA_TAG__", media_tag)
     (Path(tmpdir) / "index.html").write_text(html, encoding="utf-8")
     return tmpdir
 
@@ -254,10 +260,14 @@ def main() -> None:
     if not image_path.exists():
         raise SystemExit(f"Image not found: {image_path}")
 
-    # Validate image loadable
-    Image.open(image_path).verify()
-
-    site_dir = build_site(image_path)
+    # Validate image or video
+    is_video = any(image_path.suffix.lower() == ext for ext in [".mp4", ".webm", ".avi", ".gif"])
+    
+    if is_video:
+        site_dir = build_site(image_path, is_video=True)
+    else:
+        Image.open(image_path).verify()
+        site_dir = build_site(image_path)
     try:
         serve(site_dir, args.port)
     finally:

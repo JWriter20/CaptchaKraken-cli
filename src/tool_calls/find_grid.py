@@ -46,6 +46,11 @@ def find_grid(image_path: str, debug_manager=None, slant_to_try: Optional[float]
                     center_offset = abs((p1 + p2) / 2.0 - total_dim / 2.0) / total_dim
                     # Scale penalty: a 3x3 grid cell should be roughly 1/3 of the image
                     scale_err = abs(d - total_dim / 3.0) / total_dim
+                    
+                    # Strict spacing check: if the spacing is completely off, it's not a grid
+                    if scale_err > 0.20: # 20% tolerance for cell size deviation - relaxed
+                        continue
+                        
                     score = center_offset * 1000 + scale_err * 500
                     candidates[2].append(([p1, p2], score, d, min(l1, l2), [c1, c2]))
                 
@@ -60,6 +65,11 @@ def find_grid(image_path: str, debug_manager=None, slant_to_try: Optional[float]
                             center_offset = abs((p1 + p3) / 2.0 - total_dim / 2.0) / total_dim
                             # Scale penalty: a 4x4 grid cell should be roughly 1/4 of the image
                             scale_err = abs(((d1 + d2) / 2.0) - total_dim / 4.0) / total_dim
+                            
+                            # Strict spacing check for 4x4
+                            if scale_err > 0.20: # 20% tolerance - relaxed for 4x4 as it can be more irregular
+                                continue
+                                
                             score = rel_diff * 100 + center_offset * 1000 + scale_err * 500
                             candidates[3].append(([p1, p2, p3], score, (d1 + d2) / 2.0, min(l1, l2, l3), [c1, c2, c3]))
 
@@ -101,6 +111,14 @@ def find_grid(image_path: str, debug_manager=None, slant_to_try: Optional[float]
                                 # Penalize non-square grids and extreme slants
                                 # Also prefer 4x4 grids over 3x3 if both are found
                                 s_diff = abs(hd - vd) / max(hd, vd)
+                                if s_diff > 0.25: # Cells must be reasonably square for a real grid
+                                    continue
+                                
+                                grid_width = size * vd
+                                grid_height = size * hd
+                                if grid_width < w * 0.5 or grid_height < h * 0.5:
+                                    continue
+                                    
                                 size_bonus = (4 - size) * 100 # Penalty for size 3
                                 score = hs_sc + vs_sc + s_diff * 1000 + abs(slant) * 500 + size_bonus
                                 if score < min_run_score:
@@ -135,11 +153,16 @@ def find_grid(image_path: str, debug_manager=None, slant_to_try: Optional[float]
     if not best_grid or min_score > 100:
         for slant in [0.015, -0.015]:
             grid, score = run_detection(slant, threshold=3.0, color_thr=10.0)
-            if grid and score < min_score:
-                min_score, best_grid = score, grid
-                best_slant = slant
+            # Favor 4x4 if scores are close, otherwise trust score
+            if grid:
+                if len(grid) == 16 and best_grid and len(best_grid) == 9 and score < min_score * 1.5:
+                     min_score, best_grid = score, grid
+                     best_slant = slant
+                elif score < min_score:
+                    min_score, best_grid = score, grid
+                    best_slant = slant
 
-    if not best_grid: return None
+    if not best_grid or min_score > 500: return None
     
     # Final debug output: Save image with detected grid boxes
     if debug_manager and getattr(debug_manager, 'enabled', False):
@@ -291,16 +314,35 @@ def _get_candidate_lines(img_lab, axis, slant, threshold):
     # Cluster nearby candidate lines and pick the best one from each cluster
     candidates.sort(key=lambda x: x[0])
     final = []
+    if not candidates: return [], []
+    
     curr = [candidates[0]]
     for i in range(1, len(candidates)):
         if candidates[i][0] - curr[-1][0] < 5:
             curr.append(candidates[i])
         else:
-            best = max(curr, key=lambda x: x[1])
-            final.append((sum(c[0] for c in curr)/len(curr), best[1], best[2]))
+            # Thickness check:
+            # A valid grid line shouldn't be too thick.
+            # If the cluster spans more than X pixels, it's likely a background region or box.
+            cluster_start = curr[0][0]
+            cluster_end = curr[-1][0]
+            thickness = cluster_end - cluster_start
+            
+            # Grid lines are typically 2-6 pixels wide. Allow up to 25 to be safe but exclude large areas.
+            if thickness < 25: 
+                best = max(curr, key=lambda x: x[1])
+                final.append((sum(c[0] for c in curr)/len(curr), best[1], best[2]))
+            
             curr = [candidates[i]]
-    best = max(curr, key=lambda x: x[1])
-    final.append((sum(c[0] for c in curr)/len(curr), best[1], best[2]))
+            
+    # Last cluster
+    cluster_start = curr[0][0]
+    cluster_end = curr[-1][0]
+    thickness = cluster_end - cluster_start
+    if thickness < 25:
+        best = max(curr, key=lambda x: x[1])
+        final.append((sum(c[0] for c in curr)/len(curr), best[1], best[2]))
+        
     return final, candidates
 
 def detect_selected_cells(image_path, grid_boxes, debug_manager=None):
