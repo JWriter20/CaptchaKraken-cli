@@ -29,6 +29,7 @@ from .action_types import (
     CaptchaAction,
     ClickAction,
     DoneAction,
+    DragAction,
     WaitAction,
 )
 from .image_processor import ImageProcessor
@@ -40,6 +41,11 @@ from .tool_calls.find_grid import (
 )
 
 DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
+
+# Half-size (0–1 fraction) of the click/drag target box built around each point
+# the model returns. The TS solver clicks the box center, so this only sets how
+# much positional slack executeClick has; ~1.2% ≈ ±6px on a 512px challenge.
+_PIXEL_BOX_HALF = float(os.getenv("CAPTCHA_PIXEL_BOX_HALF", "0.012"))
 
 
 class UnsupportedCaptchaError(Exception):
@@ -168,9 +174,52 @@ class CaptchaSolver:
                     ],
                 )
 
-        # Only grids and checkboxes are supported. Everything else (click
-        # puzzles, drag puzzles, etc.) is out of scope for this LoRA.
+        # Not a grid or checkbox → a click/drag/pixel puzzle. The full-puzzle
+        # LoRA is trained on all of these, so route the image to the pixel
+        # action path rather than bailing. (Video challenges are skipped
+        # upstream by the caller before they reach the solver, so anything here
+        # is a still-image puzzle worth attempting.)
+        actions = self._solve_pixel(cv_image_path)
+        if actions:
+            return actions
+
+        # The model returned nothing usable (blank/unrendered frame or a truly
+        # un-actionable image). Surface as unsupported so the caller fails fast
+        # instead of clicking nothing.
         raise UnsupportedCaptchaError("Cannot solve this kind of captcha")
+
+    def _solve_pixel(
+        self, image_path: str
+    ) -> List[Union[ClickAction, DragAction]]:
+        """Turn the model's normalized 0–1 click/drag actions into ClickAction /
+        DragAction bboxes. Each point becomes a small box centered on it (the TS
+        solver clicks the box center)."""
+        raw_actions = self.planner.get_pixel_actions(image_path)
+        R = _PIXEL_BOX_HALF
+        clamp = lambda v: min(max(v, 0.0), 1.0)
+
+        def box(cx: float, cy: float) -> List[float]:
+            return [clamp(cx - R), clamp(cy - R), clamp(cx + R), clamp(cy + R)]
+
+        out: List[Union[ClickAction, DragAction]] = []
+        for a in raw_actions:
+            if a.get("kind") == "click":
+                boxes = [box(x, y) for (x, y) in a.get("points", [])]
+                if boxes:
+                    out.append(
+                        ClickAction(action="click", target_bounding_boxes=boxes)
+                    )
+            elif a.get("kind") == "drag":
+                sx, sy = a["src"]
+                dx, dy = a["dst"]
+                out.append(
+                    DragAction(
+                        action="drag",
+                        source_bounding_box=box(sx, sy),
+                        target_bounding_box=box(dx, dy),
+                    )
+                )
+        return out
 
     # Back-compat alias.
     def solveVideo(self, *args, **kwargs):

@@ -34,6 +34,34 @@ If no tiles match the description (e.g., they have all been cleared or none were
 Return JSON Array: [list of cell numbers (1-{total})]"""
 
 
+# Non-grid click/drag puzzles. MUST stay byte-identical to
+# src/synthetic/reasoning/instructions.py::ACTION_INSTRUCTION in the finetune
+# repo — that is the exact prompt the LoRA was trained (and graded) on. Drift
+# here silently degrades every click/drag puzzle. Coordinates come back on a
+# 0–1000 scale; the solver converts them to 0–1 bboxes.
+PIXEL_ACTION_PROMPT = (
+    "Your task is to solve the captcha. Read the instruction at the top of the image carefully.\n\n"
+    "Look at the puzzle and decide what action solves it. All coordinates you return must be on a "
+    "normalized 0–1000 image scale (top-left = (0, 0), bottom-right = (1000, 1000)).\n\n"
+    "Choose ONE response:\n\n"
+    "FOR CLICK PUZZLES:\n"
+    "  Identify every position you need to click and emit them as a list of points:\n"
+    "  → \"action\": { \"action\": \"click\", \"points\": [[x1, y1], [x2, y2], ...] }\n\n"
+    "FOR DRAG PUZZLES:\n"
+    "  Drag ONE item at a time. The source position is the centroid of the piece you are picking up; "
+    "the destination position is where it should end up. If multiple drags are needed, drag the topmost "
+    "item first.\n"
+    "  → \"output\": [{ \"Action\": \"simulate_drag\", "
+    "\"SourceDescription\": \"...\", \"SourcePosition\": { \"x\": 1-1000, \"y\": 1-1000 }, "
+    "\"DestinationDescription\": \"...\", \"EstimatedPosition\": { \"x\": 1-1000, \"y\": 1-1000 } }]\n\n"
+    "Respond ONLY with JSON:\n"
+    "{\n"
+    "  \"action\": { ... }\n"
+    "  // OR \"output\": [ ... ]\n"
+    "}"
+)
+
+
 class ActionPlanner:
     """Thin client for the vLLM `captcha` LoRA."""
 
@@ -214,4 +242,94 @@ class ActionPlanner:
             except (TypeError, ValueError):
                 continue
         self._log(f"grid selection -> {out}")
+        return out
+
+    def get_pixel_actions(self, image_path: str) -> List[Dict[str, Any]]:
+        """Solve a non-grid click/drag puzzle.
+
+        Sends the trained action prompt + image, parses the model's JSON, and
+        returns a list of normalized actions with all coordinates on a 0–1
+        scale:
+
+          {"kind": "click", "points": [(x, y), ...]}
+          {"kind": "drag",  "src": (x, y), "dst": (x, y)}
+
+        Returns [] if the model produced nothing usable. The solver turns these
+        into ClickAction / DragAction bboxes.
+        """
+        raw = self._chat_with_image(PIXEL_ACTION_PROMPT, image_path, max_tokens=256)
+        data = self._parse_json(raw)
+        actions = self._normalize_pixel(data)
+        self._log(f"pixel actions -> {actions}")
+        return actions
+
+    @staticmethod
+    def _normalize_pixel(data: Any) -> List[Dict[str, Any]]:
+        """Map the model's 0–1000 click/drag JSON to 0–1 normalized actions.
+
+        Tolerant of the two trained shapes plus a few near-misses:
+          click: {"action": {"action": "click", "points": [[x, y], ...]}}
+                 or top-level {"points": [...]} / {"action": {"points": [...]}}
+          drag:  {"output": [{"Action": "simulate_drag",
+                              "SourcePosition": {x, y},
+                              "EstimatedPosition": {x, y}}, ...]}
+        """
+        def norm_xy(x: Any, y: Any) -> Optional[tuple]:
+            try:
+                fx, fy = float(x) / 1000.0, float(y) / 1000.0
+            except (TypeError, ValueError):
+                return None
+            if not (0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0):
+                # Some outputs use 0–1 already; accept those too.
+                if 0.0 <= float(x) <= 1.0 and 0.0 <= float(y) <= 1.0:
+                    fx, fy = float(x), float(y)
+                else:
+                    fx, fy = min(max(fx, 0.0), 1.0), min(max(fy, 0.0), 1.0)
+            return (fx, fy)
+
+        out: List[Dict[str, Any]] = []
+        if not isinstance(data, dict):
+            return out
+
+        # ---- drag: {"output": [ {simulate_drag ...}, ... ]} ----
+        drags = data.get("output")
+        if isinstance(drags, list) and drags:
+            for d in drags:
+                if not isinstance(d, dict):
+                    continue
+                sp = d.get("SourcePosition") or {}
+                ep = d.get("EstimatedPosition") or d.get("DestinationPosition") or {}
+                src = norm_xy(sp.get("x"), sp.get("y")) if isinstance(sp, dict) else None
+                dst = norm_xy(ep.get("x"), ep.get("y")) if isinstance(ep, dict) else None
+                if src and dst:
+                    out.append({"kind": "drag", "src": src, "dst": dst})
+            if out:
+                return out
+
+        # ---- click: {"action": {"action":"click","points":[...]}} ----
+        action = data.get("action")
+        points = None
+        if isinstance(action, dict):
+            points = action.get("points")
+            # single drag emitted under "action"
+            if points is None and action.get("action") == "drag":
+                src = norm_xy(*(action.get("source") or (None, None)))
+                dst = norm_xy(*(action.get("target") or (None, None)))
+                if src and dst:
+                    return [{"kind": "drag", "src": src, "dst": dst}]
+        if points is None:
+            points = data.get("points")
+        if isinstance(points, list) and points:
+            pts = []
+            for p in points:
+                if isinstance(p, (list, tuple)) and len(p) >= 2:
+                    xy = norm_xy(p[0], p[1])
+                elif isinstance(p, dict):
+                    xy = norm_xy(p.get("x"), p.get("y"))
+                else:
+                    xy = None
+                if xy:
+                    pts.append(xy)
+            if pts:
+                out.append({"kind": "click", "points": pts})
         return out
