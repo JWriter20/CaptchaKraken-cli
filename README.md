@@ -1,7 +1,14 @@
+> # ⚠️ DEPRECATED — moved into the CaptchaKraken monorepo
+>
+> This standalone repo is no longer maintained. Its detection + planning core
+> now lives in the **`python/`** package of the unified monorepo:
+> **https://github.com/JWriter20/CaptchaKraken** (PyPI: `captchakraken`).
+> Use that repo for all new work; this one is archived read-only.
+
 # CaptchaKraken CLI
 
 The detection + planning core behind
-[CaptchaKraken](https://github.com/JWriter20/PlaywrightCaptchaKrakenJS). Given a
+[CaptchaKraken](https://github.com/JWriter20/CaptchaKraken). Given a
 screenshot of a captcha challenge, it locates the image grid, asks a fine-tuned
 **Qwen3.5-9B** vision LoRA which tiles to click, and emits the click plan the
 browser solver replays.
